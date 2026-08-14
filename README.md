@@ -6,6 +6,13 @@ LifeSub（中文名：旁白）是一个本地优先的个人记忆系统。它�
 
 LifeSub 由 goldenwave 与 Malow 产品协同打造，可作为 Malow 生态插件，也面向其他 Agent 产品提供通用能力。长期方向是“可穿戴录音硬件 + 桌面与移动伴侣 + 个人记忆核心 + Agent 插件生态”；首版坚持软件先行。
 
+## 生态关系
+
+- [GoldenWave](https://github.com/TheGoldenWave/goldenwave)：负责将 LifeSub 中经用户选择的记忆候选治理为可审计、可撤回、可跨 Agent 使用的长期上下文。
+- [malow / 吗喽](https://github.com/TheGoldenWave/malow)：计划通过 LifeSub 插件在 Project / Matter 中搜索和引用会议记忆，并在用户确认后把值得长期沉淀的内容提交给 GoldenWave。
+
+三个项目保持独立源码仓库和数据权威：LifeSub 管声音与情境记忆，malow 管当前项目工作，GoldenWave 管经过治理的长期上下文。
+
 ## 当前状态
 
 项目处于产品与架构设计阶段。已经确认的首版方向：
@@ -35,4 +42,3 @@ LifeSub 由 goldenwave 与 Malow 产品协同打造，可作为 Malow 生态插�
 ## License
 
 许可证尚未确定。在许可证明确之前，不授予复制、修改或分发本仓库内容的许可。
-

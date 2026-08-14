@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Local LifeSub data
+.lifesub/
+data/
+recordings/
+
+# Design scratch space
+.superpowers/
+work/
+outputs/
+
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# JavaScript / TypeScript
+node_modules/
+dist/
+coverage/
+
+# Logs
+*.log
+

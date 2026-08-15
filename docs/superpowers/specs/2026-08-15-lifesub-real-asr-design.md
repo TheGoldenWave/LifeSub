@@ -499,7 +499,7 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 
 ### 量化验收 fixture
 
-发布仓库保存小型、可再分发的固定 WAV fixture 及 manifest，manifest 固定文件 SHA-256、人工 transcript、语言、标注语音区间、关键短语和许可。至少包含 20 至 40 秒普通话、英语和中英混合各一条。
+发布仓库保存小型、可再分发的固定 WAV fixture 及 manifest，manifest 固定文件 SHA-256、人工 transcript、语言、标注语音区间、关键短语和许可。至少包含 20 至 40 秒普通话、英语和中英混合各一条。性能 Gate 另包含确定性生成并提交 hash 的 5 分钟 WAV：按 `zh.wav -> en.wav -> zh-en.wav -> 500 ms 16 kHz mono silence` 顺序循环拼接，达到 300 秒后在 frame 边界截断；生成器版本、源 fixture hash 和结果 hash 全部写入 manifest。
 
 指标计算协议固定如下：
 
@@ -512,6 +512,7 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 
 - SenseVoice 普通话 fixture 的归一化 CER 不高于 20%。
 - Whisper 英语 fixture 的归一化 WER 不高于 20%；中英混合关键短语召回率为 100%。
+- Qwen3-ASR 0.6B 必须运行 `qwen3-0.6b-zh`、`qwen3-0.6b-en`、`qwen3-0.6b-zh-en`，普通话 CER 与英语 WER 均不高于 20%，混合关键短语召回率为 100%。
 - Segment 起止相对人工标注的中位误差不高于 500 ms，最大误差不高于 1.5 秒。
 - enqueue 命令在 Audio Chunk 提交后 500 ms 内返回 Job；ASR 在独立 blocking worker 执行。
 - Playwright 运行 ASR 时 100 ms UI heartbeat 的 P95 漂移不高于 250 ms。
@@ -531,8 +532,8 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 
 V0.2 只有在以下证据全部存在时才完成：
 
-1. SenseVoice 与 Whisper 均通过固定 fixture 的 CER/WER、关键短语和时间误差阈值，不能仅以非空文本通过。
-2. 两种结果都包含稳定时间范围、来源和 Provider Receipt。
+1. SenseVoice、Whisper 与 Qwen3-ASR 0.6B 均通过固定 fixture 的 CER/WER、关键短语和时间误差阈值，Qwen 的三个固定 scenario ID 不得缺失，不能仅以非空文本通过。
+2. 三种 Provider 结果都包含稳定时间范围、来源和 Provider Receipt。
 3. 设置切换实际改变后续 Job 的 Provider 和模型。
 4. 重转写创建新 revision，旧 revision 未被覆盖。
 5. 下载、hash 错误、模型缺失、音频损坏、取消和重启恢复均通过测试。

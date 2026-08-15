@@ -640,13 +640,15 @@ git commit -m "feat: add fenced ASR jobs"
 
 Assert one transaction inserts Receipt, Revision, revision_receipts, Segments, FTS rows, compatible `start_ms/end_ms`, and `succeeded`. Force each insert to fail and assert no partial Evidence is visible.
 
+Add a direct Core enqueue test that passes a `ModelLookup` entry with `executable = false` and asserts `model_capability_unavailable`, zero `asr_jobs` inserts, and no Provider construction. This test must call the service/job API directly, not a desktop command.
+
 - [ ] **Step 2: Write cancellation and stale-generation race tests**
 
 Cancel before the transaction: no revision. Cancel after commit: revision remains and Job is succeeded. A stale generation cannot insert a receipt.
 
 - [ ] **Step 3: Implement the service orchestration**
 
-The service verifies chunk hash, resolves exact ASR/VAD artifacts, decodes audio, transcribes windows, rejects empty results, and publishes in `BEGIN IMMEDIATE` with fencing and `cancel_requested_at IS NULL`.
+The service verifies executable model capability before inserting or claiming a Job, then verifies chunk hash, resolves exact ASR/VAD artifacts, decodes audio, transcribes windows, rejects empty results, and publishes in `BEGIN IMMEDIATE` with fencing and `cancel_requested_at IS NULL`.
 
 - [ ] **Step 4: Preserve complete time provenance**
 
@@ -816,6 +818,7 @@ git commit -m "feat: add ASR jobs and retranscription"
 
 - Create/Modify: `src-tauri/src/asr_runtime_test.rs`
 - Create/Modify: `tests/fixtures/asr/fixture-manifest.json`
+- Create/Modify: `tests/fixtures/asr/qwen-perf-5m.wav`
 - Create: `src-tauri/src/bin/lifesub-asr-gate.rs`
 - Create: `scripts/verify-asr-gate.sh`
 - Create: `scripts/asr-gate-scope.txt`
@@ -833,6 +836,8 @@ Required Qwen3-ASR 0.6B scenario IDs are `qwen3-0.6b-zh`, `qwen3-0.6b-en`, and `
 
 Qwen3-ASR 1.7B can change to installable only when Gate evidence records Apple Silicon chip, 16 GB or greater unified memory, macOS 14+, exact runtime/model/fixture hashes, Mandarin CER `<= 20%`, English WER `<= 20%`, mixed-language key-phrase recall `= 100%`, no quality metric worse than 0.6B on the same fixtures, five-minute RTF `<= 1.0`, and peak RSS `<= 6 GiB`.
 
+The five-minute performance input is `tests/fixtures/asr/qwen-perf-5m.wav`, generated deterministically by cycling `zh.wav`, `en.wav`, `zh-en.wav`, then 500 ms of 16 kHz mono silence until exactly 300 seconds and truncating only on a PCM frame boundary. The fixture manifest records generator version, ordered source hashes, final SHA-256, license inheritance, sample rate, channels, and exact duration. It is included in `scripts/asr-gate-scope.txt`; the Gate rejects a locally regenerated file whose hash differs.
+
 `scripts/verify-asr-gate.sh` must:
 
 1. Fetch/verify the native archive.
@@ -844,7 +849,7 @@ Qwen3-ASR 1.7B can change to installable only when Gate evidence records Apple S
 - [ ] **Step 3: Commit the Gate implementation before generating evidence**
 
 ```bash
-git add src-tauri/src/asr_runtime_test.rs src-tauri/src/bin/lifesub-asr-gate.rs tests/fixtures/asr/fixture-manifest.json tests/fixtures/asr/zh.wav tests/fixtures/asr/en.wav tests/fixtures/asr/zh-en.wav scripts/verify-asr-gate.sh scripts/asr-gate-scope.txt
+git add src-tauri/src/asr_runtime_test.rs src-tauri/src/bin/lifesub-asr-gate.rs tests/fixtures/asr/fixture-manifest.json tests/fixtures/asr/zh.wav tests/fixtures/asr/en.wav tests/fixtures/asr/zh-en.wav tests/fixtures/asr/qwen-perf-5m.wav scripts/verify-asr-gate.sh scripts/asr-gate-scope.txt
 git commit -m "test: add real local ASR gate"
 ```
 
@@ -999,7 +1004,7 @@ After this evidence/docs commit, run `scripts/verify-asr-gate.sh --verify-existi
 
 ## Final Completion Audit
 
-- [ ] SenseVoice and Whisper both execute real local inference.
+- [ ] SenseVoice, Whisper, and Qwen3-ASR 0.6B all execute real local inference; Qwen scenario IDs `qwen3-0.6b-zh`, `qwen3-0.6b-en`, and `qwen3-0.6b-zh-en` pass.
 - [ ] Settings selection changes the next Job's persisted provider/model snapshot.
 - [ ] Model downloads are hashed, safely extracted, versioned, recoverable, and removable.
 - [ ] Audio is immutable, re-hashed before ASR, decoded only for declared formats, and timestamped correctly.

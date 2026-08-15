@@ -12,3 +12,6 @@
 - 2026-08-15：规格三审发现 claim 与 `preparing` 状态之间存在崩溃窗口，且 boot ID 恢复隐含单实例假设；设计改为持有进程级 `asr-worker.lock`，并在同一 CAS 中完成 claim、attempt 递增和状态切换。
 - 2026-08-15：规格四审发现 lease 过期 Worker 可能在被接管后发布结果；设计增加 claim_generation fencing，所有续租、状态转换和 Evidence 成功事务必须校验 claimed_by 与 generation。
 - 2026-08-15：实施计划首审发现 `cargo test --exact` 可能零测试通过、Playwright 无法证明 native ASR、native runtime archive 未校验和 evidence commit 自失效等问题；计划已增加完整测试路径、verified archive、production desktop acceptance harness、单一 real-model Gate、固定 digest scope 和先提交代码后生成 evidence 的闭环。
+- 2026-08-15：仅设置 `SHERPA_ONNX_ARCHIVE_DIR` 不能阻止 `sherpa-onnx-sys` 复用 `target/sherpa-onnx-prebuilt`。Task 1 增加持锁 wrapper，每次原子隔离旧 prebuilt、强制 scoped rebuild，并通过 PID/mtime 回收 stale lock。
+- 2026-08-15：sherpa native API 报告 8 位 Git SHA，不能伪装成完整 commit。实现分别保存 observed SHA 与 pinned full SHA，并使用非 panic 的 typed validation。
+- 2026-08-15：代码质量审查留下 Minor：`with-sherpa-runtime.sh` 调用 fetcher 时应为脚本路径加引号，以兼容仓库路径包含空格；当前工作区路径不触发，后续维护时处理。

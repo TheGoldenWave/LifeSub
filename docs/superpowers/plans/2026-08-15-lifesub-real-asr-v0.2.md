@@ -80,6 +80,8 @@
 - Create `THIRD_PARTY_NOTICES.md`.
 - Create `output/asr-v0.2/verification.md` and screenshots after final verification.
 - Create `scripts/fetch-sherpa-runtime.sh`: verified native runtime archive fetch.
+- Create `scripts/with-sherpa-runtime.sh`: locked, cache-isolated wrapper for native Cargo commands.
+- Create `scripts/fetch-sherpa-runtime.test.sh` and `scripts/with-sherpa-runtime.test.sh`: archive, cache, lock, and concurrency regressions.
 - Create `scripts/verify-asr-gate.sh`: real-model Gate wrapper that rejects missing tests/results.
 - Create `scripts/asr-gate-scope.txt`: explicit version-controlled source paths included in the Gate digest.
 - Create `scripts/verify-desktop-asr.sh`: production app launch, cancellation, crash recovery, and packaged smoke harness.
@@ -98,6 +100,10 @@
 - Create: `src-tauri/src/asr/mod.rs`
 - Modify: `src-tauri/src/lib.rs`
 - Test: `src-tauri/src/asr_runtime_test.rs`
+- Create: `scripts/fetch-sherpa-runtime.sh`
+- Create: `scripts/with-sherpa-runtime.sh`
+- Create: `scripts/fetch-sherpa-runtime.test.sh`
+- Create: `scripts/with-sherpa-runtime.test.sh`
 
 - [ ] **Step 1: Write a failing runtime version test**
 
@@ -146,16 +152,16 @@ Size: 19,862,746 bytes
 SHA-256: 339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44
 ```
 
-The script writes outside the repository, verifies size/hash, and prints the directory to pass as `SHERPA_ONNX_ARCHIVE_DIR`. All release builds must use the verified local archive; the crate build script's unverified network fallback is not allowed for a Gate build.
+The fetch script writes outside the repository, verifies size/hash, and prints the archive directory only. Native commands must run through `scripts/with-sherpa-runtime.sh`, which holds an inter-process lock, honors `CARGO_TARGET_DIR`, quarantines stale Cargo prebuilts, forces `sherpa-onnx-sys` to rebuild from the verified archive, and cleans its own quarantine. Direct native Cargo commands are not a valid Gate because the upstream build script may reuse an older extracted cache.
 
 - [ ] **Step 4: Run focused and baseline builds**
 
 Run:
 
 ```bash
-SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime asr_runtime_test::sherpa_runtime_reports_the_pinned_build -- --exact
+scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime asr_runtime_test::sherpa_runtime_reports_the_pinned_build -- --exact
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
-SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" cargo check --manifest-path src-tauri/Cargo.toml --features desktop
+scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml --features desktop
 ```
 
 Expected: all PASS. Record native build issues in `.artifacts/notes.md` before changing versions.
@@ -163,7 +169,7 @@ Expected: all PASS. Record native build issues in `.artifacts/notes.md` before c
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/src/asr/mod.rs src-tauri/src/asr_runtime_test.rs src-tauri/src/lib.rs scripts/fetch-sherpa-runtime.sh
+git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/src/asr/mod.rs src-tauri/src/asr_runtime_test.rs src-tauri/src/lib.rs scripts/fetch-sherpa-runtime.sh scripts/with-sherpa-runtime.sh scripts/fetch-sherpa-runtime.test.sh scripts/with-sherpa-runtime.test.sh
 git commit -m "build: add static local ASR runtime"
 ```
 
@@ -689,8 +695,8 @@ Run:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
-SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" cargo test --manifest-path src-tauri/Cargo.toml --features desktop commands_test
-SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" cargo check --manifest-path src-tauri/Cargo.toml --features desktop
+scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features desktop commands_test
+scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml --features desktop
 ```
 
 ```bash
@@ -918,9 +924,9 @@ npm test
 npm run build
 npm run test:e2e
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
-SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime
-SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" cargo test --manifest-path src-tauri/Cargo.toml --features desktop commands_test
-SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" cargo check --manifest-path src-tauri/Cargo.toml --features desktop
+scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime
+scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features desktop commands_test
+scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml --features desktop
 scripts/verify-asr-gate.sh
 scripts/verify-desktop-asr.sh target
 ```
@@ -945,7 +951,7 @@ Expected: no `console.log`; no model weights, user audio, API keys, or private p
 Run:
 
 ```bash
-SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" npm run tauri -- build --features desktop
+scripts/with-sherpa-runtime.sh npm run tauri -- build --features desktop
 otool -L src-tauri/target/release/bundle/macos/LifeSub.app/Contents/MacOS/lifesub
 codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/LifeSub.app
 scripts/verify-desktop-asr.sh dmg

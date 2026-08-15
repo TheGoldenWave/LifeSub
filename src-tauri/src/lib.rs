@@ -1,3 +1,5 @@
+#[cfg(feature = "asr-runtime")]
+pub mod asr;
 pub mod catalog;
 pub mod domain;
 pub mod service;
@@ -8,6 +10,8 @@ mod commands;
 #[cfg(feature = "desktop")]
 use tauri::Manager;
 
+#[cfg(test)]
+mod asr_runtime_test;
 #[cfg(test)]
 mod catalog_test;
 #[cfg(test)]

@@ -77,7 +77,7 @@ impl Catalog {
             .query_row(
                 "SELECT integrity_state FROM chunks WHERE id = ?1",
                 [id],
-                |row| row.get::<_, String>(0).map(|value| parse_integrity(&value)),
+                |row| parse_integrity(&row.get::<_, String>(0)?),
             )
             .optional()
     }
@@ -93,7 +93,7 @@ impl Catalog {
                     let error_code = row.get::<_, Option<String>>(1)?;
                     let error_at = row.get::<_, Option<String>>(2)?;
                     Ok(ChunkDiagnostics {
-                        integrity_state: parse_integrity(&row.get::<_, String>(0)?),
+                        integrity_state: parse_integrity(&row.get::<_, String>(0)?)?,
                         error_code: error_code.as_deref().map(parse_asr_error_code),
                         error_at: error_at.as_deref().map(parse_time).transpose()?,
                     })
@@ -128,6 +128,35 @@ impl Catalog {
     pub fn fail_next_chunk_insert(&self) {
         self.fail_next_chunk_insert.store(true, Ordering::SeqCst);
     }
+
+    #[cfg(test)]
+    pub fn force_chunk_integrity(&self, id: &str, value: &str) -> rusqlite::Result<()> {
+        let connection = self.connection.lock().unwrap();
+        connection.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        let result = connection.execute(
+            "UPDATE chunks SET integrity_state = ?2 WHERE id = ?1",
+            params![id, value],
+        );
+        connection.execute_batch("PRAGMA ignore_check_constraints = OFF")?;
+        result.map(|_| ())
+    }
+
+    #[cfg(test)]
+    pub fn session_count(&self) -> rusqlite::Result<i64> {
+        self.connection
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+    }
+
+    #[cfg(test)]
+    pub fn persisted_session_state(&self, id: &str) -> rusqlite::Result<String> {
+        self.connection.lock().unwrap().query_row(
+            "SELECT state FROM sessions WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+    }
 }
 
 fn chunk_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioChunk> {
@@ -150,11 +179,19 @@ fn integrity_name(state: ChunkIntegrityState) -> &'static str {
     }
 }
 
-fn parse_integrity(value: &str) -> ChunkIntegrityState {
+fn parse_integrity(value: &str) -> rusqlite::Result<ChunkIntegrityState> {
     match value {
-        "corrupted" => ChunkIntegrityState::Corrupted,
-        "missing" => ChunkIntegrityState::Missing,
-        _ => ChunkIntegrityState::Available,
+        "available" => Ok(ChunkIntegrityState::Available),
+        "corrupted" => Ok(ChunkIntegrityState::Corrupted),
+        "missing" => Ok(ChunkIntegrityState::Missing),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unknown chunk integrity state",
+            )),
+        )),
     }
 }
 

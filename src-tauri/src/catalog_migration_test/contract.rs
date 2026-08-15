@@ -458,7 +458,7 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
             "asr_settings",
             &[
                 "CHECK(singleton_id = 1)",
-                "CHECK(provider IN ('sense_voice', 'whisper'))",
+                "CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr'))",
                 "CHECK(num_threads >= 1)",
                 "CHECK(vad_enabled IN (0, 1))",
                 "CHECK(auto_transcribe_imports IN (0, 1))",
@@ -467,7 +467,7 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
         (
             "model_installations",
             &[
-                "CHECK(provider IN ('sense_voice', 'whisper', 'vad'))",
+                "CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr', 'vad'))",
                 "CHECK(state IN ('ready', 'corrupt', 'deleting'))",
             ][..],
         ),
@@ -480,7 +480,7 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
         (
             "asr_jobs",
             &[
-                "CHECK(provider IN ('sense_voice', 'whisper'))",
+                "CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr'))",
                 "CHECK(state IN ('queued', 'blocked_model', 'preparing', 'transcribing', 'succeeded', 'failed', 'cancelled'))",
                 "CHECK(max_attempts BETWEEN 1 AND 10)",
             ][..],
@@ -501,4 +501,20 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
             );
         }
     }
+}
+
+#[test]
+fn fresh_v2_accepts_qwen3_asr_settings() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::migrate(&mut connection).unwrap();
+
+    connection
+        .execute(
+            "INSERT INTO asr_settings(
+           singleton_id, provider, model_id, language, num_threads, vad_enabled,
+           auto_transcribe_imports, provider_options_json, updated_at
+         ) VALUES(1, 'qwen3_asr', 'qwen3-asr-0.6b', 'auto', 2, 1, 1, '{}', '2026-08-15T00:00:00Z')",
+            [],
+        )
+        .unwrap();
 }

@@ -296,3 +296,19 @@ fn sql_normalizer_preserves_escaped_string_literal_contents() {
         "check(value='It''s  A')"
     );
 }
+
+#[test]
+fn rejects_schema_with_missing_token_boundary() {
+    let (_directory, path, connection) = fresh_file_connection();
+    rewrite_schema_literal(
+        &connection,
+        "asr_settings",
+        "provider TEXT NOT NULL",
+        "provider TEXTNOT NULL",
+    );
+    drop(connection);
+
+    let mut reopened = Connection::open(path).unwrap();
+    let error = migrations::migrate(&mut reopened).unwrap_err();
+    assert!(error.to_string().contains("corrupt v2 catalog schema"));
+}

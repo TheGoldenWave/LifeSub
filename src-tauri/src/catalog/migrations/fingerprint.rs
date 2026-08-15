@@ -169,10 +169,10 @@ fn statement_named(sql: &str, name: &str) -> rusqlite::Result<String> {
         .filter(|statement| !statement.is_empty())
         .find(|statement| {
             let normalized = normalize_sql(statement);
-            normalized.starts_with(&format!("createtable{name}("))
-                || normalized.starts_with(&format!("createvirtualtable{name}"))
-                || normalized.starts_with(&format!("createuniqueindex{name}"))
-                || normalized.starts_with(&format!("createindex{name}"))
+            normalized.starts_with(&format!("create table {name}("))
+                || normalized.starts_with(&format!("create virtual table {name}"))
+                || normalized.starts_with(&format!("create unique index {name}"))
+                || normalized.starts_with(&format!("create index {name}"))
         })
         .map(str::to_owned)
         .ok_or_else(|| migration_error(&format!("missing schema contract for {name}")))
@@ -182,6 +182,7 @@ pub(super) fn normalize_sql(sql: &str) -> String {
     let mut normalized = String::with_capacity(sql.len());
     let mut characters = sql.chars().peekable();
     let mut in_literal = false;
+    let mut pending_whitespace = false;
     while let Some(character) = characters.next() {
         if in_literal {
             normalized.push(character);
@@ -195,9 +196,23 @@ pub(super) fn normalize_sql(sql: &str) -> String {
         } else if character == '\'' {
             in_literal = true;
             normalized.push(character);
-        } else if !character.is_ascii_whitespace() {
+            pending_whitespace = false;
+        } else if character.is_ascii_whitespace() {
+            pending_whitespace = true;
+        } else {
+            if pending_whitespace
+                && normalized.chars().last().is_some_and(is_token_character)
+                && is_token_character(character)
+            {
+                normalized.push(' ');
+            }
             normalized.extend(character.to_lowercase());
+            pending_whitespace = false;
         }
     }
     normalized
+}
+
+fn is_token_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }

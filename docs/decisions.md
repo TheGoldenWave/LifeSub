@@ -57,9 +57,18 @@
 - 决定：首版 Codex 插件连接本机 LifeSub Core，通过本地或仓库插件市场分发。
 - 延后：需要公网 MCP 与认证的公共 ChatGPT/Codex 插件。
 
+## D-011：契约先独立，最终演进为 `lifesubd`
+
+- 状态：已确认
+- 决定：当前采用过渡方案 C，先抽出不依赖 Tauri 的 `CoreRuntime` 与版本化 Local Tool API；目标架构 A 是由独立常驻本地服务 `lifesubd` 托管同一 Core。
+- 所有权：SQLite、录音状态、模型安装和 ASR Worker 只能由一个 Core 实例拥有。Tauri、DeepSeek Harness 与 ChatGPT Gateway 不得直接访问 SQLite、音频路径或模型目录。
+- 接入：Tauri Command、本机 Unix socket 和未来 MCP Gateway 都是同一工具契约的适配器，不得复制业务逻辑。
+- 生命周期：C 阶段退出 Tauri 进程仍会停止录音与处理；只有 A 阶段可承诺 UI 退出不影响后台任务。
+- 安全：daemon 不直接监听公网或局域网；ChatGPT 开发者模式通过独立、认证的 Gateway 映射 MCP。
+
 ## 待决事项
 
-- 技术栈与进程边界。
+- `lifesubd` 的 launchd 安装、升级与崩溃恢复细节。
 - 首选本地 ASR 模型和最低硬件要求。
 - 记忆 schema、敏感级别和授权生命周期。
 - 搜索与引用的精确工具契约。
@@ -67,4 +76,3 @@
 - Malow 插件接口。
 - MVP 的量化质量与性能指标。
 - 项目开源许可证。
-

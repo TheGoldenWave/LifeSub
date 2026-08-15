@@ -20,3 +20,4 @@
 - 2026-08-15：Task 2 最终质量复审发现 SQL normalizer 会丢失 token 边界，使 `TEXT NOT NULL` 与 `TEXTNOT NULL` 发生碰撞。修复必须先加入负向测试，再保留 token 边界或改用结构化 PRAGMA 校验。
 - 2026-08-16：Qwen 范围规格审查要求 Manifest 区分 `Installable` 与 `ExperimentalUnavailable`，并把 selectable/installable/executable 能力贯穿设置、下载、Core enqueue 与 Provider Factory。1.7B Gate 固定 Apple Silicon/16 GB/macOS 14+、CER/WER <= 20%、混合关键短语 100%、RTF <= 1.0、RSS <= 6 GiB，并使用确定性 300 秒 fixture。
 - 2026-08-16：Task 3 质量审查发现内部设置错误会形成第二套序列化错误码，且公开 Provider Receipt 字段可构造不可信 provenance。实现改为内部错误 exhaustive 映射到 `AsrErrorCode`，Receipt 仅能通过验证 draft/custom Deserialize 构造，并校验 hash、JSON、VAD identity 与时间顺序。
+- 2026-08-16：Agent MVP 架构采用 C -> A：先抽出 CoreRuntime 与版本化 Local Tool API，Tauri/Unix socket 仅作适配器；最终由 launchd `lifesubd` 托管。插件/Gateway 不得调用 Tauri Command、打开 SQLite 或读取内部路径。C 阶段退出 Tauri 进程仍会停止录音，不能提前宣称 daemon 生命周期。

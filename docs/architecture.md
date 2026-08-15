@@ -2,13 +2,13 @@
 
 ## 已选方案
 
-采用“本地核心服务 + 薄客户端”架构。LifeSub Core 是唯一的业务与数据真相来源；macOS App 和各 Agent 插件只负责交互、宿主适配与调用。
+采用“契约先独立、进程后独立”的本地核心服务 + 薄客户端架构。LifeSub Core 是唯一的业务与数据真相来源；macOS App 和各 Agent 插件只负责交互、宿主适配与调用。
 
 ```text
 macOS Menu Bar App
   |  system audio + microphone
   v
-LifeSub Core
+CoreRuntime（C 阶段由 Tauri 托管，A 阶段由 lifesubd 托管）
   |-- Capture and import
   |-- ASR provider router
   |-- Summary provider router
@@ -17,10 +17,10 @@ LifeSub Core
   |-- Privacy policy and audit log
   |-- GitHub sync
   |
-  |-- Local API / shared client SDK
-        |-- Codex MCP Server
-        |-- DeepSeek Harness Plugin
-        |-- Malow Plugin
+  |-- Versioned Local Tool API
+        |-- Tauri Adapter
+        |-- Unix Socket Adapter -> DeepSeek Harness
+        |-- Authenticated MCP Gateway -> ChatGPT developer mode
 ```
 
 ## 建议的代码边界
@@ -55,7 +55,7 @@ LifeSub/
 - ASR、摘要、同步和权限状态展示。
 - 音频文件导入。
 
-### LifeSub Core
+### LifeSub CoreRuntime
 
 - 管理录制任务和处理队列。
 - 统一调度本地或云端 ASR Provider。
@@ -64,6 +64,13 @@ LifeSub/
 - 执行敏感级别、调用方权限与审计策略。
 - 管理 GitHub 导出、加密、拉取、合并和冲突。
 - 对插件提供稳定的本地 API。
+- 独占 SQLite 写入、录音设备状态、模型安装与 ASR Worker；客户端不得绕过 Core。
+
+### 进程演进
+
+- C 阶段：Tauri 进程托管 CoreRuntime 和 Unix socket；关闭窗口可驻留菜单栏，但退出进程会停止录音与处理。
+- A 阶段：launchd 管理 `lifesubd`，Tauri 只通过版本化客户端访问 Core；进程宿主变化不改变工具契约。
+- ChatGPT Gateway 是单独的认证适配器，不把本机 daemon 端口暴露到网络。
 
 ### Provider 层
 
@@ -105,8 +112,7 @@ ASR 与摘要使用独立接口。每次处理任务记录：Provider、模型�
 ## 待定技术选型
 
 - macOS App 使用 SwiftUI/AppKit，还是采用跨平台桌面框架。
-- Core 的实现语言与进程通信协议。
+- Unix socket envelope、launchd 安装与 Gateway 认证的具体实现。
 - 本地 ASR 的首选模型与硬件要求。
 - 本地搜索使用 SQLite FTS、向量扩展或组合方案。
 - 音频格式、分段策略与长期压缩方案。
-

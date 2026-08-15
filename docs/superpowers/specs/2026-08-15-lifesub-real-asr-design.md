@@ -47,11 +47,15 @@ React UI
 ├── AsrJobStatus
 └── RetranscribeCommand
 
-Tauri Commands
+Core Application API
 ├── get/save_asr_settings
 ├── list/download/cancel/delete_asr_model
 ├── enqueue/cancel/retry_asr_job
 └── retranscribe_record
+
+Adapters
+├── Tauri Commands
+└── Versioned Local Tool API / Unix Socket
 
 Rust Core
 ├── asr/settings.rs          设置与校验
@@ -67,7 +71,9 @@ Rust Core
 └── asr/service.rs           事务编排与 revision 发布
 ```
 
-每个模块只有一个责任。UI 不拼装模型文件路径，Tauri Commands 不实现识别逻辑，Provider 不写数据库，Model Manager 不创建 Transcript Revision。
+每个模块只有一个责任。UI 不拼装模型文件路径，Tauri Commands 与 Local Tool API 不实现识别逻辑，Provider 不写数据库，Model Manager 不创建 Transcript Revision。`CoreRuntime` 是 Catalog、reconciliation、录音状态与 ASR Worker 的唯一运行时所有者；适配器不得自行打开 SQLite。
+
+Agent/IPC 边界遵循 `docs/superpowers/specs/2026-08-16-lifesub-local-tool-api-design.md`。当前 V0.2 采用 contract-first 的 C 阶段，未来 `lifesubd` 只替换进程宿主，不改变 Core 或工具语义。
 
 ## 5. 核心领域类型
 

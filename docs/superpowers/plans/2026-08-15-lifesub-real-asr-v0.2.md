@@ -39,6 +39,9 @@
 - Create `src-tauri/src/asr/qwen3_asr.rs`: sherpa-onnx Qwen3-ASR adapter and 1.7B capability Gate.
 - Create `src-tauri/src/asr/job.rs`: job state machine, singleton lock, claims, leases, fencing, cancellation.
 - Create `src-tauri/src/asr/service.rs`: job execution and atomic Receipt/Revision publication.
+- Create `src-tauri/src/core_runtime.rs`: single owner of Catalog, capture state, reconciliation, model manager, and ASR worker.
+- Create `src-tauri/src/tool_api.rs`: versioned transport-independent Local Tool API contract and handlers.
+- Create `src-tauri/src/local_ipc.rs`: current-user Unix socket adapter over `tool_api`.
 - Create `src-tauri/src/asr/model_lookup.rs`: minimal model lookup interface used by settings and the static manifest.
 - Create `src-tauri/src/acceptance.rs`: hidden desktop acceptance scenarios using the production event loop.
 - Create `src-tauri/src/bin/lifesub-asr-gate.rs`: single real-model quality Gate runner.
@@ -675,7 +678,7 @@ git add src-tauri/src/asr/service.rs src-tauri/src/asr_service_test.rs src-tauri
 git commit -m "feat: publish traceable ASR revisions"
 ```
 
-### Task 11: Expose Desktop Commands And Start The Worker
+### Task 11: Build The CoreRuntime And Versioned Local Tool API
 
 **Files:**
 
@@ -683,11 +686,15 @@ git commit -m "feat: publish traceable ASR revisions"
 - Modify: `src-tauri/src/lib.rs`
 - Create: `src-tauri/src/commands_test.rs`
 - Create: `src-tauri/src/desktop_api.rs`
+- Create: `src-tauri/src/core_runtime.rs`
+- Create: `src-tauri/src/tool_api.rs`
+- Create: `src-tauri/src/local_ipc.rs`
+- Create: `src-tauri/src/tool_api_test.rs`
 - Modify: `src-tauri/src/service.rs`
 
 - [ ] **Step 1: Write command contract tests**
 
-Cover `get_asr_settings`, `save_asr_settings`, `list_asr_models`, `download_asr_model`, `cancel_model_download`, `delete_asr_model`, `list_asr_jobs`, `cancel_asr_job`, `retry_asr_job`, and `retranscribe_record`. Assert `save_asr_settings`, `download_asr_model`, import auto-enqueue, retry, and retranscription reject Qwen3-ASR 1.7B with `model_capability_unavailable` while leaving the prior active setting and Job state unchanged. Put framework-independent handlers and DTO mapping in `desktop_api.rs`; Tauri commands remain thin wrappers.
+Define contract V1 handlers for ASR settings/models/jobs plus the MVP tools `start_capture`, `get_capture_status`, `stop_capture`, `get_asr_job_status`, `search_transcripts`, `resolve_evidence`, and `open_evidence`. Mutating tools require idempotency keys. Assert Qwen3-ASR 1.7B rejection, stable snake_case states/errors, no internal paths, identical direct-Core/Tauri/IPC semantics, and no duplicate capture/job on retries. Put business handlers in `tool_api.rs`; `desktop_api.rs`, Tauri commands, and Unix socket remain thin adapters.
 
 - [ ] **Step 2: Change import behavior in a failing test**
 
@@ -695,11 +702,11 @@ Cover `get_asr_settings`, `save_asr_settings`, `list_asr_models`, `download_asr_
 
 - [ ] **Step 3: Implement AppState services and worker startup**
 
-Acquire `asr-worker.lock` first. Only the lock holder may then run ModelManager, Chunk, and Job reconciliation, initialize the boot ID/cancellation registry/event emitter, and accept work. Run native inference on a blocking thread, never the UI thread.
+Construct one `CoreRuntime`. Acquire `asr-worker.lock` first; only the lock holder may then run ModelManager, Chunk, and Job reconciliation, initialize the boot ID/cancellation registry/event emitter, and accept work. Move Task 4's temporary AppState reconciliation call behind this ownership boundary. Tauri and IPC share the same runtime and never open their own writable Catalog. Run native inference on a blocking thread, never the UI thread.
 
 - [ ] **Step 4: Register commands and model/job events**
 
-Use stable event payloads for model progress and Job state. Frontend polling remains a fallback if an event is missed.
+Use stable event payloads for model progress and Job state. Frontend polling remains a fallback if an event is missed. Start a current-user Unix socket with contract version, bounded messages/timeouts, restrictive permissions, and no TCP listener. C-stage shutdown semantics remain tied to the Tauri process and must be documented.
 
 - [ ] **Step 5: Run Rust verification and commit**
 
@@ -712,8 +719,8 @@ scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml 
 ```
 
 ```bash
-git add src-tauri/src/commands.rs src-tauri/src/commands_test.rs src-tauri/src/desktop_api.rs src-tauri/src/lib.rs src-tauri/src/service.rs
-git commit -m "feat: expose desktop ASR commands"
+git add src-tauri/src/commands.rs src-tauri/src/commands_test.rs src-tauri/src/desktop_api.rs src-tauri/src/core_runtime.rs src-tauri/src/tool_api.rs src-tauri/src/tool_api_test.rs src-tauri/src/local_ipc.rs src-tauri/src/lib.rs src-tauri/src/service.rs
+git commit -m "feat: expose versioned local tool API"
 ```
 
 ### Chunk 3 Checkpoint
@@ -742,7 +749,7 @@ git commit -m "feat: expose desktop ASR commands"
 
 - [ ] **Step 1: Write failing client mapping tests**
 
-Assert exact Tauri command names and payloads for settings and model operations.
+Assert exact adapter mappings for settings and model operations. Frontend code may call Tauri invoke in phase C, but DTOs and error semantics must be generated from or mapped one-to-one with Tool Contract V1 rather than defining a second contract.
 
 - [ ] **Step 2: Write failing settings interaction tests**
 

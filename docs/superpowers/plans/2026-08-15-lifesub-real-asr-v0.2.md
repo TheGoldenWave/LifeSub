@@ -12,6 +12,7 @@
 
 - `docs/prd/lifesub-real-asr-v0.2/PRD.md`
 - `docs/superpowers/specs/2026-08-15-lifesub-real-asr-design.md`
+- `docs/superpowers/specs/2026-08-16-lifesub-local-tool-api-design.md`
 - `.claude/rules/common/coding-style.md`
 - `.claude/contexts/dev.md`
 - `docs/design/tokens/base.json`
@@ -26,7 +27,7 @@
 - Modify `src-tauri/src/lib.rs`: register ASR modules, tests, commands, and worker lifecycle.
 - Modify `src-tauri/src/domain.rs`: add chunk integrity and compatible ASR provenance fields.
 - Modify `src-tauri/src/catalog.rs`: delegate versioned migration and expose transactional ASR persistence.
-- Create `src-tauri/src/catalog/migrations.rs`: v0 fingerprint detection, fresh v2 creation, v1-to-v2 migration.
+- Create `src-tauri/src/catalog/migrations.rs`: schema fingerprinting, fresh v3 creation, and v1/v2-to-v3 migration.
 - Create `src-tauri/src/asr/mod.rs`: public ASR module boundary.
 - Create `src-tauri/src/asr/settings.rs`: tagged provider settings and validation.
 - Create `src-tauri/src/asr/manifest.rs`: pinned model/VAD manifests and artifact identity.
@@ -41,7 +42,9 @@
 - Create `src-tauri/src/asr/service.rs`: job execution and atomic Receipt/Revision publication.
 - Create `src-tauri/src/core_runtime.rs`: single owner of Catalog, capture state, reconciliation, model manager, and ASR worker.
 - Create `src-tauri/src/tool_api.rs`: versioned transport-independent Local Tool API contract and handlers.
+- Create `src-tauri/src/host_control.rs`: non-public Host Event subscription and open-intent claim/finish service.
 - Create `src-tauri/src/local_ipc.rs`: current-user Unix socket adapter over `tool_api`.
+- Create `src-tauri/src/runtime_lock.rs`: anchored full-Core ownership lock and socket lifecycle primitives.
 - Create `src-tauri/src/asr/model_lookup.rs`: minimal model lookup interface used by settings and the static manifest.
 - Create `src-tauri/src/acceptance.rs`: hidden desktop acceptance scenarios using the production event loop.
 - Create `src-tauri/src/bin/lifesub-asr-gate.rs`: single real-model quality Gate runner.
@@ -50,15 +53,22 @@
 
 ### Rust Tests And Fixtures
 
-- Create `src-tauri/src/catalog_migration_test.rs`: real v1 fixture migration and rollback tests.
+- Create `src-tauri/src/catalog_migration_test.rs`: fresh/v1/v2-to-v3, fingerprint, rollback and concurrency tests.
 - Create `src-tauri/src/asr_settings_test.rs`: provider-specific settings validation.
 - Create `src-tauri/src/asr_model_manager_test.rs`: interrupted download, integrity, extraction, reconciliation.
 - Create `src-tauri/src/asr_audio_test.rs`: declared formats, resampling, VAD partition and timestamps.
 - Create `src-tauri/src/asr_job_test.rs`: claim/lease/fencing/cancel/recovery/atomic publish tests.
 - Create `src-tauri/src/asr_runtime_test.rs`: opt-in real SenseVoice/Whisper/Qwen3-ASR fixture tests.
+- Create `src-tauri/src/host_control_test.rs`: requester/claimer separation, event replay, consent CAS and crash recovery tests.
 - Create `tests/fixtures/asr/fixture-manifest.json`: hashes, transcripts, intervals, phrases, licenses.
 - Create `tests/fixtures/asr/zh.wav`, `en.wav`, `zh-en.wav`: redistributable fixed speech samples.
 - Create `tests/fixtures/catalog/lifesub-v0.1.sqlite3`: pre-v2 migration fixture.
+- Create `tests/fixtures/catalog/lifesub-v0.2.sqlite3`: immutable pre-v3 migration fixture.
+- Create `tests/fixtures/tool-api/agent-v1/*.json`: exact Agent V1 request/response/error golden fixtures.
+- Create `tests/fixtures/tool-api/application-v1/*.json`: exact Application V1 request/response/error golden fixtures.
+- Create `tests/fixtures/tool-api/gateway/*.json`: MCP mapping and sanitizer contract fixtures only.
+- Create `tests/fixtures/tool-api/host-control-v1/*.json`: internal Host Event and claim/complete/uncertain golden frames.
+- Create `tests/fixtures/code-signing/*`: test-only authorized and forged ad-hoc signed peer fixtures.
 
 ### Frontend
 
@@ -89,6 +99,8 @@
 - Create `scripts/verify-asr-gate.sh`: real-model Gate wrapper that rejects missing tests/results.
 - Create `scripts/asr-gate-scope.txt`: explicit version-controlled source paths included in the Gate digest.
 - Create `scripts/verify-desktop-asr.sh`: production app launch, cancellation, crash recovery, and packaged smoke harness.
+- Create `scripts/verify-local-ipc.sh`: real host/client process orchestration including Agent-to-host confirmation flow.
+- Create `scripts/verify-packaged-peer-auth.sh`: release `.app` primary/secondary peer-authorization Gate.
 - Create `scripts/desktop-asr-scope.txt`: explicit version-controlled production/acceptance paths included in the desktop digest.
 - Update `docs/prd/lifesub-real-asr-v0.2/.artifacts/process.md` and `notes.md` after each chunk.
 
@@ -177,7 +189,7 @@ git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/src/asr/mod.rs src-t
 git commit -m "build: add static local ASR runtime"
 ```
 
-### Task 2: Introduce Versioned Catalog Migration
+### Task 2: Introduce Versioned Catalog v3 Migration
 
 **Files:**
 
@@ -185,6 +197,7 @@ git commit -m "build: add static local ASR runtime"
 - Modify: `src-tauri/src/catalog.rs`
 - Create: `src-tauri/src/catalog_migration_test.rs`
 - Create: `tests/fixtures/catalog/lifesub-v0.1.sqlite3`
+- Create: `tests/fixtures/catalog/lifesub-v0.2.sqlite3`
 - Modify: `src-tauri/src/lib.rs`
 
 - [ ] **Step 1: Write failing schema classification tests**
@@ -194,18 +207,19 @@ Cover:
 ```rust
 assert_eq!(classify_schema(&empty_db)?, SchemaKind::Fresh);
 assert_eq!(classify_schema(&v1_fixture)?, SchemaKind::LegacyV1);
+assert_eq!(classify_schema(&v2_fixture)?, SchemaKind::LegacyV2);
 assert_eq!(classify_schema(&unknown_v0)?, SchemaKind::Unknown);
 ```
 
-Also assert migration rollback when one v2 statement is forced to fail.
+The checked-in v1 and v2 fixtures are immutable: tests copy them before opening and verify their SHA-256 remains unchanged. Also assert rollback when one v3 statement is forced to fail, wrong `user_version`, unknown tables/columns/indexes/FTS tokenizer fail closed, two processes racing migration yield one ownership winner, and reopening v3 is idempotent.
 
 - [ ] **Step 2: Verify the tests fail against the current unversioned migration**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features catalog_migration`
 
-Expected: FAIL because schema fingerprinting and `user_version = 2` do not exist.
+Expected: FAIL because v2 compatibility, v3 schema fingerprinting and `user_version = 3` do not exist.
 
-- [ ] **Step 3: Implement exact v2 DDL from the approved design**
+- [ ] **Step 3: Implement exact v3 DDL from the approved designs**
 
 Use `BEGIN IMMEDIATE`, fingerprint the v1 tables/columns/FTS tokenizer, create:
 
@@ -217,8 +231,9 @@ Use `BEGIN IMMEDIATE`, fingerprint the v1 tables/columns/FTS tokenizer, create:
 - `revision_receipts`
 - partial unique indexes
 - chunk integrity and dual timestamp columns
+- `tool_requests`, durable operations/outbox, open-intent ledger and schema/cursor epoch
 
-Do not infer that every `user_version = 0` database is V0.1.
+Support fresh -> v3, immutable v1 -> v3 and immutable v2 -> v3 in one `BEGIN IMMEDIATE` migration that commits `user_version = 3`. A forced failure leaves original bytes and `user_version` unchanged. Do not infer that every `user_version = 0` database is V0.1.
 
 - [ ] **Step 4: Add legacy compatibility assertions**
 
@@ -239,7 +254,7 @@ Expected: PASS.
 
 ```bash
 git add src-tauri/src/catalog.rs src-tauri/src/catalog src-tauri/src/catalog_migration_test.rs src-tauri/src/lib.rs tests/fixtures/catalog
-git commit -m "feat: add versioned ASR catalog schema"
+git commit -m "feat: add versioned ASR catalog v3 schema"
 ```
 
 ### Task 3: Add ASR Domain Types And Settings Validation
@@ -688,38 +703,84 @@ git commit -m "feat: publish traceable ASR revisions"
 - Create: `src-tauri/src/desktop_api.rs`
 - Create: `src-tauri/src/core_runtime.rs`
 - Create: `src-tauri/src/tool_api.rs`
+- Create: `src-tauri/src/host_control.rs`
+- Create: `src-tauri/src/host_control_test.rs`
 - Create: `src-tauri/src/local_ipc.rs`
+- Create: `src-tauri/src/local_ipc_test.rs`
+- Create: `src-tauri/src/runtime_lock.rs`
+- Create: `src-tauri/src/bin/lifesub-ipc-test-client.rs`
+- Create: `src-tauri/src/bin/lifesub-ipc-test-host.rs`
+- Create: `src-tauri/src/bin/lifesub-two-tauri-harness.rs`
+- Create: `scripts/verify-local-ipc.sh`
 - Create: `src-tauri/src/tool_api_test.rs`
+- Modify: `src-tauri/Cargo.toml`
+- Modify: `src-tauri/src/catalog/migrations.rs`
+- Modify: `src-tauri/src/catalog/migrations/ddl.rs`
+- Modify: `src-tauri/src/catalog/migrations/fingerprint.rs`
+- Modify/Create: `src-tauri/src/catalog_migration_test/*`
 - Modify: `src-tauri/src/service.rs`
+- Create: `tests/fixtures/catalog/lifesub-v0.2.sqlite3`
+- Create: `tests/fixtures/tool-api/agent-v1/*.json`
+- Create: `tests/fixtures/tool-api/application-v1/*.json`
+- Create: `tests/fixtures/tool-api/gateway/*.json`
+- Create: `tests/fixtures/tool-api/host-control-v1/*.json`: internal claim/complete/uncertain frames and errors; not public contract fixtures.
+- Create: `tests/fixtures/code-signing/*`: ad-hoc signed authorized and forged peer identity fixtures for test-only Security.framework authorization.
 
-- [ ] **Step 1: Write command contract tests**
+- [ ] **Step 1: Freeze and test both V1 contracts**
 
-Define contract V1 handlers for ASR settings/models/jobs plus the MVP tools `start_capture`, `get_capture_status`, `stop_capture`, `get_asr_job_status`, `search_transcripts`, `resolve_evidence`, and `open_evidence`. Mutating tools require idempotency keys. Assert Qwen3-ASR 1.7B rejection, stable snake_case states/errors, no internal paths, identical direct-Core/Tauri/IPC semantics, and no duplicate capture/job on retries. Put business handlers in `tool_api.rs`; `desktop_api.rs`, Tauri commands, and Unix socket remain thin adapters.
+Freeze the public Agent Tool Contract V1 as exactly `get_capabilities`, `start_capture`, `get_capture_status`, `stop_capture`, `get_asr_job_status`, `search_transcripts`, `resolve_evidence`, and `open_evidence`. For every method assert the exact request fields, response fields, capability and allowed error set from the Local Tool design. V0.2 advertises native capture unsupported; all three capture methods return `unsupported_capability(native_capture)` and create zero device/outbox/session/chunk/job side effects.
 
-- [ ] **Step 2: Change import behavior in a failing test**
+Separately freeze the 16-method Application-only V1 management surface: `import_audio`, settings read/save, model list/download/cancel/delete, job enqueue/retry/cancel/retranscribe, operation get/list, revision list/get and receipt list. Every method has the exact named Request/Response DTO, field constraints, capability and error set from the Local Tool design. All async import/model/job mutations return `OperationSummary`; freeze its state/progress/result/error/timestamp fields, require `operation_in_progress` to expose the existing operation ID, and prove `get_operation` observes succeeded/failed/cancelled/recovery_required terminal states while `list_operations` exposes recoverable history with stable ordering/cursor semantics. Both contracts share envelope/error/DTO primitives and exact golden JSON under `tests/fixtures/tool-api/{agent-v1,application-v1}`.
 
-`import_audio_file` must return the immutable Chunk and optional queued Job; it must never append `demo-local` text.
+The complete Tauri UI surface is Application-only V1 plus the trusted UI projection of Agent V1 `get_capabilities`, `get_capture_status`, `get_asr_job_status`, `search_transcripts`, `resolve_evidence` and `open_evidence`. Tauri commands, in-process adapter and authorized secondary-Tauri IPC map one-to-one to those existing methods; tests reject hidden settings/job-read/search/open Commands or a third contract. Freeze Application list ordering, final ID tie-breakers, limit 1..50 and all four cursor errors.
 
-- [ ] **Step 3: Implement AppState services and worker startup**
+Requests contain no caller/capability authority. Tests prove `caller_kind = tauri_ui` or injected capabilities in ordinary UDS JSON are rejected. Dispatch receives only server-created `TrustedCallerContext`: ordinary `agent.sock` is fixed `local_agent`; in-process host injects `tauri_ui`; `ui.sock` grants `tauri_ui` only after `getpeereid` current UID plus `LOCAL_PEERTOKEN` audit token and `SecCodeCopyGuestWithAttributes`/`SecCodeCheckValidity` validation against the primary's pinned designated requirement, Team ID and bundle ID; Gateway mapping fixes `gateway`. Same UID alone is insufficient. Missing/forged audit token, signature mismatch, unsigned/debug build or Security.framework failure must fail closed or reconnect as `local_agent`, never elevate. Only a test-harness build may accept the checked-in ad-hoc signed test identity; test both authorized and forged fixtures. `EvidenceOpener` accepts only trusted host claim context and Core-internal validated Evidence target, never Agent response data.
 
-Construct one `CoreRuntime`. Acquire `asr-worker.lock` first; only the lock holder may then run ModelManager, Chunk, and Job reconciliation, initialize the boot ID/cancellation registry/event emitter, and accept work. Move Task 4's temporary AppState reconciliation call behind this ownership boundary. Tauri and IPC share the same runtime and never open their own writable Catalog. Run native inference on a blocking thread, never the UI thread.
+Freeze MAC'd cursor behavior: search ordering is `score DESC, session_start_ms DESC, revision_id ASC, segment_id ASC`; cursor binds contract/method/principal/query/filters/limit/keyset/high-watermark/expiry/Catalog epoch. Test ties, tamper, caller/query/limit mismatch, expiry, inserts, deletes and stale epoch.
 
-- [ ] **Step 4: Register commands and model/job events**
+- [ ] **Step 2: Test Catalog v3 and mutation recovery**
 
-Use stable event payloads for model progress and Job state. Frontend polling remains a fallback if an event is missed. Start a current-user Unix socket with contract version, bounded messages/timeouts, restrictive permissions, and no TCP listener. C-stage shutdown semantics remain tied to the Tauri process and must be documented.
+Extend migration tests for fresh/v1/v2 -> v3 using immutable checked-in fixtures, rollback with unchanged old bytes and `user_version`, final `user_version = 3`, fingerprint fail-closed, concurrent two-process migration and v3 reopen. Catalog v3 adds `tool_requests`, durable operations/outbox, open-intent ledger and schema/cursor epoch.
+
+For SQLite-only mutations, test one transaction commits business state plus exact replay result; cover identical concurrent `in_progress`, changed fingerprint, cancel-before-commit rollback, crash-before-commit retry, crash-after-commit-before-response replay, and restart recovery. For `import_audio` and model operations, test accept transaction -> operation/outbox -> idempotent executor checkpoints, cancel before/after accept and publish checkpoints, and restart recovery without duplicate file/device effects. `import_audio` returns operation/session/chunk/optional Job and never appends `demo-local` text.
+
+Test `open_evidence` as intent issuance only: `confirmation_required` is a successful disposition, not an error, and the requester response contains only intent ID/disposition/expiry. Add non-public Host Event + Host Control Protocol V1 in `host_control.rs`, excluded from Agent 8/Application 16. Core pushes `PendingOpenEvidenceEvent { event_id, intent_id, requesting_principal_id/kind, evidence_ref, display_metadata, expires_at }` only to authorized in-process event sinks or `ui.sock` subscriptions; it contains no claim token, raw transcript or path. Authorized host-only controls are `claim_open_intent(intent_id)`, `complete_open_intent(intent_id)` and `mark_open_intent_uncertain(intent_id, diagnostic_id)`. Primary in-process Tauri calls the same service; secondary uses internal frames over authorized `ui.sock`; ordinary Agent/Gateway cannot subscribe or route controls. CoreRuntime alone serializes Catalog v3 ledger writes, so adapters never write DB.
+
+Freeze/test `pending -> executing -> consumed | uncertain` plus pending -> expired CAS transactions. Ledger separately stores immutable requesting principal/evidence binding and authorized Tauri claim principal; they need not match. Claim verifies the event/requester/evidence were not altered and the caller owns Core-held subscription/in-process delivery capability, not a bearer token. Cover auditable consent timestamp, exact idempotent retries, conflicting outcome errors, concurrent claim single winner, host offline/event loss followed by internal pending replay on subscription resume, expiry removal, and crash after executing claim before finish -> uncertain without opening UI. A new public `open_evidence` intent plus fresh confirmation is then required. There is no second public Agent confirm tool or Application confirm method.
+
+- [ ] **Step 3: Implement full ownership and secure IPC**
+
+Construct one `CoreRuntime`. `runtime_lock.rs` acquires the full Core ownership lock before any writable Catalog open/migration, socket bind, reconciliation, import, model mutation, capture mutation or worker. Move Task 4's temporary AppState reconciliation call behind this boundary. Run native inference on a blocking thread, never the UI thread.
+
+Create the runtime directory relative to an anchored parent fd with `openat(O_DIRECTORY|O_NOFOLLOW)`, `fstat`/`fstatat`/`lstat` owner/type/mode checks, `0700` directory and `0600` sockets. Ordinary `agent.sock` uses mandatory `getpeereid` and minimal authority. Controlled `ui.sock` obtains `audit_token_t` with `LOCAL_PEERTOKEN`, resolves peer code via Security.framework and checks the primary-pinned designated requirement, Team ID and bundle ID. Document the Rust FFI/framework wrapper boundary in `local_ipc.rs`; production has no unsigned/debug bypass. Authentication failure refuses Application/opener authority; the client may separately reconnect to `agent.sock` for minimal Agent reads.
+
+Use 4-byte framing with 1 MiB request/4 MiB response limits, max 8 in-flight per connection and 32 globally, bounded queues, 10-second read/write deadlines and method execution deadlines. Define `{ control: cancel, request_id }` as a transport control frame, not a business method; it cannot reverse a passed commit point. Secondary startup retries primary connection with 25/50/100/200/400 ms jittered backoff, capped at 2 seconds, then fails without opening DB.
+
+Only the ownership lock holder may remove a socket. Treat only `ENOENT` or `ECONNREFUSED` as stale candidates; timeout, `EMFILE`, `ENFILE`, `EACCES`, `EPERM`, resource exhaustion, protocol errors and all other uncertain results fail closed. Before unlink after `ECONNREFUSED`, anchored revalidation must prove unchanged device/inode, current UID, socket type and mode. Add malicious replacement/live socket/concurrent start/half frame/oversize/slow read/slow write/limit/startup retry/stale-probe decision/ordered shutdown tests. Ordered shutdown stops accept, drains 5 seconds, cancels pre-commit work, persists recovery markers, unlinks endpoints, closes Core/Catalog, then releases the lock. No TCP listener.
+
+- [ ] **Step 4: Prove real secondary-Tauri behavior and contract fixtures**
+
+Register Tauri commands only as Application V1 or trusted Agent V1 projection mappings and use stable event payloads for model/job/operation state; `get_operation` polling remains the authoritative fallback and must observe every terminal async state. Task 11's `lifesub-two-tauri-harness` launches ad-hoc signed **test-harness** primary/secondary processes against one isolated HOME to prove audit token and code-requirement plumbing only; it is not production Tauri signature acceptance. The primary owns lock/DB/sockets/worker; the authorized test secondary performs settings read/save, model/revision/receipt lists, audio import, job control, operation polling, job status, search/resolve/open and internal host-control frames. Forged/mismatched/unsigned test clients are rejected. Instrument test-only side-effect counters and assert secondary has zero writable DB opens, migrations, reconciliations, workers, direct ledger writes, direct model mutations, direct imports and device access.
+
+Add `lifesub-ipc-test-host`/`lifesub-ipc-test-client` for crash windows, connection limits and peer authorization. `scripts/verify-local-ipc.sh` must build the two binaries, create an isolated runtime, spawn the primary host and authorized `ui.sock` subscriber, then run a separate ordinary Agent client that sends `open_evidence` over `agent.sock`. Assert the Agent receives only intent ID/disposition/expiry; the authorized host receives the sanitized pending event, simulates the user prompt, claims via Host Control using trusted `tauri_ui`, invokes a fake opener, completes consumed, and Core records different requesting/claim principals plus consent audit. Also prove event loss/offline replay, unauthorized Agent cannot subscribe/claim and no token/path appears in any Agent/Gateway/event fixture. Run authorized/forged/ordinary/slow/oversize clients as separate OS processes, terminate/restart host for recovery cases, and fail if zero child scenarios ran. A unit-test invocation of the bin is not acceptance evidence. Direct Core, in-process Tauri, ordinary Agent IPC and controlled Application IPC must match golden fixtures. Gateway acceptance is limited to `tests/fixtures/tool-api/gateway` MCP mapping and path/error sanitizer fixtures; do not implement or launch Gateway in Task 11.
 
 - [ ] **Step 5: Run Rust verification and commit**
 
 Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features catalog_migration_test
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features tool_api_test
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features local_ipc_test
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features host_control_test
+scripts/verify-local-ipc.sh
 scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features desktop commands_test
+scripts/with-sherpa-runtime.sh cargo run --manifest-path src-tauri/Cargo.toml --features desktop --bin lifesub-two-tauri-harness
 scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml --features desktop
 ```
 
 ```bash
-git add src-tauri/src/commands.rs src-tauri/src/commands_test.rs src-tauri/src/desktop_api.rs src-tauri/src/core_runtime.rs src-tauri/src/tool_api.rs src-tauri/src/tool_api_test.rs src-tauri/src/local_ipc.rs src-tauri/src/lib.rs src-tauri/src/service.rs
+git add src-tauri/Cargo.toml src-tauri/src/commands.rs src-tauri/src/commands_test.rs src-tauri/src/desktop_api.rs src-tauri/src/core_runtime.rs src-tauri/src/tool_api.rs src-tauri/src/tool_api_test.rs src-tauri/src/host_control.rs src-tauri/src/host_control_test.rs src-tauri/src/local_ipc.rs src-tauri/src/local_ipc_test.rs src-tauri/src/runtime_lock.rs src-tauri/src/bin/lifesub-ipc-test-host.rs src-tauri/src/bin/lifesub-ipc-test-client.rs src-tauri/src/bin/lifesub-two-tauri-harness.rs src-tauri/src/catalog.rs src-tauri/src/catalog src-tauri/src/catalog_migration_test src-tauri/src/lib.rs src-tauri/src/service.rs scripts/verify-local-ipc.sh tests/fixtures/catalog/lifesub-v0.2.sqlite3 tests/fixtures/tool-api tests/fixtures/code-signing
 git commit -m "feat: expose versioned local tool API"
 ```
 
@@ -749,11 +810,11 @@ git commit -m "feat: expose versioned local tool API"
 
 - [ ] **Step 1: Write failing client mapping tests**
 
-Assert exact adapter mappings for settings and model operations. Frontend code may call Tauri invoke in phase C, but DTOs and error semantics must be generated from or mapped one-to-one with Tool Contract V1 rather than defining a second contract.
+Assert exact adapter mappings for Application V1 settings/model/import/job/revision/receipt/operation methods and the trusted UI projection of Agent V1 job status/search/resolve/open methods. Every async action stores `operation_id`, polls `get_operation` through terminal `succeeded | failed | cancelled | recovery_required`, and treats events only as refresh hints. Frontend code may call Tauri invoke in phase C, but every command must map one-to-one to one of the two frozen contracts and reuse shared envelope/error/DTO primitives; it must not define a third contract or hidden read/open Command.
 
 - [ ] **Step 2: Write failing settings interaction tests**
 
-Test SenseVoice/Whisper/Qwen3-ASR segmented control, compatible model cards, download/cancel/delete buttons, language menu, thread stepper, VAD and auto-transcribe toggles, SenseVoice ITN, Whisper task, Qwen3-ASR 0.6B readiness, disabled 1.7B capability messaging without a download action, save errors, and fixed loading layout.
+Test SenseVoice/Whisper/Qwen3-ASR segmented control, compatible model cards, download/cancel/delete buttons, operation progress and every terminal operation state, language menu, thread stepper, VAD and auto-transcribe toggles, SenseVoice ITN, Whisper task, Qwen3-ASR 0.6B readiness, disabled 1.7B capability messaging without a download action, save errors, and fixed loading layout.
 
 - [ ] **Step 3: Implement typed DTOs and client**
 
@@ -897,6 +958,7 @@ git commit -m "test: record real local ASR evidence"
 - Create: `src/acceptance.ts`
 - Modify: `src/App.tsx`
 - Create: `scripts/verify-desktop-asr.sh`
+- Create: `scripts/verify-packaged-peer-auth.sh`
 - Create: `scripts/desktop-asr-scope.txt`
 - Modify: `README.md`
 - Modify: `docs/architecture.md`
@@ -923,15 +985,18 @@ Required scenarios:
 - `claim-and-abort`: claim a Job, persist the Job ID/generation, then terminate without cleanup.
 - `verify-recovery`: new boot ID recovers the stale claim <= 5 seconds.
 - `packaged-smoke`: run SenseVoice, Whisper, and Qwen3-ASR 0.6B fixtures from the packaged executable and verify each Receipt identity.
+- `packaged-peer-auth-primary` / `packaged-peer-auth-secondary`: launch two instances of the actual release-signed `.app`; secondary must obtain `tauri_ui` only when audit token, designated requirement, Team ID and bundle ID match, exercise Application/Agent projection plus Host Control claim/uncertain frames, and keep all secondary direct-DB side-effect counters at zero.
 
 - [ ] **Step 3: Implement the desktop harness**
 
 `scripts/verify-desktop-asr.sh` internally calls `fetch-sherpa-runtime.sh`, exports the verified `SHERPA_ONNX_ARCHIVE_DIR`, hashes only the exact paths in version-controlled `scripts/desktop-asr-scope.txt`, builds the app, launches each scenario with an isolated temporary HOME/data directory, terminates the claim scenario process, relaunches recovery, and rejects reports containing `mock`, zero scenarios, mismatched executable/Git/runtime/model/fixture hashes, or failed thresholds. It also supports read-only `--verify-existing` mode.
 
+`scripts/verify-packaged-peer-auth.sh` is the first production-signing authorization Gate; Task 11's ad-hoc test identities do not satisfy it. It inspects the release `.app` with `codesign -dr -` and signing metadata, records the expected designated requirement/Team ID/bundle ID, launches primary and secondary instances from that exact `.app` under one isolated HOME, and verifies successful `ui.sock` authorization plus Host Control access. It then runs copied/re-signed or dedicated negative fixture clients proving unsigned, mismatched Team ID, bundle ID and designated requirement cannot obtain `tauri_ui` or Host Control and can only reconnect to `agent.sock` as `local_agent`. The script must fail if any positive/negative scenario is skipped or if the identities were not derived from the packaged app.
+
 - [ ] **Step 4: Commit acceptance code before building or running it**
 
 ```bash
-git add tests/specs/lifesub-v0.1.spec.ts tests/specs/lifesub-real-asr-v0.2.spec.ts playwright.config.ts src-tauri/src/acceptance.rs src-tauri/src/main.rs src-tauri/src/lib.rs src/acceptance.ts src/App.tsx scripts/verify-desktop-asr.sh scripts/desktop-asr-scope.txt
+git add tests/specs/lifesub-v0.1.spec.ts tests/specs/lifesub-real-asr-v0.2.spec.ts playwright.config.ts src-tauri/src/acceptance.rs src-tauri/src/main.rs src-tauri/src/lib.rs src/acceptance.ts src/App.tsx scripts/verify-desktop-asr.sh scripts/verify-packaged-peer-auth.sh scripts/desktop-asr-scope.txt
 git commit -m "test: add desktop ASR acceptance harness"
 ```
 
@@ -980,14 +1045,15 @@ Run:
 scripts/with-sherpa-runtime.sh npm run tauri -- build --features desktop
 otool -L src-tauri/target/release/bundle/macos/LifeSub.app/Contents/MacOS/lifesub
 codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/LifeSub.app
+scripts/verify-packaged-peer-auth.sh src-tauri/target/release/bundle/macos/LifeSub.app
 scripts/verify-desktop-asr.sh dmg
 ```
 
-The `dmg` scenario must deterministically locate the produced DMG, mount it read-only with `hdiutil`, verify the image-contained `.app` signature, run its `Contents/MacOS/lifesub --acceptance-scenario packaged-smoke` under an isolated HOME, verify real SenseVoice, Whisper, and Qwen3-ASR 0.6B results plus Receipt identity, then detach the image even on failure. Expected: no unresolved sherpa-onnx/onnxruntime dylib, signature passes, and image-contained real ASR smoke passes. Re-sign the full bundle and rebuild the DMG using the established V0.1 procedure before this Gate if needed.
+The packaged peer-auth Gate must use the actual release-signed `.app`, launch primary/secondary app processes, validate audit token against the extracted designated requirement/Team ID/bundle ID, prove unsigned/mismatched identities are rejected, and record Host Control authorization results. The `dmg` scenario must then deterministically locate the produced DMG, mount it read-only with `hdiutil`, verify the image-contained `.app` signature, rerun packaged peer authorization against the image-contained app, run its `Contents/MacOS/lifesub --acceptance-scenario packaged-smoke` under an isolated HOME, verify real SenseVoice, Whisper, and Qwen3-ASR 0.6B results plus Receipt identity, then detach the image even on failure. Expected: no unresolved sherpa-onnx/onnxruntime dylib, signature and peer authorization pass, and image-contained real ASR smoke passes. Re-sign the full bundle and rebuild the DMG using the established V0.1 procedure before this Gate if needed.
 
 - [ ] **Step 9: Capture visual and verification evidence**
 
-Use Playwright screenshots at desktop and mobile widths. Write exact commands, model hashes, metrics, test counts, `otool`, signature, and DMG results to `output/asr-v0.2/verification.md`.
+Use Playwright screenshots at desktop and mobile widths. Write exact commands, model hashes, metrics, test counts, `otool`, release designated requirement/Team ID/bundle ID, positive/negative packaged peer-auth results, signature, and DMG results to `output/asr-v0.2/verification.md`.
 
 - [ ] **Step 10: Update docs and progress**
 
@@ -1011,6 +1077,10 @@ After this evidence/docs commit, run `scripts/verify-asr-gate.sh --verify-existi
 
 ## Final Completion Audit
 
+- [ ] Agent Tool Contract V1 remains exactly 8 methods, Application-only V1 remains exactly 16 methods, and non-public Host Event/Control V1 is unreachable from Agent/Gateway and has no hidden Tauri Command or direct adapter Catalog write.
+- [ ] A real two-process `agent.sock` request -> authorized `ui.sock` Host Event -> user-prompt simulation -> Host Control claim -> fake opener -> consumed flow passes; requester/claimer are separately audited, pending events replay after loss/offline, and no claim token/path leaks.
+- [ ] Full Core ownership prevents secondary writable DB open/migration/reconciliation/worker/device/model/import/ledger side effects; only primary CoreRuntime commits business, operation and consent ledgers.
+- [ ] Packaged peer-auth Gate passes for release-signed primary/secondary `.app` and DMG-contained app, while unsigned or mismatched designated requirement/Team ID/bundle ID clients cannot obtain `tauri_ui` or Host Control.
 - [ ] SenseVoice, Whisper, and Qwen3-ASR 0.6B all execute real local inference; Qwen scenario IDs `qwen3-0.6b-zh`, `qwen3-0.6b-en`, and `qwen3-0.6b-zh-en` pass.
 - [ ] Settings selection changes the next Job's persisted provider/model snapshot.
 - [ ] Model downloads are hashed, safely extracted, versioned, recoverable, and removable.

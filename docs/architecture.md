@@ -17,9 +17,9 @@ CoreRuntime（C 阶段由 Tauri 托管，A 阶段由 lifesubd 托管）
   |-- Privacy policy and audit log
   |-- GitHub sync
   |
-  |-- Versioned Local Tool API
-        |-- Tauri Adapter
-        |-- Unix Socket Adapter -> DeepSeek Harness
+  |-- Shared protocol primitives
+        |-- Core Application Contract V1 -> Tauri management mutations/lists
+        |-- Agent Tool Contract V1 -> DeepSeek + Tauri trusted read/open projection
         |-- Authenticated MCP Gateway -> ChatGPT developer mode
 ```
 
@@ -63,14 +63,17 @@ LifeSub/
 - 生成记忆、证据片段与索引。
 - 执行敏感级别、调用方权限与审计策略。
 - 管理 GitHub 导出、加密、拉取、合并和冲突。
-- 对插件提供稳定的本地 API。
+- 对 Tauri 提供完整枚举的 Core Application Contract 管理面，并复用 Agent Tool Contract 的 status/search/resolve/open 读取面；对 Agent 提供独立的 8-method Agent Tool Contract。两者共享 envelope、errors、DTO primitives 与 `OperationSummary`，不存在隐藏 Tauri Command。
 - 独占 SQLite 写入、录音设备状态、模型安装与 ASR Worker；客户端不得绕过 Core。
 
 ### 进程演进
 
-- C 阶段：Tauri 进程托管 CoreRuntime 和 Unix socket；关闭窗口可驻留菜单栏，但退出进程会停止录音与处理。
-- A 阶段：launchd 管理 `lifesubd`，Tauri 只通过版本化客户端访问 Core；进程宿主变化不改变工具契约。
+- C 阶段：primary Tauri 进程托管 CoreRuntime、普通 Agent socket 和受控 UI socket；secondary Tauri 经 Core Application Contract 连接 primary，绝不打开数据库。关闭窗口可驻留菜单栏，但退出 primary 会停止录音与处理。
+- A 阶段：launchd 管理 `lifesubd`，Tauri 仍只通过同一 Core Application Contract 访问 Core；进程宿主变化不改变两个 V1 契约。
 - ChatGPT Gateway 是单独的认证适配器，不把本机 daemon 端口暴露到网络。
+- 普通 UDS 连接固定获得最小 `local_agent` 权限；请求不得自报 caller/capability。Tauri UI 权限只由 in-process host，或受控 UI endpoint 对 `LOCAL_PEERTOKEN` audit token 和 macOS code-signature designated requirement/Team ID/bundle ID 的校验产生；同 UID、unsigned/debug client 或验证失败都不能提升权限。
+- Evidence 确认使用非公共 Host Event + Host Control Protocol V1：Core 将不含 token/路径的 pending intent event 推送给 authorized Tauri host，host 以自身 trusted identity 调用 CoreRuntime 串行 claim/complete/mark-uncertain ledger。requesting Agent/Gateway 与 claiming Tauri 分别审计；内部协议不计入两个公共契约，Agent/Gateway 不可访问，客户端不得直写 Catalog。
+- full Core ownership lock 必须早于 writable Catalog open/migration、socket bind、reconciliation、模型/导入 mutation 和 worker；本地 IPC 不启用 TCP。
 
 ### Provider 层
 
@@ -111,8 +114,8 @@ ASR 与摘要使用独立接口。每次处理任务记录：Provider、模型�
 
 ## 待定技术选型
 
-- macOS App 使用 SwiftUI/AppKit，还是采用跨平台桌面框架。
-- Unix socket envelope、launchd 安装与 Gateway 认证的具体实现。
+- 独立 `lifesubd` 是否继续复用当前 Tauri/Rust Core crate 的打包结构。
+- launchd 安装/升级、应用签名分发与 Gateway 外部认证的具体实现（socket envelope、local caller trust 和两个 V1 contract 已冻结）。
 - 本地 ASR 的首选模型与硬件要求。
 - 本地搜索使用 SQLite FTS、向量扩展或组合方案。
 - 音频格式、分段策略与长期压缩方案。

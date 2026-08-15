@@ -4,9 +4,9 @@
 
 **Goal:** Replace the demo transcript path with real, local SenseVoice, Whisper, and Qwen3-ASR transcription, model switching, persistent ASR settings, recoverable jobs, immutable revisions, and a complete settings experience.
 
-**Architecture:** The Rust Core owns schema migration, immutable audio, model installation, ASR jobs, sherpa-onnx providers, receipts, and revision publication. React only reads and changes settings, displays model/job state, and requests retranscription. SenseVoiceSmall, Whisper, and Qwen3-ASR 0.6B share sherpa-onnx 1.13.5 with a single fenced background worker; Qwen3-ASR 1.7B remains disabled until its independent asset/device Gate passes.
+**Architecture:** The Rust Core owns schema migration, immutable audio, multi-artifact model installation, ASR jobs, exact runtime dispatch, receipts, and revision publication. React only reads and changes settings, displays model/job state, and requests retranscription. SenseVoiceSmall, Whisper, and Qwen3-ASR 0.6B share sherpa-onnx 1.13.5; Qwen3-ASR 1.7B is a formal installable/executable model using pinned `qwen3-asr` 0.2.2 + Candle/Metal. The single fenced worker never falls back between their runtime identities.
 
-**Tech Stack:** Rust 2024, rusqlite, sherpa-onnx 1.13.5 static runtime, Symphonia 0.6, Rubato 5, reqwest blocking + rustls, tar/bzip2, fs2, React 19, TypeScript, Vitest, Testing Library, Playwright, Tauri 2.
+**Tech Stack:** Rust 2024, rusqlite, sherpa-onnx 1.13.5 static runtime, `qwen3-asr` 0.2.2 pinned to Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`, Candle + Metal, Symphonia 0.6, Rubato 5, reqwest blocking + rustls, tar/bzip2, fs2, React 19, TypeScript, Vitest, Testing Library, Playwright, Tauri 2.
 
 **Required references:**
 
@@ -23,21 +23,21 @@
 
 ### Rust Core
 
-- Modify `src-tauri/Cargo.toml`: pin ASR, audio, download, archive, locking, cancellation, and test dependencies.
+- Modify `src-tauri/Cargo.toml`: pin ASR, audio, download, archive, locking, cancellation, and test dependencies, including exact `qwen3-asr` Git revision and Candle Metal features.
 - Modify `src-tauri/src/lib.rs`: register ASR modules, tests, commands, and worker lifecycle.
 - Modify `src-tauri/src/domain.rs`: add chunk integrity and compatible ASR provenance fields.
 - Modify `src-tauri/src/catalog.rs`: delegate versioned migration and expose transactional ASR persistence.
-- Create `src-tauri/src/catalog/migrations.rs`: schema fingerprinting, fresh v3 creation, and v1/v2-to-v3 migration.
+- Create `src-tauri/src/catalog/migrations.rs`: schema fingerprinting and ordered v1/v2/v3/v4 migrations; each version has immutable DDL/fingerprint ownership.
 - Create `src-tauri/src/asr/mod.rs`: public ASR module boundary.
 - Create `src-tauri/src/asr/settings.rs`: tagged provider settings and validation.
-- Create `src-tauri/src/asr/manifest.rs`: pinned model/VAD manifests and artifact identity.
+- Create `src-tauri/src/asr/manifest.rs`: pinned model/VAD manifests, multi-artifact canonical bundle identity, provenance, runtime and device requirements.
 - Create `src-tauri/src/asr/model_manager.rs`: downloads, safe extraction, versioned install activation, reconciliation.
 - Create `src-tauri/src/asr/audio.rs`: decoding, downmix, resampling, duration and time conversion.
 - Create `src-tauri/src/asr/vad.rs`: VAD ranges, 25-second partitioning, timing invariants.
 - Create `src-tauri/src/asr/provider.rs`: provider trait, request/result/error types, fake provider.
 - Create `src-tauri/src/asr/sense_voice.rs`: sherpa-onnx SenseVoice adapter.
 - Create `src-tauri/src/asr/whisper.rs`: sherpa-onnx Whisper adapter.
-- Create `src-tauri/src/asr/qwen3_asr.rs`: sherpa-onnx Qwen3-ASR adapter and 1.7B capability Gate.
+- Create `src-tauri/src/asr/qwen3_asr.rs`: Qwen 0.6B sherpa and Qwen 1.7B Candle/Metal adapters with exact dispatch and compatibility Gate.
 - Create `src-tauri/src/asr/job.rs`: job state machine, singleton lock, claims, leases, fencing, cancellation.
 - Create `src-tauri/src/asr/service.rs`: job execution and atomic Receipt/Revision publication.
 - Create `src-tauri/src/core_runtime.rs`: single owner of Catalog, capture state, reconciliation, model manager, and ASR worker.
@@ -53,7 +53,7 @@
 
 ### Rust Tests And Fixtures
 
-- Create `src-tauri/src/catalog_migration_test.rs`: fresh/v1/v2-to-v3, fingerprint, rollback and concurrency tests.
+- Create `src-tauri/src/catalog_migration_test.rs`: sequential fresh/v1->v2, v2->v3 and v3->v4 fingerprint, rollback and concurrency tests owned by Tasks 2, 6 and 11 respectively.
 - Create `src-tauri/src/asr_settings_test.rs`: provider-specific settings validation.
 - Create `src-tauri/src/asr_model_manager_test.rs`: interrupted download, integrity, extraction, reconciliation.
 - Create `src-tauri/src/asr_audio_test.rs`: declared formats, resampling, VAD partition and timestamps.
@@ -62,8 +62,11 @@
 - Create `src-tauri/src/host_control_test.rs`: requester/claimer separation, event replay, consent CAS and crash recovery tests.
 - Create `tests/fixtures/asr/fixture-manifest.json`: hashes, transcripts, intervals, phrases, licenses.
 - Create `tests/fixtures/asr/zh.wav`, `en.wav`, `zh-en.wav`: redistributable fixed speech samples.
+- Create `tests/fixtures/models/qwen17-bundle-v1.json`: reviewed RFC 8785/JCS golden canonical payload used to derive the frozen bundle SHA.
 - Create `tests/fixtures/catalog/lifesub-v0.1.sqlite3`: pre-v2 migration fixture.
 - Create `tests/fixtures/catalog/lifesub-v0.2.sqlite3`: immutable pre-v3 migration fixture.
+- Create `tests/fixtures/catalog/lifesub-v0.3.sqlite3`: immutable pre-v4 migration fixture.
+- Create `tests/fixtures/catalog/lifesub-v0.4.sqlite3`: final v4 fingerprint fixture.
 - Create `tests/fixtures/tool-api/agent-v1/*.json`: exact Agent V1 request/response/error golden fixtures.
 - Create `tests/fixtures/tool-api/application-v1/*.json`: exact Application V1 request/response/error golden fixtures.
 - Create `tests/fixtures/tool-api/gateway/*.json`: MCP mapping and sanitizer contract fixtures only.
@@ -189,7 +192,7 @@ git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/src/asr/mod.rs src-t
 git commit -m "build: add static local ASR runtime"
 ```
 
-### Task 2: Introduce Versioned Catalog v3 Migration
+### Task 2: Introduce Versioned Catalog v2 Migration
 
 **Files:**
 
@@ -207,19 +210,18 @@ Cover:
 ```rust
 assert_eq!(classify_schema(&empty_db)?, SchemaKind::Fresh);
 assert_eq!(classify_schema(&v1_fixture)?, SchemaKind::LegacyV1);
-assert_eq!(classify_schema(&v2_fixture)?, SchemaKind::LegacyV2);
 assert_eq!(classify_schema(&unknown_v0)?, SchemaKind::Unknown);
 ```
 
-The checked-in v1 and v2 fixtures are immutable: tests copy them before opening and verify their SHA-256 remains unchanged. Also assert rollback when one v3 statement is forced to fail, wrong `user_version`, unknown tables/columns/indexes/FTS tokenizer fail closed, two processes racing migration yield one ownership winner, and reopening v3 is idempotent.
+The checked-in v1 fixture is immutable: tests copy it before opening and verify its SHA-256 remains unchanged. Also assert rollback when one v2 statement is forced to fail, wrong `user_version`, unknown tables/columns/indexes/FTS tokenizer fail closed, two processes racing migration yield one ownership winner, and reopening v2 is idempotent.
 
 - [ ] **Step 2: Verify the tests fail against the current unversioned migration**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features catalog_migration`
 
-Expected: FAIL because v2 compatibility, v3 schema fingerprinting and `user_version = 3` do not exist.
+Expected: FAIL because v2 schema fingerprinting and `user_version = 2` do not exist.
 
-- [ ] **Step 3: Implement exact v3 DDL from the approved designs**
+- [ ] **Step 3: Implement exact v2 ASR DDL from the approved design**
 
 Use `BEGIN IMMEDIATE`, fingerprint the v1 tables/columns/FTS tokenizer, create:
 
@@ -231,9 +233,8 @@ Use `BEGIN IMMEDIATE`, fingerprint the v1 tables/columns/FTS tokenizer, create:
 - `revision_receipts`
 - partial unique indexes
 - chunk integrity and dual timestamp columns
-- `tool_requests`, durable operations/outbox, open-intent ledger and schema/cursor epoch
 
-Support fresh -> v3, immutable v1 -> v3 and immutable v2 -> v3 in one `BEGIN IMMEDIATE` migration that commits `user_version = 3`. A forced failure leaves original bytes and `user_version` unchanged. Do not infer that every `user_version = 0` database is V0.1.
+Support fresh -> v2 and immutable v1 -> v2 in one `BEGIN IMMEDIATE` migration that commits `user_version = 2`. A forced failure leaves original bytes and `user_version` unchanged. Do not infer that every `user_version = 0` database is V0.1. Artifact checkpoints belong to Task 6/v3; Local Tool tables belong to Task 11/v4 and must not be added under v2.
 
 - [ ] **Step 4: Add legacy compatibility assertions**
 
@@ -254,7 +255,7 @@ Expected: PASS.
 
 ```bash
 git add src-tauri/src/catalog.rs src-tauri/src/catalog src-tauri/src/catalog_migration_test.rs src-tauri/src/lib.rs tests/fixtures/catalog
-git commit -m "feat: add versioned ASR catalog v3 schema"
+git commit -m "feat: add versioned ASR catalog v2 schema"
 ```
 
 ### Task 3: Add ASR Domain Types And Settings Validation
@@ -275,7 +276,7 @@ let invalid = AsrSettings::whisper("whisper-base")
 assert_eq!(invalid.validate(&stub_models), Err(AsrSettingsError::ProviderOptionsMismatch));
 ```
 
-Test thread bounds, language support, model/provider ownership, Whisper translate, SenseVoice ITN, Qwen3-ASR option isolation, and unavailable 1.7B rejection. Cover the distinction between a selectable catalog item and an installable/executable model.
+Test thread bounds, language support, model/provider ownership, Whisper translate, SenseVoice ITN, Qwen3-ASR option isolation, and the complete 1.7B capability matrix: unsupported device remains selectable for display but cannot install/execute; supported uninstalled can install but cannot execute; installed-unqualified cannot execute; runtime-qualified can execute.
 
 - [ ] **Step 2: Run the tests and confirm missing types**
 
@@ -285,7 +286,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement immutable serialized types**
 
-Add `AsrProviderKind`, `AsrProviderOptions`, `AsrSettings`, `AsrJobState`, `ChunkIntegrityState`, `ProviderReceipt`, `AsrErrorCode`, and validated transcript time ranges. Define a minimal `ModelLookup` trait containing provider ownership, language capability, and separate selectable/installable/executable capability. Active settings validation requires executable capability and returns `model_capability_unavailable` for Qwen3-ASR 1.7B; Task 3 tests use a stub, and Task 5's static manifest implements it. Persist enums as snake_case strings, never `Debug` output.
+Add `AsrProviderKind`, `AsrProviderOptions`, `AsrSettings`, `AsrJobState`, `ChunkIntegrityState`, `ProviderReceipt`, `AsrErrorCode`, and validated transcript time ranges. Define a minimal `ModelLookup` trait containing provider ownership, language capability, and separate selectable/installable/executable capability. Active settings validation requires executable capability and returns `model_capability_unavailable` for any missing, corrupt, runtime-incompatible, or device-incompatible installation; Task 3 tests use a stub, and Task 5's static manifest implements it. Persist enums as snake_case strings, never `Debug` output.
 
 - [ ] **Step 4: Keep old API compatibility explicit**
 
@@ -358,11 +359,16 @@ git commit -m "feat: harden immutable audio imports"
 - Create: `src-tauri/src/asr/manifest.rs`
 - Create: `src-tauri/src/asr_manifest_test.rs`
 - Modify: `src-tauri/src/lib.rs`
+- Modify: `src-tauri/Cargo.toml`
+- Modify: `src-tauri/Cargo.lock`
 - Create: `THIRD_PARTY_NOTICES.md`
+- Create: `tests/fixtures/models/qwen17-bundle-v1.json`
 
 - [ ] **Step 1: Write failing manifest contract tests**
 
-Require unique immutable IDs, supported languages, license, source provenance, and an explicit availability variant. `Installable(ArtifactSpec)` requires HTTPS URLs, exact byte sizes, 64-character hashes, required files, conversion provenance, and allowlisted redirect hosts. `ExperimentalUnavailable` requires a non-empty reason and unmet Gate IDs and must not contain fake artifact data. Assert Qwen3-ASR 1.7B is selectable for display but not installable or executable.
+Require unique immutable IDs, supported languages, SPDX/license provenance, runtime identity, `qualification_policy` and an explicit installable artifact bundle. Every `ArtifactFile` requires `artifact_id`, source repository/model, provider API endpoint or immutable normalized HTTPS URL, immutable revision, exact byte size, 64-character SHA-256, normalized non-overlapping required path, required flag, direct/extract mode, SPDX, provenance and exact redirect allowlist. Assert RFC 8785 JCS canonical payload v1 and SHA-256 identity excluding the identity field itself, with artifacts sorted by bytewise UTF-8 ID. Compare serialization byte-for-byte with `tests/fixtures/models/qwen17-bundle-v1.json` and assert its golden SHA. Assert every shipping model/VAD has an explicit policy: sherpa-backed entries use `structural_with_pinned_runtime`, only Qwen 1.7B uses `runtime_smoke_required`; no null/TODO/zero-hash placeholder or unhandled policy enters the registry.
+
+The RED tests must also prove the exact 1.7B runtime contract: crate version 0.2.2, Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`, discovered Candle Metal feature wiring, original config requiring top-level `thinker_config`, and rejection of a config containing only top-level `audio_config/text_config`. They must prove the four-row ModelLookup matrix: unsupported device `true/false/false`, compatible uninstalled `true/true/false`, `installed_unqualified` `true/true/false`, and `runtime_qualified` `true/true/true`, each with stable reason codes.
 
 - [ ] **Step 2: Download the exact upstream assets outside the repository and compute hashes**
 
@@ -390,7 +396,17 @@ https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-q
 size 878,702,423; sha256 393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96
 
 Qwen3-ASR 1.7B
-Declare an experimental, non-installable registry entry until an immutable sherpa-onnx or approved native Apple Silicon package has exact size, SHA-256, required files, conversion provenance, and passing Gate evidence. Raw Hugging Face Transformers weights are not executable by the Rust provider.
+Formal five-file bundle; do not commit any file or model weight:
+
+Official original `Qwen/Qwen3-ASR-1.7B`, ModelScope revision `d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec`:
+config.json size 6,194; sha256 2e74a751548b8ad7d7526d29365ad8144c345d8b412b1152d25dc6698452712f
+model-00001-of-00002.safetensors size 4,220,320,824; sha256 a4cd1f1a04d90b757dc7f7dd26254e69a013b19e80efe590a83c6a3bde8608d6
+model-00002-of-00002.safetensors size 478,200,688; sha256 6e0b9d9e09e2e0238e7ef3cc8a484ab387e91b90f1900bedf88bc92d7929ccfc
+model.safetensors.index.json size 64,821; sha256 f994739fe38e5210b9e3e8ce6c6307315e2ceac3cb630e7b7414d69dce520f60
+
+Official Hugging Face `Qwen/Qwen3-ASR-1.7B-hf` tokenizer.json:
+size 11,429,653; sha256 fe1fad59be22a41ee293363fcf95fdedbc7c93f3b49270b1d2e18bd1399a7a05
+Resolve its exact immutable commit through the provider revision API, download via `/resolve/{commit}/tokenizer.json`, and verify the existing size/hash. Also resolve/persist the four ModelScope immutable endpoints, exact redirect hosts, per-file SPDX/provenance, canonical golden JSON and expected bundle SHA. A branch name, floating `main`, missing discovery field or placeholder identity is forbidden and keeps the registry RED.
 
 Silero VAD
 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
@@ -407,32 +423,51 @@ Whisper Tiny: tiny-encoder.onnx, tiny-decoder.onnx, tiny-tokens.txt
 Whisper Base: base-encoder.onnx, base-decoder.onnx, base-tokens.txt
 Whisper Small: small-encoder.onnx, small-decoder.onnx, small-tokens.txt
 Qwen3-ASR 0.6B: conv_frontend.onnx, encoder.int8.onnx, decoder.int8.onnx, tokenizer/ directory (verify the complete tokenizer file set before freezing)
+Qwen3-ASR 1.7B: config.json, model-00001-of-00002.safetensors, model-00002-of-00002.safetensors, model.safetensors.index.json, tokenizer.json
 VAD: silero_vad.onnx
 ```
 
-- [ ] **Step 3: Implement the static registry**
+- [ ] **Step 3: Inspect and freeze the exact Cargo dependency contract**
+
+Before editing `Cargo.toml`, inspect the pinned commit's `Cargo.toml` and resolved crate metadata. Record the exact Git URL, package name/version, available features, `default-features` behavior, Candle/Metal feature path, target cfg and whether the dependency can be optional. Do not invent feature names. Freeze this graph: `asr-runtime` contains sherpa only; `asr-qwen17-runtime` contains the pinned qwen/Candle/Metal path only; production `desktop` directly includes both or depends on `desktop-full = ["desktop-base", "asr-runtime", "asr-qwen17-runtime"]`. Keep no-default fast tests free of both native runtimes where supported. Run `cargo metadata --locked`, `cargo tree -e features`, `cargo tree -i qwen3-asr`, and inspect every `Cargo.lock` source/checksum; tests fail if source/revision/features drift or desktop omits qwen/Metal.
+
+- [ ] **Step 4: Implement the static registry and golden payload**
 
 ```rust
 pub struct ModelManifest {
     pub id: &'static str,
     pub manifest_version: &'static str,
-    pub availability: ModelAvailability,
+    pub bundle: ArtifactBundle,
+    pub runtime: RuntimeRequirement,
+    pub device: DeviceRequirement,
+    pub qualification_policy: QualificationPolicy,
     pub source: ModelSource,
 }
 ```
 
-Implement `ModelLookup` for the registry. Use a new model ID if any asset hash changes.
+Implement `ModelLookup` for the registry. For the existing persistence field named `archive_sha256`, store a single archive hash for legacy bundles and the canonical manifest SHA-256 for multi-file bundles. Use a new model ID or manifest version if any artifact, source revision, runtime identity or compatibility rule changes.
 
-- [ ] **Step 4: Add notices and verify tests**
+- [ ] **Step 5: Pin the runtime and add notices**
 
-Run: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_manifest`
+Pin the exact inspected Git URL at commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc` with observed `default-features`/feature wiring in `Cargo.toml`/`Cargo.lock`. Add MIT crate notice, full direct/transitive runtime license closure, and per-artifact source/revision/SPDX/provenance. Add a contract test that reconciles manifest licenses with `THIRD_PARTY_NOTICES.md` and reconciles the locked qwen/Candle dependency closure with notices; undocumented locked runtime dependencies or notices without a locked/manifest source fail.
+
+- [ ] **Step 6: Verify tests and locked dependency evidence**
+
+Run:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_manifest
+cargo metadata --manifest-path src-tauri/Cargo.toml --locked --format-version 1
+cargo tree --manifest-path src-tauri/Cargo.toml --locked -e features
+cargo tree --manifest-path src-tauri/Cargo.toml --locked -i qwen3-asr
+```
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src-tauri/src/asr/manifest.rs src-tauri/src/asr_manifest_test.rs src-tauri/src/lib.rs THIRD_PARTY_NOTICES.md
+git add src-tauri/src/asr/manifest.rs src-tauri/src/asr_manifest_test.rs src-tauri/src/lib.rs src-tauri/Cargo.toml src-tauri/Cargo.lock THIRD_PARTY_NOTICES.md tests/fixtures/models/qwen17-bundle-v1.json
 git commit -m "feat: pin local ASR model manifests"
 ```
 
@@ -443,40 +478,61 @@ git commit -m "feat: pin local ASR model manifests"
 - Create: `src-tauri/src/asr/model_manager.rs`
 - Create: `src-tauri/src/asr_model_manager_test.rs`
 - Modify: `src-tauri/src/catalog.rs`
+- Modify: `src-tauri/src/catalog/migrations.rs`
+- Modify: `src-tauri/src/catalog_migration_test.rs`
+- Test: `tests/fixtures/catalog/lifesub-v0.2.sqlite3`
+- Create: `tests/fixtures/catalog/lifesub-v0.3.sqlite3`
 
 - [ ] **Step 1: Write failing HTTP fixture tests**
 
-Cover interrupted downloads, incorrect content length, redirect to a disallowed host, wrong SHA-256, path traversal, symlink/hardlink entries, expanded-size limit, rename-before-DB crash, DB-before-directory mismatch, cancellation, and deletion while leased.
-Also assert that download/install entry points reject `ExperimentalUnavailable` with `model_capability_unavailable` before creating a `model_downloads` row or network request.
+Cover interrupted single-file and five-file bundle downloads, restart/resume from persisted byte checkpoints, Range accepted/ignored, ETag or Last-Modified changes, incorrect content length, redirect to a disallowed host, one corrupt shard among otherwise valid artifacts, duplicate/escaping required paths, path traversal, symlink/hardlink archive entries, expanded-size limit, cancellation and explicit retry. Assert completed verified shards are reused only when their manifest source identity still matches.
+
+Cover disk preflight for the worst simultaneous footprint: remaining `.part` bytes + completed temporary artifacts + extracted/copied staging + complete final directory + safety margin, while retaining the current installed version. Cover DB-before-directory mismatch, incomplete bundle marker, structural compatibility failure, cancellation, and deletion while leased. Assert non-M4/<24GB/device-incompatible Qwen 1.7B rejects before a `model_downloads` row/network request; supported M4/24GB but uninstalled Qwen 1.7B is accepted for download.
+
+Add policy matrix tests: every `structural_with_pinned_runtime` model/VAD with matching sherpa identity ends `runtime_qualified` in the structural publication transaction; mismatched runtime identity publishes no installation and returns `model_runtime_identity_mismatch`; Qwen 1.7B `runtime_smoke_required` ends only `installed_unqualified`; unknown policy fails closed.
+
+Add rename-success-before-DB crash tests for both policies. Reconciliation must re-hash all files and validate the structural marker. For `structural_with_pinned_runtime`, exact pinned sherpa identity atomically restores `runtime_qualified`; a wrong tag/commit/native archive/build identity creates no installation, records `model_runtime_identity_mismatch`, and quarantines the directory. For `runtime_smoke_required`, reconciliation restores only `installed_unqualified` and leaves Task 8 to qualify it. Assert neither path silently chooses the other policy.
 
 - [ ] **Step 2: Verify failure**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_model_manager`
 
-- [ ] **Step 3: Implement persistent download state**
+- [ ] **Step 3: Write and verify the Catalog v3 migration**
 
-Use `model_downloads` for `queued/downloading/verifying/installing/succeeded/failed/cancelled`. Persist byte progress at bounded intervals; keep user-facing errors separate from diagnostic summaries.
+Task 6 exclusively migrates v2 -> v3 and owns `model_download_artifacts` plus the rebuilt `model_installations` two-stage states. Implement the exact DDL/FKs/PK/unique/state/bytes/hash/source/checkpoint fields from the design, update schema fingerprinting, and support fresh/v1/v2 -> complete v3 without changing historical v2. The immutable v2 fixture is copied before migration; create an immutable v3 fixture and golden fingerprint. Cover forced rollback, unknown v2/v3 shapes, concurrent migration, `user_version = 3`, and idempotent v3 reopen. Task 11 must consume v3 and migrate to v4; it may not append DDL under version 3.
 
-- [ ] **Step 4: Implement safe versioned activation**
+Run: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features catalog_migration`
+
+- [ ] **Step 4: Implement persistent download state**
+
+Use `model_downloads` for bundle-level `queued/downloading/verifying/installing/succeeded/failed/cancelled`, plus persistent per-artifact checkpoint records keyed by download ID and required path. Persist byte progress, validators and verified state at bounded intervals; compute UI progress from the sum of exact artifact bytes; keep user-facing errors separate from diagnostic summaries.
+
+- [ ] **Step 5: Implement safe structural installation**
 
 Install to:
 
 ```text
-models/asr/<provider>/<model-id>/<manifest-version>-<archive-hash>/
+models/asr/<provider>/<model-id>/<manifest-version>-<bundle-identity>/
 ```
 
-Reject unsafe archive entries, write an immutable marker, fsync, rename, then activate through a SQLite transaction. Reconcile `.part`, staging, unrecorded installs, missing active directories, and corrupt files at startup.
+Reject unsafe archive entries and unsafe/overlapping direct-install paths; assemble all artifacts in one staging directory; verify every file/hash and policy-specific structural contract; write an immutable structural marker with per-file provenance/runtime requirements; fsync and rename once. For `structural_with_pinned_runtime`, verify the exact sherpa 1.13.5 tag/commit/native archive/current build identity and publish `runtime_qualified` in the same SQLite transaction as the installation. For `runtime_smoke_required`, verify top-level `thinker_config`, shard index coverage and tokenizer static contract, then publish `installed_unqualified`; runtime initialization is forbidden in Task 6. Tests enumerate SenseVoice, all Whisper variants, Qwen 0.6B and Silero VAD to prove none remains unqualified. Reconcile per-file `.part` checkpoints, staging, unrecorded structural installs, incomplete markers, missing directories, and corrupt files without publishing a partial bundle.
 
-- [ ] **Step 5: Run all model manager tests**
+- [ ] **Step 6: Run model manager and migration tests**
 
-Run: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_model_manager`
-
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
+Run:
 
 ```bash
-git add src-tauri/src/asr/model_manager.rs src-tauri/src/asr_model_manager_test.rs src-tauri/src/catalog.rs
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_model_manager
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features catalog_migration
+scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime asr_model_manager
+```
+
+Expected: PASS, including real pinned sherpa identity publication and wrong-identity rejection/quarantine.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src-tauri/src/asr/model_manager.rs src-tauri/src/asr_model_manager_test.rs src-tauri/src/catalog.rs src-tauri/src/catalog/migrations.rs src-tauri/src/catalog_migration_test.rs tests/fixtures/catalog/lifesub-v0.2.sqlite3 tests/fixtures/catalog/lifesub-v0.3.sqlite3
 git commit -m "feat: add recoverable ASR model installs"
 ```
 
@@ -537,12 +593,19 @@ git commit -m "feat: prepare timestamped ASR audio"
 - Create: `src-tauri/src/asr/sense_voice.rs`
 - Create: `src-tauri/src/asr/whisper.rs`
 - Create: `src-tauri/src/asr/qwen3_asr.rs`
+- Create: `src-tauri/src/asr/runtime_qualifier.rs`
 - Create: `src-tauri/src/asr_provider_test.rs`
+- Create: `src-tauri/src/asr_runtime_qualifier_test.rs`
+- Modify: `src-tauri/src/asr/model_manager.rs`
+- Modify: `src-tauri/src/catalog.rs`
+- Modify: `src-tauri/src/asr_model_manager_test.rs`
 - Modify: `src-tauri/src/lib.rs`
 
 - [ ] **Step 1: Write fake-provider contract tests**
 
-Test provider/model identity, language mapping, SenseVoice ITN, Whisper task, Qwen3-ASR parameters and 1.7B capability rejection, empty-output rejection, cancellation between windows, and error mapping without loading native models.
+Test provider/model/runtime identity, language mapping, SenseVoice ITN, Whisper task, Qwen3-ASR parameters, exact 0.6B sherpa dispatch, exact 1.7B Candle/Metal dispatch, empty-output rejection, cancellation between windows, and error mapping without loading native models. Assert 1.7B never constructs the sherpa adapter and 0.6B never constructs the Candle adapter; no failure path substitutes either model, runtime family, backend or device.
+
+Add RuntimeQualifier orchestration tests for 1.7B: start from `installed_unqualified`; ModelManager invokes a pure adapter smoke, fsyncs a temp marker, atomically publishes the marker, then uses Catalog CAS `installed_unqualified -> runtime_qualified`. Assert Provider never receives Catalog/DB handles and cannot write state. Cover smoke failure, marker-write/fsync/rename failure, crash before marker, crash after durable marker before CAS, DB qualified but marker missing/mismatched, concurrent qualifiers, idempotent same-identity retry and conflicting identity. Failure/recovery keeps or restores `installed_unqualified`, records stable qualification errors and never marks valid files corrupt.
 
 - [ ] **Step 2: Run tests and verify missing providers**
 
@@ -565,9 +628,11 @@ pub trait AsrProvider: Send {
 
 Providers receive validated PCM and do not read settings, select fallback, write SQLite, or assign revision numbers. The token is checked before and after the synchronous native call; window orchestration remains responsible for the documented maximum cancellation latency.
 
-- [ ] **Step 4: Implement sherpa adapters behind `asr-runtime`**
+- [ ] **Step 4: Implement exact adapters behind their separate runtime features**
 
-Map manifest files into `OfflineSenseVoiceModelConfig`, `OfflineWhisperModelConfig`, and `OfflineQwen3ASRModelConfig`. Enable the approved language/task/ITN values. Capture runtime version and build identity. The Qwen adapter must refuse a manifest whose executable capability Gate is not satisfied; it must never substitute 0.6B for 1.7B.
+Map SenseVoice, Whisper and Qwen 0.6B manifest files into `OfflineSenseVoiceModelConfig`, `OfflineWhisperModelConfig`, and `OfflineQwen3ASRModelConfig`. Enable the approved language/task/ITN values and capture sherpa runtime version/build identity.
+
+For Qwen 1.7B, the adapter loads only the structurally installed five-file bundle through the Task 5-inspected `qwen3-asr` crate 0.2.2 at Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`, binds to M4/24GB Metal, runs a fixed short smoke and returns crate/git/Candle/backend/target/device identity. `RuntimeQualifier`, not the adapter, owns marker durability, Catalog CAS and reconciliation through ModelManager. Provider Factory only consumes a matching `runtime_qualified` installation/marker and never performs qualification. Neither adapter may fallback to the other.
 
 - [ ] **Step 5: Run provider tests and compile both feature sets**
 
@@ -575,14 +640,20 @@ Run:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_provider
-cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime asr_provider
-cargo check --manifest-path src-tauri/Cargo.toml --features desktop
+scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime asr_provider
+scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features asr-qwen17-runtime asr_runtime_qualifier
+scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml --features 'asr-runtime,asr-qwen17-runtime'
+scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml --features desktop
+cargo metadata --manifest-path src-tauri/Cargo.toml --locked --format-version 1
+cargo tree --manifest-path src-tauri/Cargo.toml --locked -e features
 ```
+
+The feature graph contract is: `asr-runtime` enables sherpa only; `asr-qwen17-runtime` enables the pinned qwen/Candle/Metal path only; production `desktop` must include both (or depend on a named `desktop-full` that includes both). The metadata/tree assertion must prove the selected production feature contains `qwen3-asr` and Metal; a desktop build containing only sherpa fails Task 8 and Task 15.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src-tauri/src/asr/provider.rs src-tauri/src/asr/sense_voice.rs src-tauri/src/asr/whisper.rs src-tauri/src/asr/qwen3_asr.rs src-tauri/src/asr_provider_test.rs src-tauri/src/lib.rs
+git add src-tauri/src/asr/provider.rs src-tauri/src/asr/sense_voice.rs src-tauri/src/asr/whisper.rs src-tauri/src/asr/qwen3_asr.rs src-tauri/src/asr/runtime_qualifier.rs src-tauri/src/asr_provider_test.rs src-tauri/src/asr_runtime_qualifier_test.rs src-tauri/src/asr/model_manager.rs src-tauri/src/asr_model_manager_test.rs src-tauri/src/catalog.rs src-tauri/src/lib.rs src-tauri/Cargo.toml src-tauri/Cargo.lock
 git commit -m "feat: add local ASR providers"
 ```
 
@@ -719,7 +790,9 @@ git commit -m "feat: publish traceable ASR revisions"
 - Modify: `src-tauri/src/catalog/migrations/fingerprint.rs`
 - Modify/Create: `src-tauri/src/catalog_migration_test/*`
 - Modify: `src-tauri/src/service.rs`
-- Create: `tests/fixtures/catalog/lifesub-v0.2.sqlite3`
+- Test: `tests/fixtures/catalog/lifesub-v0.3.sqlite3`
+- Create: `tests/fixtures/catalog/lifesub-v0.4.sqlite3`
+- Modify: `docs/superpowers/specs/2026-08-16-lifesub-local-tool-api-design.md`
 - Create: `tests/fixtures/tool-api/agent-v1/*.json`
 - Create: `tests/fixtures/tool-api/application-v1/*.json`
 - Create: `tests/fixtures/tool-api/gateway/*.json`
@@ -738,13 +811,15 @@ Requests contain no caller/capability authority. Tests prove `caller_kind = taur
 
 Freeze MAC'd cursor behavior: search ordering is `score DESC, session_start_ms DESC, revision_id ASC, segment_id ASC`; cursor binds contract/method/principal/query/filters/limit/keyset/high-watermark/expiry/Catalog epoch. Test ties, tamper, caller/query/limit mismatch, expiry, inserts, deletes and stale epoch.
 
-- [ ] **Step 2: Test Catalog v3 and mutation recovery**
+- [ ] **Step 2: Test Catalog v4 and mutation recovery**
 
-Extend migration tests for fresh/v1/v2 -> v3 using immutable checked-in fixtures, rollback with unchanged old bytes and `user_version`, final `user_version = 3`, fingerprint fail-closed, concurrent two-process migration and v3 reopen. Catalog v3 adds `tool_requests`, durable operations/outbox, open-intent ledger and schema/cursor epoch.
+Extend migration tests for fresh/v1/v2/v3 -> v4 using immutable checked-in fixtures, rollback with unchanged old bytes and `user_version`, final `user_version = 4`, fingerprint fail-closed, concurrent two-process migration and v4 reopen. Task 6's v3 fixture and `model_download_artifacts`/two-stage installation DDL are immutable inputs: Task 11 must preserve them byte-for-byte at the schema-contract level and may not append or alter tables under `user_version = 3`. Catalog v4 exclusively adds `tool_requests`, durable operations/outbox, open-intent ledger and schema/cursor epoch.
+
+Before implementation, update every Catalog v3 reference in the Local Tool design to Catalog v4, including `tool_requests`, Host Control ledger, migration paths, acceptance text and `user_version`. This documentation change is part of Task 11; no code may implement Local Tool DDL while its referenced design still calls it v3.
 
 For SQLite-only mutations, test one transaction commits business state plus exact replay result; cover identical concurrent `in_progress`, changed fingerprint, cancel-before-commit rollback, crash-before-commit retry, crash-after-commit-before-response replay, and restart recovery. For `import_audio` and model operations, test accept transaction -> operation/outbox -> idempotent executor checkpoints, cancel before/after accept and publish checkpoints, and restart recovery without duplicate file/device effects. `import_audio` returns operation/session/chunk/optional Job and never appends `demo-local` text.
 
-Test `open_evidence` as intent issuance only: `confirmation_required` is a successful disposition, not an error, and the requester response contains only intent ID/disposition/expiry. Add non-public Host Event + Host Control Protocol V1 in `host_control.rs`, excluded from Agent 8/Application 16. Core pushes `PendingOpenEvidenceEvent { event_id, intent_id, requesting_principal_id/kind, evidence_ref, display_metadata, expires_at }` only to authorized in-process event sinks or `ui.sock` subscriptions; it contains no claim token, raw transcript or path. Authorized host-only controls are `claim_open_intent(intent_id)`, `complete_open_intent(intent_id)` and `mark_open_intent_uncertain(intent_id, diagnostic_id)`. Primary in-process Tauri calls the same service; secondary uses internal frames over authorized `ui.sock`; ordinary Agent/Gateway cannot subscribe or route controls. CoreRuntime alone serializes Catalog v3 ledger writes, so adapters never write DB.
+Test `open_evidence` as intent issuance only: `confirmation_required` is a successful disposition, not an error, and the requester response contains only intent ID/disposition/expiry. Add non-public Host Event + Host Control Protocol V1 in `host_control.rs`, excluded from Agent 8/Application 16. Core pushes `PendingOpenEvidenceEvent { event_id, intent_id, requesting_principal_id/kind, evidence_ref, display_metadata, expires_at }` only to authorized in-process event sinks or `ui.sock` subscriptions; it contains no claim token, raw transcript or path. Authorized host-only controls are `claim_open_intent(intent_id)`, `complete_open_intent(intent_id)` and `mark_open_intent_uncertain(intent_id, diagnostic_id)`. Primary in-process Tauri calls the same service; secondary uses internal frames over authorized `ui.sock`; ordinary Agent/Gateway cannot subscribe or route controls. CoreRuntime alone serializes Catalog v4 ledger writes, so adapters never write DB.
 
 Freeze/test `pending -> executing -> consumed | uncertain` plus pending -> expired CAS transactions. Ledger separately stores immutable requesting principal/evidence binding and authorized Tauri claim principal; they need not match. Claim verifies the event/requester/evidence were not altered and the caller owns Core-held subscription/in-process delivery capability, not a bearer token. Cover auditable consent timestamp, exact idempotent retries, conflicting outcome errors, concurrent claim single winner, host offline/event loss followed by internal pending replay on subscription resume, expiry removal, and crash after executing claim before finish -> uncertain without opening UI. A new public `open_evidence` intent plus fresh confirmation is then required. There is no second public Agent confirm tool or Application confirm method.
 
@@ -780,7 +855,7 @@ scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml 
 ```
 
 ```bash
-git add src-tauri/Cargo.toml src-tauri/src/commands.rs src-tauri/src/commands_test.rs src-tauri/src/desktop_api.rs src-tauri/src/core_runtime.rs src-tauri/src/tool_api.rs src-tauri/src/tool_api_test.rs src-tauri/src/host_control.rs src-tauri/src/host_control_test.rs src-tauri/src/local_ipc.rs src-tauri/src/local_ipc_test.rs src-tauri/src/runtime_lock.rs src-tauri/src/bin/lifesub-ipc-test-host.rs src-tauri/src/bin/lifesub-ipc-test-client.rs src-tauri/src/bin/lifesub-two-tauri-harness.rs src-tauri/src/catalog.rs src-tauri/src/catalog src-tauri/src/catalog_migration_test src-tauri/src/lib.rs src-tauri/src/service.rs scripts/verify-local-ipc.sh tests/fixtures/catalog/lifesub-v0.2.sqlite3 tests/fixtures/tool-api tests/fixtures/code-signing
+git add src-tauri/Cargo.toml src-tauri/src/commands.rs src-tauri/src/commands_test.rs src-tauri/src/desktop_api.rs src-tauri/src/core_runtime.rs src-tauri/src/tool_api.rs src-tauri/src/tool_api_test.rs src-tauri/src/host_control.rs src-tauri/src/host_control_test.rs src-tauri/src/local_ipc.rs src-tauri/src/local_ipc_test.rs src-tauri/src/runtime_lock.rs src-tauri/src/bin/lifesub-ipc-test-host.rs src-tauri/src/bin/lifesub-ipc-test-client.rs src-tauri/src/bin/lifesub-two-tauri-harness.rs src-tauri/src/catalog.rs src-tauri/src/catalog src-tauri/src/catalog_migration_test src-tauri/src/lib.rs src-tauri/src/service.rs scripts/verify-local-ipc.sh tests/fixtures/catalog/lifesub-v0.3.sqlite3 tests/fixtures/catalog/lifesub-v0.4.sqlite3 tests/fixtures/tool-api tests/fixtures/code-signing docs/superpowers/specs/2026-08-16-lifesub-local-tool-api-design.md
 git commit -m "feat: expose versioned local tool API"
 ```
 
@@ -814,11 +889,11 @@ Assert exact adapter mappings for Application V1 settings/model/import/job/revis
 
 - [ ] **Step 2: Write failing settings interaction tests**
 
-Test SenseVoice/Whisper/Qwen3-ASR segmented control, compatible model cards, download/cancel/delete buttons, operation progress and every terminal operation state, language menu, thread stepper, VAD and auto-transcribe toggles, SenseVoice ITN, Whisper task, Qwen3-ASR 0.6B readiness, disabled 1.7B capability messaging without a download action, save errors, and fixed loading layout.
+Test SenseVoice/Whisper/Qwen3-ASR segmented control, compatible model cards, download/pause-resume-or-retry/cancel/delete buttons, operation progress and every terminal operation state, language menu, thread stepper, VAD and auto-transcribe toggles, SenseVoice ITN, Whisper task, and both Qwen sizes. On the supported M4/24GB macOS 14+ arm64 Metal device, 1.7B must show its approximately 4.71 GB bundle size, Candle/Metal runtime, download action, aggregate multi-file progress, `installed_unqualified` runtime-validation state and final `runtime_qualified` ready state. On 16GB or another incompatible device it stays selectable/visible with exact unmet conditions and no download action. Test save errors, structural failure, runtime qualification retry, fixed loading layout, and the exact four-row ModelLookup capability presentation.
 
 - [ ] **Step 3: Implement typed DTOs and client**
 
-No `any`; keep snake_case Core DTOs at the service boundary and map them to camelCase view models in one place.
+No `any`; keep snake_case Core DTOs at the service boundary and map them to camelCase view models in one place. Preserve separate `selectable`, `installable` and `executable` booleans plus reason codes, runtime identity, artifact count/total bytes and downloaded bytes; UI must not infer readiness from a single boolean or download completion alone.
 
 - [ ] **Step 4: Replace static SettingsView content**
 
@@ -898,21 +973,22 @@ NFKC + lowercase Latin; CER removes punctuation/whitespace and uses grapheme clu
 
 - [ ] **Step 2: Implement a single real-model Gate runner**
 
-`lifesub-asr-gate` loads the fixture manifest, verifies every fixture/model/runtime input hash, runs SenseVoice, Whisper, and Qwen3-ASR 0.6B fixtures, calculates all approved metrics, and writes the result JSON atomically. Qwen3-ASR 1.7B is enabled only when the same Gate includes its immutable executable asset and records peak memory plus RTF on the supported Apple Silicon baseline. The JSON includes `tested_commit`, a deterministic digest of the exact paths listed in version-controlled `scripts/asr-gate-scope.txt`, executable hash, runtime version/git SHA, native archive hash, model/VAD artifact hashes, and fixture hashes. Dynamic globs are prohibited. Unrelated dirty files outside the declared source scope do not invalidate the Gate; any scoped modification does.
+`lifesub-asr-gate` loads the fixture manifest, verifies every fixture/model/runtime input hash, runs SenseVoice, Whisper, Qwen3-ASR 0.6B and Qwen3-ASR 1.7B fixtures, calculates all approved metrics, and writes the result JSON atomically. The 1.7B run is mandatory on the current M4/24GB macOS arm64 release device and requires Metal; unsupported hosts must report SKIP for developer convenience but the release verifier treats any 1.7B SKIP as failure. The JSON includes `tested_commit`, a deterministic digest of the exact paths listed in version-controlled `scripts/asr-gate-scope.txt`, executable hash, sherpa runtime version/git/native archive hash, `qwen3-asr` crate version/Git commit/Candle Metal backend/target/actual device, canonical model bundle identity, every model/VAD artifact source revision/hash, fixture hashes, and each Receipt runtime identity. Dynamic globs are prohibited. Unrelated dirty files outside the declared source scope do not invalidate the Gate; any scoped modification does.
 
-Required Qwen3-ASR 0.6B scenario IDs are `qwen3-0.6b-zh`, `qwen3-0.6b-en`, and `qwen3-0.6b-zh-en`. Thresholds are: Mandarin CER `<= 20%`, English WER `<= 20%`, mixed-language key-phrase recall `= 100%`, median boundary error `<= 500 ms`, and maximum boundary error `<= 1.5 s`. The verifier fails if any scenario ID or metric is absent.
+Required Qwen3-ASR 0.6B scenario IDs are `qwen3-0.6b-zh`, `qwen3-0.6b-en`, `qwen3-0.6b-zh-en`, and `qwen3-0.6b-perf-300s`. Thresholds are: Mandarin CER `<= 20%`, English WER `<= 20%`, mixed-language key-phrase recall `= 100%`, median boundary error `<= 500 ms`, maximum boundary error `<= 1.5 s`, 300-second RTF `<= 1.0`, and peak RSS `<= 4 GiB` on the same M4/24GB host. Its Receipt must identify sherpa 1.13.5, exact runtime/native archive and the 0.6B bundle; any Candle/1.7B identity fails. The verifier fails if any scenario ID, metric or receipt identity is absent.
 
-Qwen3-ASR 1.7B can change to installable only when Gate evidence records Apple Silicon chip, 16 GB or greater unified memory, macOS 14+, exact runtime/model/fixture hashes, Mandarin CER `<= 20%`, English WER `<= 20%`, mixed-language key-phrase recall `= 100%`, no quality metric worse than 0.6B on the same fixtures, five-minute RTF `<= 1.0`, and peak RSS `<= 6 GiB`.
+Required Qwen3-ASR 1.7B scenario IDs are `qwen3-1.7b-zh`, `qwen3-1.7b-en`, `qwen3-1.7b-zh-en`, and `qwen3-1.7b-perf-300s`. Gate evidence records the formally supported M4, 24 GB unified memory, macOS/arm64, Metal device, exact crate/git/Candle runtime, canonical bundle and fixture hashes, Mandarin CER `<= 20%`, English WER `<= 20%`, mixed-language key-phrase recall `= 100%`, no quality metric worse than 0.6B on the same fixtures, 300-second RTF `<= 1.0`, and peak RSS `<= 6 GiB`. The Receipt must identify the 1.7B Candle/Metal runtime and model; any sherpa/0.6B/CPU identity fails the no-fallback assertion. Upstream M4/16GB avg RTF 0.319 and live memory 4.6 GB are reference values only; 16 GB is unsupported until a future LifeSub Gate passes.
 
 The five-minute performance input is `tests/fixtures/asr/qwen-perf-5m.wav`, generated deterministically by cycling `zh.wav`, `en.wav`, `zh-en.wav`, then 500 ms of 16 kHz mono silence until exactly 300 seconds and truncating only on a PCM frame boundary. The fixture manifest records generator version, ordered source hashes, final SHA-256, license inheritance, sample rate, channels, and exact duration. It is included in `scripts/asr-gate-scope.txt`; the Gate rejects a locally regenerated file whose hash differs.
 
 `scripts/verify-asr-gate.sh` must:
 
 1. Fetch/verify the native archive.
-2. Verify all expected real tests appear in `cargo test -- --list` with nonzero count.
-3. Run the Gate binary.
-4. Parse the result and fail unless every expected scenario exists and passes.
-5. Support `--verify-existing`, which validates committed JSON without running models or rewriting files.
+2. Verify the five-file 1.7B bundle, canonical identity, structural marker and runtime qualification marker without copying weights into the repository.
+3. Verify all expected real tests appear in `cargo test -- --list` with nonzero count.
+4. Run the Gate binary on the required M4/24 device.
+5. Parse the result and fail unless every expected scenario exists and passes with the exact runtime Receipt identities and no fallback.
+6. Support `--verify-existing`, which validates committed JSON without running models or rewriting files.
 
 - [ ] **Step 3: Commit the Gate implementation before generating evidence**
 
@@ -923,7 +999,7 @@ git commit -m "test: add real local ASR gate"
 
 The Gate script must now assert that every scoped source/fixture path is clean relative to `HEAD` before running.
 
-- [ ] **Step 4: Run SenseVoice, Whisper, and Qwen3-ASR 0.6B through the Gate from the committed source snapshot**
+- [ ] **Step 4: Run all providers and both Qwen sizes through the Gate from the committed source snapshot**
 
 Run with the installed model cache path:
 
@@ -932,7 +1008,7 @@ LIFESUB_ASR_MODEL_DIR="$HOME/Library/Application Support/com.goldenwave.lifesub/
 scripts/verify-asr-gate.sh
 ```
 
-Expected: SenseVoice CER <= 20%; Whisper WER <= 20%; Qwen3-ASR 0.6B Mandarin CER <= 20% and English WER <= 20%; all required mixed-language phrases present; median boundary error <= 500 ms; max <= 1.5 s. The script fails if any required provider/scenario is absent or zero scenarios ran.
+Expected: SenseVoice CER <= 20%; Whisper WER <= 20%; both Qwen sizes have Mandarin CER <= 20%, English WER <= 20%, and all required mixed-language phrases; both have RTF <= 1.0 on the identical 300-second fixture, with 0.6B RSS <= 4 GiB and 1.7B RSS <= 6 GiB; 1.7B is not worse than 0.6B on paired quality metrics; median boundary error <= 500 ms; max <= 1.5 s. Each Receipt must match its exact runtime/model identity. The script fails if any required provider/scenario/runtime identity is absent, if zero scenarios ran, or if fallback is detected.
 
 - [ ] **Step 5: Verify evidence is bound to the tested source digest**
 
@@ -984,12 +1060,12 @@ Required scenarios:
 - `cancel-real-asr`: `cancelling` acknowledged <= 500 ms and final cancelled <= 30 seconds.
 - `claim-and-abort`: claim a Job, persist the Job ID/generation, then terminate without cleanup.
 - `verify-recovery`: new boot ID recovers the stale claim <= 5 seconds.
-- `packaged-smoke`: run SenseVoice, Whisper, and Qwen3-ASR 0.6B fixtures from the packaged executable and verify each Receipt identity.
+- `packaged-smoke`: run SenseVoice, Whisper, Qwen3-ASR 0.6B and Qwen3-ASR 1.7B fixtures from the packaged executable; verify every Receipt identity, canonical bundle identity, 1.7B structural plus runtime qualification markers, Candle/Metal device and no fallback.
 - `packaged-peer-auth-primary` / `packaged-peer-auth-secondary`: launch two instances of the actual release-signed `.app`; secondary must obtain `tauri_ui` only when audit token, designated requirement, Team ID and bundle ID match, exercise Application/Agent projection plus Host Control claim/uncertain frames, and keep all secondary direct-DB side-effect counters at zero.
 
 - [ ] **Step 3: Implement the desktop harness**
 
-`scripts/verify-desktop-asr.sh` internally calls `fetch-sherpa-runtime.sh`, exports the verified `SHERPA_ONNX_ARCHIVE_DIR`, hashes only the exact paths in version-controlled `scripts/desktop-asr-scope.txt`, builds the app, launches each scenario with an isolated temporary HOME/data directory, terminates the claim scenario process, relaunches recovery, and rejects reports containing `mock`, zero scenarios, mismatched executable/Git/runtime/model/fixture hashes, or failed thresholds. It also supports read-only `--verify-existing` mode.
+`scripts/verify-desktop-asr.sh` internally calls `fetch-sherpa-runtime.sh`, exports the verified `SHERPA_ONNX_ARCHIVE_DIR`, verifies the external five-file Qwen 1.7B bundle, hashes only the exact paths in version-controlled `scripts/desktop-asr-scope.txt`, builds the app with the pinned `qwen3-asr`/Candle Metal path, launches each scenario with an isolated temporary HOME/data directory, terminates the claim scenario process, relaunches recovery, and rejects reports containing `mock`, zero scenarios, mismatched executable/Git/runtime/model/fixture hashes, missing Metal/Candle identity, or failed thresholds. It also supports read-only `--verify-existing` mode. The harness stages model assets only under the isolated user model directory; it fails if weights appear in Git, source archives or `.app` resources.
 
 `scripts/verify-packaged-peer-auth.sh` is the first production-signing authorization Gate; Task 11's ad-hoc test identities do not satisfy it. It inspects the release `.app` with `codesign -dr -` and signing metadata, records the expected designated requirement/Team ID/bundle ID, launches primary and secondary instances from that exact `.app` under one isolated HOME, and verifies successful `ui.sock` authorization plus Host Control access. It then runs copied/re-signed or dedicated negative fixture clients proving unsigned, mismatched Team ID, bundle ID and designated requirement cannot obtain `tauri_ui` or Host Control and can only reconnect to `agent.sock` as `local_agent`. The script must fail if any positive/negative scenario is skipped or if the identities were not derived from the packaged app.
 
@@ -1016,8 +1092,12 @@ npm run build
 npm run test:e2e
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
 scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime
+scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features asr-qwen17-runtime asr_runtime_qualifier
+scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml --features 'asr-runtime,asr-qwen17-runtime'
 scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features desktop commands_test
 scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml --features desktop
+cargo metadata --manifest-path src-tauri/Cargo.toml --locked --format-version 1
+cargo tree --manifest-path src-tauri/Cargo.toml --locked -e features
 scripts/verify-asr-gate.sh
 scripts/verify-desktop-asr.sh target
 ```
@@ -1035,7 +1115,7 @@ Run:
 git status --short
 ```
 
-Expected: no `console.log`; no model weights, user audio, API keys, or private paths staged.
+Expected: no `console.log`; no model weights, user audio, API keys, or private paths staged, tracked, present in source archives, or embedded in the `.app` resources.
 
 - [ ] **Step 8: Build, mount, and execute the DMG application**
 
@@ -1043,17 +1123,19 @@ Run:
 
 ```bash
 scripts/with-sherpa-runtime.sh npm run tauri -- build --features desktop
+cargo tree --manifest-path src-tauri/Cargo.toml --locked -e features --features desktop
 otool -L src-tauri/target/release/bundle/macos/LifeSub.app/Contents/MacOS/lifesub
+nm -m src-tauri/target/release/bundle/macos/LifeSub.app/Contents/MacOS/lifesub
 codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/LifeSub.app
 scripts/verify-packaged-peer-auth.sh src-tauri/target/release/bundle/macos/LifeSub.app
 scripts/verify-desktop-asr.sh dmg
 ```
 
-The packaged peer-auth Gate must use the actual release-signed `.app`, launch primary/secondary app processes, validate audit token against the extracted designated requirement/Team ID/bundle ID, prove unsigned/mismatched identities are rejected, and record Host Control authorization results. The `dmg` scenario must then deterministically locate the produced DMG, mount it read-only with `hdiutil`, verify the image-contained `.app` signature, rerun packaged peer authorization against the image-contained app, run its `Contents/MacOS/lifesub --acceptance-scenario packaged-smoke` under an isolated HOME, verify real SenseVoice, Whisper, and Qwen3-ASR 0.6B results plus Receipt identity, then detach the image even on failure. Expected: no unresolved sherpa-onnx/onnxruntime dylib, signature and peer authorization pass, and image-contained real ASR smoke passes. Re-sign the full bundle and rebuild the DMG using the established V0.1 procedure before this Gate if needed.
+The packaged peer-auth Gate must use the actual release-signed `.app`, launch primary/secondary app processes, validate audit token against the extracted designated requirement/Team ID/bundle ID, prove unsigned/mismatched identities are rejected, and record Host Control authorization results. The `dmg` scenario must then deterministically locate the produced DMG, mount it read-only with `hdiutil`, verify the image-contained `.app` signature, rerun packaged peer authorization against the image-contained app, inspect the executable for expected Candle/Metal linkage or symbols and absence of development-machine paths, then run its `Contents/MacOS/lifesub --acceptance-scenario packaged-smoke` under an isolated HOME. The smoke resolves externally installed fixed assets and verifies real SenseVoice, Whisper, Qwen3-ASR 0.6B and Qwen3-ASR 1.7B results, exact Receipt runtime identities, 1.7B structural/qualification markers and no fallback, then detaches the image even on failure. Expected: no unresolved sherpa-onnx/onnxruntime dylib, Candle/Metal runtime present, no model weights inside the `.app`/DMG, signature and peer authorization pass, and image-contained real ASR smoke passes. Re-sign the full bundle and rebuild the DMG using the established V0.1 procedure before this Gate if needed.
 
 - [ ] **Step 9: Capture visual and verification evidence**
 
-Use Playwright screenshots at desktop and mobile widths. Write exact commands, model hashes, metrics, test counts, `otool`, release designated requirement/Team ID/bundle ID, positive/negative packaged peer-auth results, signature, and DMG results to `output/asr-v0.2/verification.md`.
+Use Playwright screenshots at desktop and mobile widths. Write exact commands, per-file model hashes/revisions and bundle identities, sherpa and Qwen 1.7B crate/git/Candle/Metal/device identities, metrics, test counts, `otool`/symbol evidence, release designated requirement/Team ID/bundle ID, positive/negative packaged peer-auth results, no-weight checks, signature, packaged smoke and DMG results to `output/asr-v0.2/verification.md`.
 
 - [ ] **Step 10: Update docs and progress**
 
@@ -1081,13 +1163,13 @@ After this evidence/docs commit, run `scripts/verify-asr-gate.sh --verify-existi
 - [ ] A real two-process `agent.sock` request -> authorized `ui.sock` Host Event -> user-prompt simulation -> Host Control claim -> fake opener -> consumed flow passes; requester/claimer are separately audited, pending events replay after loss/offline, and no claim token/path leaks.
 - [ ] Full Core ownership prevents secondary writable DB open/migration/reconciliation/worker/device/model/import/ledger side effects; only primary CoreRuntime commits business, operation and consent ledgers.
 - [ ] Packaged peer-auth Gate passes for release-signed primary/secondary `.app` and DMG-contained app, while unsigned or mismatched designated requirement/Team ID/bundle ID clients cannot obtain `tauri_ui` or Host Control.
-- [ ] SenseVoice, Whisper, and Qwen3-ASR 0.6B all execute real local inference; Qwen scenario IDs `qwen3-0.6b-zh`, `qwen3-0.6b-en`, and `qwen3-0.6b-zh-en` pass.
+- [ ] SenseVoice, Whisper, Qwen3-ASR 0.6B and Qwen3-ASR 1.7B all execute real local inference; both Qwen scenario sets pass, 1.7B runs on M4/24GB Candle/Metal with RTF/RSS thresholds, and Receipt evidence proves no fallback.
 - [ ] Settings selection changes the next Job's persisted provider/model snapshot.
-- [ ] Model downloads are hashed, safely extracted, versioned, recoverable, and removable.
+- [ ] Single-archive and multi-file model downloads are individually hashed, checkpointed/resumable, safely assembled, versioned, atomically recoverable, compatibility-validated and removable.
 - [ ] Audio is immutable, re-hashed before ASR, decoded only for declared formats, and timestamped correctly.
 - [ ] Jobs use singleton worker locking, leases, boot IDs, claim-generation fencing, cancellation, and bounded retries.
 - [ ] Successful results atomically publish Receipt, Revision, Segments, FTS rows, and succeeded state.
 - [ ] Retranscription creates a new revision and preserves the previous revision.
 - [ ] Real fixture CER/WER, phrase, and timing thresholds pass with saved evidence.
 - [ ] UI responsiveness, cancellation, restart recovery, desktop/mobile layout, and error states pass.
-- [ ] Static runtime, `otool`, signatures, DMG, licenses, docs, and no-secret/no-model-weight checks pass.
+- [ ] Static sherpa runtime, pinned Candle/Metal runtime, `otool`/symbol and asset-resolution checks, signatures, packaged/DMG smoke for both Qwen sizes, licenses, docs, and no-secret/no-model-weight checks pass.

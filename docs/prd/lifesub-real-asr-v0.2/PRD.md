@@ -7,7 +7,7 @@
 | 项目名称 | LifeSub 真实本地 ASR V0.2 |
 | 目标用户 | 在 macOS 本机保存、转写和检索个人音频证据的 LifeSub 用户 |
 | 核心价值 | 使用可切换的真实本地模型生成可定位、可追溯、可重转写的 Transcript Revision |
-| 成功指标 | SenseVoice、Whisper 与 Qwen3-ASR 0.6B 均完成真实样本转写；Qwen3-ASR 1.7B 通过设备兼容性 Gate 后可选；设置切换、模型管理、自动转写和重转写流程通过验收 |
+| 成功指标 | SenseVoice、Whisper、Qwen3-ASR 0.6B 与 Qwen3-ASR 1.7B 均完成真实样本转写；两档 Qwen 使用各自固定运行时且绝不互相回退；设置切换、模型管理、自动转写和重转写流程通过验收 |
 | 预估用户量级 | 本地单用户桌面应用，不涉及服务端并发 |
 | 预计上线 | 设计与真实模型 Gate 通过后发布 V0.2 |
 
@@ -101,7 +101,7 @@ ui --> user: 展示真实转写和来源
 
 1. 设置页展示当前 Provider、模型、语言支持、包体大小、许可证和安装状态。
 2. Provider 切换后只展示兼容模型和参数。
-3. 未安装模型不能成为可执行配置；下载完成并校验成功后才标记为就绪。
+3. 未安装模型不能成为可执行配置；下载与 structural install 完成仍可能是 `installed_unqualified`，只有所需 runtime qualification 完成后才标记为就绪。
 4. 设置保存后，新 ASR Job 使用该配置；已存在的 revision 不变化。
 
 **异常情况**:
@@ -169,12 +169,12 @@ ui --> user: 展示真实转写和来源
 3. 系统下载模型包并展示字节进度。
 4. 系统校验 SHA-256，解压到临时目录。
 5. 系统安装到带 manifest 与 hash 的不可变版本目录。
-6. 系统事务更新当前激活安装并标记就绪。
+6. 系统事务发布 structural installation；需要 runtime qualification 的模型保持未激活，qualification 成功后再以独立原子事务标记就绪。
 
 **预期结果**:
 
 1. 下载可取消，取消后不留下可执行的半成品模型。
-2. 只有所有必需文件和 hash 校验通过才标记就绪。
+2. Manifest 的 qualification policy 决定发布路径：SenseVoice、Whisper、Qwen3-ASR 0.6B 与 Silero VAD 使用 `structural_with_pinned_runtime`，Task 6 在结构校验和精确 sherpa runtime identity 校验后同一事务直接发布 `runtime_qualified`；仅 Qwen3-ASR 1.7B 使用 `runtime_smoke_required`，先发布 `installed_unqualified`，再由独立 RuntimeQualifier 完成 Candle/Metal smoke 后原子升级。
 3. 删除当前模型前要求确认；删除后相关新任务进入 blocked_model。
 4. 下载、校验和安装进度在应用重启后仍可诊断。
 
@@ -190,12 +190,14 @@ ui --> user: 展示真实转写和来源
 
 **业务规则与数据约束**:
 
-- 首发模型：SenseVoiceSmall INT8；Whisper Tiny、Base、Small；Qwen3-ASR 0.6B INT8。
-- Qwen3-ASR 1.7B 作为高质量可选项展示，但只有存在固定来源、大小、SHA-256、必需文件及 Apple Silicon 真实性能证据时才允许下载和执行；否则明确标记为“实验性/暂不可安装”，不得回退到 0.6B。
-- 模型保存在应用数据目录 `models/asr/<provider>/<model-id>/<manifest-version>-<archive-hash>/`，已安装版本不可原地替换。
-- `model_downloads` 持久化下载、校验和安装状态；`model_installations` 只保存已激活、可执行版本。
-- Model Manifest 固定模型来源、版本、包体大小、SHA-256、许可证和必需文件。
-- 正式目录不直接写入；安装流程使用临时目录和原子 rename。
+- 首发模型：SenseVoiceSmall INT8；Whisper Tiny、Base、Small；Qwen3-ASR 0.6B INT8；Qwen3-ASR 1.7B。
+- Qwen3-ASR Provider 支持两个独立运行时身份：0.6B 使用 sherpa-onnx 1.13.5，1.7B 使用固定 Git commit 的 `qwen3-asr` 0.2.2 + Candle + Metal；选择 1.7B 时不得回退到 0.6B、sherpa 或 CPU 替代路径。
+- Qwen3-ASR 1.7B 是当前 M4/24GB、macOS 14+、arm64、Metal 设备上的正式可安装模型。16 GB 设备尚无 LifeSub 实测证据，本版本仅展示模型与“需要 24 GB”原因，`selectable = true`、`installable = false`、`executable = false`；不得引用上游基准扩展正式支持范围。
+- 模型保存在应用数据目录 `models/asr/<provider>/<model-id>/<manifest-version>-<bundle-identity>/`，已安装版本不可原地替换。
+- `model_downloads` 持久化 bundle 级下载状态，`model_download_artifacts` 持久化每个文件的 source identity、bytes、ETag/Last-Modified、临时路径、checkpoint、hash 与状态；`model_installations` 保存 `installed_unqualified | runtime_qualified | deleting`，结构失败使用稳定错误码而不发布安装，runtime qualification 失败保持 `installed_unqualified` 而不误标 corrupt。
+- Model Manifest 支持单归档与多文件 bundle。每个文件固定来源、revision、字节大小、SHA-256、安装相对路径、是否必需、许可证和 provenance；对 canonical manifest 计算 SHA-256 得到确定性 bundle identity。
+- Qwen3-ASR 1.7B bundle 使用官方原始 `Qwen/Qwen3-ASR-1.7B` revision `d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec` 的 `thinker_config` 格式 config/分片权重/index，并混用官方 `Qwen/Qwen3-ASR-1.7B-hf` 的 `tokenizer.json`。Task 5 必须先把 tokenizer 的 floating reference 解析为 immutable commit，并确认下载内容匹配既有 size/hash；在 revision 与 expected canonical bundle SHA 写入前，shipping registry 必须拒绝该条目。
+- 正式目录不直接写入；所有 bundle 文件分别下载到可恢复 checkpoint，经逐文件校验后在同一 staging 组装，写入安装 marker 并原子 rename。磁盘预检同时覆盖下载临时文件、staging 和最终安装占用。
 
 ### 5.3 真实转写任务
 
@@ -302,7 +304,7 @@ ui --> user: 展示真实转写和来源
 
 **业务规则与数据约束**:
 
-- Receipt 至少包含 job_id、chunk_id、provider、model_id、manifest_version、archive_sha256、required_file_hashes、model_source_json、VAD model/manifest/archive/file hashes、runtime_version、runtime_build_id、parameters、input_hash、started_at、finished_at、data_destination 和 outcome。
+- Receipt 至少包含 job_id、chunk_id、provider、model_id、manifest_version、bundle identity、全部必需 artifact hashes、model_source_json、VAD model/manifest/archive/file hashes、精确 runtime identity（含 crate/version/git commit/backend/device）、parameters、input_hash、started_at、finished_at、data_destination 和 outcome。
 - 新 Revision 通过 `revision_receipts` 关联全部输入 Receipt；新 Segment 同时保存 chunk-relative 与 session-relative 时间。
 - 错误日志不得包含音频内容或用户目录中的完整敏感路径。
 
@@ -319,8 +321,8 @@ ui --> user: 展示真实转写和来源
 
 **包含**:
 
-- SenseVoiceSmall、Whisper 与 Qwen3-ASR 0.6B 的真实本地离线转写。
-- Qwen3-ASR 1.7B 的模型选择、设备能力说明和独立启用 Gate。
+- SenseVoiceSmall、Whisper、Qwen3-ASR 0.6B 与 Qwen3-ASR 1.7B 的真实本地离线转写。
+- Qwen3-ASR 1.7B 的多文件安装、Candle/Metal 执行、设备能力说明和独立真实模型 Gate。
 - 模型安装、切换、删除、状态和许可证展示。
 - ASR 设置、自动转写、任务状态、重试和重新转写。
 - VAD 时间范围、Provider Receipt 和不可变 revision。
@@ -335,14 +337,14 @@ ui --> user: 展示真实转写和来源
 
 ## 8. 非功能约束
 
-- **性能**: M1/16GB 基线下，5 分钟单声道音频的转写任务不得阻塞录音状态 UI；具体 RTF 作为验收报告记录，不以 UI 主线程同步执行。
+- **性能**: M1/16GB 基线仅适用于 SenseVoice、Whisper、Qwen3-ASR 0.6B 与通用 UI 响应，不适用于 Qwen3-ASR 1.7B；1.7B 的正式基线是当前 M4/24GB，并必须满足 300 秒 RTF `<= 1.0` 与峰值 RSS `<= 6 GiB`。所有推理均不在 UI 主线程同步执行。
 - **资源**: 默认线程数不超过 4；同一时刻默认只执行一个 ASR Job，避免模型内存叠加。
 - **安全**: 本版本模型和音频均在本机处理；下载只允许 manifest 固定的 HTTPS 地址并强制 SHA-256 校验。
 - **数据一致性**: Audio Chunk 先提交；Receipt、Revision、Segment 和任务成功状态使用同一事务提交。
 - **来源完整性**: Chunk 使用 `available | corrupted | missing` 状态；非 available Chunk 不执行新 ASR，既有文本仍可读但标记音频来源不可重新验证。
 - **恢复**: 应用启动 5 秒内处理过期 lease；最多自动恢复 3 次，之后进入 failed 并保留诊断。
-- **兼容性**: 首发验证 macOS 14+ Apple Silicon；Intel 构建不作为 V0.2 发布 Gate。
-- **许可**: sherpa-onnx 与 Qwen3-ASR Apache-2.0；SenseVoice 与 Whisper 上游声明 MIT。发布前逐个冻结模型资产 notice、来源、转换链和 hash，应用内展示。
+- **兼容性**: 首发验证 macOS 14+ Apple Silicon；Qwen3-ASR 1.7B 本版本正式支持 24 GB unified memory、Metal 可用，并固定 `qwen3-asr` crate 0.2.2 Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`；16 GB 与 Intel 不作为 V0.2 支持或发布 Gate。
+- **许可**: sherpa-onnx 与 Qwen 模型资产遵循各自上游许可；`qwen3-asr` Rust crate 0.2.2 为 MIT；SenseVoice 与 Whisper 上游声明 MIT。发布前逐个冻结 crate、传递依赖、模型文件 notice、来源、revision、转换/兼容链和 hash，应用内展示。
 
 ## 9. 验收标准
 
@@ -350,17 +352,17 @@ ui --> user: 展示真实转写和来源
 - [ ] SenseVoiceSmall INT8 可从固定 manifest 下载、校验、安装、删除和重新安装。
 - [ ] Whisper 至少一个模型可从固定 manifest 下载、校验、安装、删除和重新安装。
 - [ ] Qwen3-ASR 0.6B INT8 可从固定 manifest 下载、校验、安装、删除、真实转写和重新安装。
-- [ ] Qwen3-ASR 1.7B 以高质量可选项展示；仅在固定可执行资产和 Apple Silicon Gate 通过后允许安装，否则保持明确不可用状态。
+- [ ] Qwen3-ASR 1.7B 在兼容设备上展示下载动作，完成五文件 bundle 的可恢复下载、逐文件校验、原子安装、真实 Candle/Metal 转写、删除和重新安装。
 - [ ] 固定中文语音样本通过 SenseVoice 产生 Segment，并达到本节规定的 CER 与时间误差阈值。
 - [ ] 固定英文和中英混合语音样本通过 Whisper 产生 Segment，并达到本节规定的 WER、关键短语与时间误差阈值。
 - [ ] 固定中文、英文和中英混合样本通过 Qwen3-ASR 0.6B 产生 Segment，并达到与主发布模型一致的质量和时间误差阈值。
 - [ ] Qwen3-ASR 0.6B 的普通话 CER <= 20%、英语 WER <= 20%、中英混合关键短语召回率为 100%，并通过相同 Segment 时间阈值。
-- [ ] Qwen3-ASR 1.7B 启用前在 Apple Silicon / 16 GB / macOS 14+ 基线上满足 CER/WER <= 20%、混合关键短语 100%、质量不劣于 0.6B、5 分钟音频 RTF <= 1.0、峰值 RSS <= 6 GiB；否则设置页仅展示不可安装说明。
+- [ ] Qwen3-ASR 1.7B 在当前正式支持下限 M4/24GB、macOS 14+、arm64、Metal 真机记录设备与运行时身份；普通话 CER/英语 WER <= 20%、混合关键短语 100%、质量不劣于 0.6B、300 秒 fixture RTF <= 1.0、峰值 RSS <= 6 GiB，且证据证明没有 fallback。16 GB 需未来独立 LifeSub Gate 后才能扩大支持。
 - [ ] 用户导入音频后，真实 ASR Job 状态可见，成功后自动追加 Transcript Revision。
 - [ ] 同一记录切换 Provider 重转写后存在两个可独立查看的 revision，旧结果未被覆盖。
 - [ ] 每个成功 revision 有可解析 Provider Receipt，包含模型、参数、输入 hash、耗时和本地数据去向。
 - [ ] 任一新 Segment 可经 chunk_id、revision_receipts、Provider Receipt 追溯到唯一输入 Audio Chunk hash，且多 Chunk 的 session 时间不从零重复。
-- [ ] v1 Catalog fixture 可原子迁移到 v2；旧 revision 保持可读并标记 `legacy_unverified`，迁移失败完整回滚。
+- [ ] Catalog migration chain 完整通过：fresh/v1 -> v2，fresh/v1/v2 -> v3，fresh/v1/v2/v3 -> v4；v1/v2/v3 fixtures 不被测试修改，v2/v3/v4 fingerprints 与 `user_version` 精确匹配，任一步强制失败完整回滚，旧 revision 保持可读并标记 `legacy_unverified`。
 - [ ] 模型缺失、下载中断、hash 错误、音频损坏、取消和应用重启均有稳定状态与恢复行为。
 - [ ] `model_downloads` 与版本化安装目录在下载中断、rename 后崩溃和数据库/文件系统不一致时可确定性 reconciliation。
 - [ ] 固定普通话 fixture 的 SenseVoice CER <= 20%；固定英语 fixture 的 Whisper WER <= 20%；中英混合关键短语召回率为 100%。
@@ -368,7 +370,8 @@ ui --> user: 展示真实转写和来源
 - [ ] CER/WER、关键短语与时间误差按技术设计固定的 NFKC、tokenization 和 Segment 配对协议计算。
 - [ ] ASR 运行中 UI heartbeat P95 漂移 <= 250 ms；取消请求 500 ms 内可见，基线任务 30 秒内停止。
 - [ ] 前端单测、Rust 单测、真实模型集成测试、Playwright 验收、生产构建和 Tauri desktop 编译全部通过。
-- [ ] 发布 bundle 静态链接 sherpa-onnx；`otool -L` 无缺失 native 动态库，运行时版本、签名和 DMG 验证通过。
+- [ ] 发布 bundle 同时包含可执行的静态 sherpa-onnx 与 Qwen3-ASR 1.7B Candle/Metal 路径；`otool -L`、Metal/Candle symbols、运行时版本、模型资产解析、签名、packaged smoke 和 DMG 验证通过。
+- [ ] 仓库、Git 历史和发布源码包均不包含模型权重；权重只由固定 manifest 下载到用户模型目录。
 - [ ] TypeScript/JavaScript 源码不存在 `console.log`。
 
 ## 10. 关联文档

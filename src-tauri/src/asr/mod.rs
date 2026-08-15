@@ -1,3 +1,6 @@
+pub mod model_lookup;
+pub mod settings;
+
 #[cfg(feature = "asr-runtime")]
 const PINNED_RUNTIME_VERSION: &str = "1.13.5";
 #[cfg(feature = "asr-runtime")]

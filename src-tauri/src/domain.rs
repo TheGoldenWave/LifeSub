@@ -19,6 +19,98 @@ pub enum AudioSource {
     Imported,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsrProviderKind {
+    SenseVoice,
+    Whisper,
+    Qwen3Asr,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsrJobState {
+    Queued,
+    BlockedModel,
+    Preparing,
+    Transcribing,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkIntegrityState {
+    Available,
+    Corrupted,
+    Missing,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataDestination {
+    LocalDevice,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsrErrorCode {
+    ModelCapabilityUnavailable,
+    ModelDownloadFailed,
+    ModelIntegrityFailed,
+    UnsupportedOrCorruptAudio,
+    ProviderFailed,
+    ReceiptInvalid,
+    ChunkUnavailable,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderReceipt {
+    pub job_id: String,
+    pub chunk_id: String,
+    pub provider: AsrProviderKind,
+    pub model_id: String,
+    pub manifest_version: String,
+    pub archive_sha256: String,
+    pub required_file_hashes_json: String,
+    pub model_source_json: String,
+    pub vad_model_id: Option<String>,
+    pub vad_manifest_version: Option<String>,
+    pub vad_archive_sha256: Option<String>,
+    pub vad_required_file_hashes_json: Option<String>,
+    pub runtime_version: String,
+    pub runtime_build_id: String,
+    pub parameters_json: String,
+    pub input_sha256: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+    pub data_destination: DataDestination,
+    pub outcome: ProviderOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct TranscriptTimeRange {
+    start_ms: i64,
+    end_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TranscriptTimeRangeError {
+    NegativeStart,
+    EmptyOrReversed,
+    ExceedsAudioDuration,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CaptureSession {
     pub id: String,
@@ -59,7 +151,10 @@ pub struct AudioChunk {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DomainError {
-    InvalidCaptureTransition { from: CaptureState, to: CaptureState },
+    InvalidCaptureTransition {
+        from: CaptureState,
+        to: CaptureState,
+    },
 }
 
 impl CaptureSession {
@@ -83,7 +178,10 @@ impl CaptureSession {
                 | (CaptureState::Paused, CaptureState::Stopped)
         );
         if !valid {
-            return Err(DomainError::InvalidCaptureTransition { from: self.state, to: target });
+            return Err(DomainError::InvalidCaptureTransition {
+                from: self.state,
+                to: target,
+            });
         }
         self.state = target;
         if target == CaptureState::Stopped {
@@ -110,5 +208,32 @@ impl TranscriptSegment {
 
     pub fn evidence_uri(&self, revision: i64) -> String {
         format!("lifesub://segment/{}?revision={revision}", self.id)
+    }
+}
+
+impl TranscriptTimeRange {
+    pub fn new(
+        start_ms: i64,
+        end_ms: i64,
+        audio_duration_ms: i64,
+    ) -> Result<Self, TranscriptTimeRangeError> {
+        if start_ms < 0 {
+            return Err(TranscriptTimeRangeError::NegativeStart);
+        }
+        if end_ms <= start_ms {
+            return Err(TranscriptTimeRangeError::EmptyOrReversed);
+        }
+        if end_ms > audio_duration_ms {
+            return Err(TranscriptTimeRangeError::ExceedsAudioDuration);
+        }
+        Ok(Self { start_ms, end_ms })
+    }
+
+    pub const fn start_ms(self) -> i64 {
+        self.start_ms
+    }
+
+    pub const fn end_ms(self) -> i64 {
+        self.end_ms
     }
 }

@@ -6,8 +6,14 @@ readonly ARCHIVE_NAME="sherpa-onnx-v${RUNTIME_VERSION}-osx-arm64-static-lib.tar.
 readonly ARCHIVE_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${RUNTIME_VERSION}/${ARCHIVE_NAME}"
 readonly ARCHIVE_SIZE="19862746"
 readonly ARCHIVE_SHA256="339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44"
+readonly SCRIPT_DIR="$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd)"
+readonly REPO_ROOT="$(/usr/bin/dirname "$SCRIPT_DIR")"
 readonly CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/Library/Caches}/lifesub/sherpa-onnx/v${RUNTIME_VERSION}"
 readonly ARCHIVE_PATH="${CACHE_ROOT}/${ARCHIVE_NAME}"
+readonly CARGO_TARGET_DIR="${LIFESUB_CARGO_TARGET_DIR:-${REPO_ROOT}/src-tauri/target}"
+readonly PREBUILT_ROOT="${CARGO_TARGET_DIR}/sherpa-onnx-prebuilt"
+readonly EXTRACTED_LIB_DIR="${PREBUILT_ROOT}/sherpa-onnx-v${RUNTIME_VERSION}-osx-arm64-static-lib/lib"
+readonly PREBUILT_MARKER="${PREBUILT_ROOT}/.lifesub-archive-sha256"
 
 archive_size() {
     /usr/bin/stat -f '%z' "$1"
@@ -21,6 +27,35 @@ archive_is_valid() {
     [ -f "$1" ] \
         && [ "$(archive_size "$1")" = "$ARCHIVE_SIZE" ] \
         && [ "$(archive_sha256 "$1")" = "$ARCHIVE_SHA256" ]
+}
+
+prebuilt_marker_is_valid() {
+    [ -f "$PREBUILT_MARKER" ] \
+        && [ "$(/bin/cat "$PREBUILT_MARKER")" = "$ARCHIVE_SHA256" ]
+}
+
+quarantine_unverified_prebuilt() {
+    prebuilt_was_quarantined=false
+    if [ -e "$PREBUILT_ROOT" ] && ! prebuilt_marker_is_valid; then
+        quarantine_path="${PREBUILT_ROOT}.quarantine.$(/bin/date '+%Y%m%d%H%M%S').$$"
+        >&2 /bin/echo "Quarantining unverified sherpa-onnx prebuilt cache at ${quarantine_path}"
+        /bin/mv "$PREBUILT_ROOT" "$quarantine_path"
+        prebuilt_was_quarantined=true
+    fi
+
+    if ! prebuilt_marker_is_valid; then
+        /bin/mkdir -p "$PREBUILT_ROOT"
+        temporary_marker="$(/usr/bin/mktemp "${PREBUILT_ROOT}/.lifesub-archive-sha256.XXXXXX")"
+        trap '/bin/rm -f "$temporary_marker"' EXIT HUP INT TERM
+        /bin/echo "$ARCHIVE_SHA256" >"$temporary_marker"
+        /bin/mv -f "$temporary_marker" "$PREBUILT_MARKER"
+        trap - EXIT HUP INT TERM
+    fi
+
+    [ "$prebuilt_was_quarantined" = false ] || [ ! -e "$EXTRACTED_LIB_DIR" ] || {
+        >&2 /bin/echo "Unverified sherpa-onnx extracted library path remains after quarantine"
+        exit 1
+    }
 }
 
 /bin/mkdir -p "$CACHE_ROOT"
@@ -41,5 +76,7 @@ if ! archive_is_valid "$ARCHIVE_PATH"; then
     /bin/mv -f "$temporary_archive" "$ARCHIVE_PATH"
     trap - EXIT HUP INT TERM
 fi
+
+quarantine_unverified_prebuilt
 
 /bin/echo "$CACHE_ROOT"

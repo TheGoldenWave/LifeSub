@@ -257,7 +257,7 @@ let invalid = AsrSettings::whisper("whisper-base")
 assert_eq!(invalid.validate(&stub_models), Err(AsrSettingsError::ProviderOptionsMismatch));
 ```
 
-Test thread bounds, language support, model/provider ownership, Whisper translate, SenseVoice ITN, Qwen3-ASR option isolation, and unavailable 1.7B rejection.
+Test thread bounds, language support, model/provider ownership, Whisper translate, SenseVoice ITN, Qwen3-ASR option isolation, and unavailable 1.7B rejection. Cover the distinction between a selectable catalog item and an installable/executable model.
 
 - [ ] **Step 2: Run the tests and confirm missing types**
 
@@ -267,7 +267,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement immutable serialized types**
 
-Add `AsrProviderKind`, `AsrProviderOptions`, `AsrSettings`, `AsrJobState`, `ChunkIntegrityState`, `ProviderReceipt`, `AsrErrorCode`, and validated transcript time ranges. Define a minimal `ModelLookup` trait containing provider ownership and language capability; Task 3 tests use a stub, and Task 5's static manifest implements it. Persist enums as snake_case strings, never `Debug` output.
+Add `AsrProviderKind`, `AsrProviderOptions`, `AsrSettings`, `AsrJobState`, `ChunkIntegrityState`, `ProviderReceipt`, `AsrErrorCode`, and validated transcript time ranges. Define a minimal `ModelLookup` trait containing provider ownership, language capability, and separate selectable/installable/executable capability. Active settings validation requires executable capability and returns `model_capability_unavailable` for Qwen3-ASR 1.7B; Task 3 tests use a stub, and Task 5's static manifest implements it. Persist enums as snake_case strings, never `Debug` output.
 
 - [ ] **Step 4: Keep old API compatibility explicit**
 
@@ -344,7 +344,7 @@ git commit -m "feat: harden immutable audio imports"
 
 - [ ] **Step 1: Write failing manifest contract tests**
 
-Require unique immutable IDs, HTTPS URLs, exact byte sizes, 64-character hashes, required files, source/conversion provenance, supported languages, license, and allowlisted redirect hosts.
+Require unique immutable IDs, supported languages, license, source provenance, and an explicit availability variant. `Installable(ArtifactSpec)` requires HTTPS URLs, exact byte sizes, 64-character hashes, required files, conversion provenance, and allowlisted redirect hosts. `ExperimentalUnavailable` requires a non-empty reason and unmet Gate IDs and must not contain fake artifact data. Assert Qwen3-ASR 1.7B is selectable for display but not installable or executable.
 
 - [ ] **Step 2: Download the exact upstream assets outside the repository and compute hashes**
 
@@ -398,8 +398,7 @@ VAD: silero_vad.onnx
 pub struct ModelManifest {
     pub id: &'static str,
     pub manifest_version: &'static str,
-    pub archive_sha256: &'static str,
-    pub required_files: &'static [RequiredFile],
+    pub availability: ModelAvailability,
     pub source: ModelSource,
 }
 ```
@@ -430,6 +429,7 @@ git commit -m "feat: pin local ASR model manifests"
 - [ ] **Step 1: Write failing HTTP fixture tests**
 
 Cover interrupted downloads, incorrect content length, redirect to a disallowed host, wrong SHA-256, path traversal, symlink/hardlink entries, expanded-size limit, rename-before-DB crash, DB-before-directory mismatch, cancellation, and deletion while leased.
+Also assert that download/install entry points reject `ExperimentalUnavailable` with `model_capability_unavailable` before creating a `model_downloads` row or network request.
 
 - [ ] **Step 2: Verify failure**
 
@@ -685,7 +685,7 @@ git commit -m "feat: publish traceable ASR revisions"
 
 - [ ] **Step 1: Write command contract tests**
 
-Cover `get_asr_settings`, `save_asr_settings`, `list_asr_models`, `download_asr_model`, `cancel_model_download`, `delete_asr_model`, `list_asr_jobs`, `cancel_asr_job`, `retry_asr_job`, and `retranscribe_record`. Put framework-independent handlers and DTO mapping in `desktop_api.rs`; Tauri commands remain thin wrappers.
+Cover `get_asr_settings`, `save_asr_settings`, `list_asr_models`, `download_asr_model`, `cancel_model_download`, `delete_asr_model`, `list_asr_jobs`, `cancel_asr_job`, `retry_asr_job`, and `retranscribe_record`. Assert `save_asr_settings`, `download_asr_model`, import auto-enqueue, retry, and retranscription reject Qwen3-ASR 1.7B with `model_capability_unavailable` while leaving the prior active setting and Job state unchanged. Put framework-independent handlers and DTO mapping in `desktop_api.rs`; Tauri commands remain thin wrappers.
 
 - [ ] **Step 2: Change import behavior in a failing test**
 
@@ -829,6 +829,10 @@ NFKC + lowercase Latin; CER removes punctuation/whitespace and uses grapheme clu
 
 `lifesub-asr-gate` loads the fixture manifest, verifies every fixture/model/runtime input hash, runs SenseVoice, Whisper, and Qwen3-ASR 0.6B fixtures, calculates all approved metrics, and writes the result JSON atomically. Qwen3-ASR 1.7B is enabled only when the same Gate includes its immutable executable asset and records peak memory plus RTF on the supported Apple Silicon baseline. The JSON includes `tested_commit`, a deterministic digest of the exact paths listed in version-controlled `scripts/asr-gate-scope.txt`, executable hash, runtime version/git SHA, native archive hash, model/VAD artifact hashes, and fixture hashes. Dynamic globs are prohibited. Unrelated dirty files outside the declared source scope do not invalidate the Gate; any scoped modification does.
 
+Required Qwen3-ASR 0.6B scenario IDs are `qwen3-0.6b-zh`, `qwen3-0.6b-en`, and `qwen3-0.6b-zh-en`. Thresholds are: Mandarin CER `<= 20%`, English WER `<= 20%`, mixed-language key-phrase recall `= 100%`, median boundary error `<= 500 ms`, and maximum boundary error `<= 1.5 s`. The verifier fails if any scenario ID or metric is absent.
+
+Qwen3-ASR 1.7B can change to installable only when Gate evidence records Apple Silicon chip, 16 GB or greater unified memory, macOS 14+, exact runtime/model/fixture hashes, Mandarin CER `<= 20%`, English WER `<= 20%`, mixed-language key-phrase recall `= 100%`, no quality metric worse than 0.6B on the same fixtures, five-minute RTF `<= 1.0`, and peak RSS `<= 6 GiB`.
+
 `scripts/verify-asr-gate.sh` must:
 
 1. Fetch/verify the native archive.
@@ -846,7 +850,7 @@ git commit -m "test: add real local ASR gate"
 
 The Gate script must now assert that every scoped source/fixture path is clean relative to `HEAD` before running.
 
-- [ ] **Step 4: Run SenseVoice and Whisper through the Gate from the committed source snapshot**
+- [ ] **Step 4: Run SenseVoice, Whisper, and Qwen3-ASR 0.6B through the Gate from the committed source snapshot**
 
 Run with the installed model cache path:
 
@@ -855,7 +859,7 @@ LIFESUB_ASR_MODEL_DIR="$HOME/Library/Application Support/com.goldenwave.lifesub/
 scripts/verify-asr-gate.sh
 ```
 
-Expected: SenseVoice CER <= 20%; Whisper WER <= 20%; all mixed-language phrases present; median boundary error <= 500 ms; max <= 1.5 s. The script fails if zero tests/scenarios ran.
+Expected: SenseVoice CER <= 20%; Whisper WER <= 20%; Qwen3-ASR 0.6B Mandarin CER <= 20% and English WER <= 20%; all required mixed-language phrases present; median boundary error <= 500 ms; max <= 1.5 s. The script fails if any required provider/scenario is absent or zero scenarios ran.
 
 - [ ] **Step 5: Verify evidence is bound to the tested source digest**
 
@@ -906,7 +910,7 @@ Required scenarios:
 - `cancel-real-asr`: `cancelling` acknowledged <= 500 ms and final cancelled <= 30 seconds.
 - `claim-and-abort`: claim a Job, persist the Job ID/generation, then terminate without cleanup.
 - `verify-recovery`: new boot ID recovers the stale claim <= 5 seconds.
-- `packaged-smoke`: run both Provider fixtures from the packaged executable and verify Receipt identity.
+- `packaged-smoke`: run SenseVoice, Whisper, and Qwen3-ASR 0.6B fixtures from the packaged executable and verify each Receipt identity.
 
 - [ ] **Step 3: Implement the desktop harness**
 
@@ -967,7 +971,7 @@ codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/ma
 scripts/verify-desktop-asr.sh dmg
 ```
 
-The `dmg` scenario must deterministically locate the produced DMG, mount it read-only with `hdiutil`, verify the image-contained `.app` signature, run its `Contents/MacOS/lifesub --acceptance-scenario packaged-smoke` under an isolated HOME, verify real SenseVoice and Whisper results, then detach the image even on failure. Expected: no unresolved sherpa-onnx/onnxruntime dylib, signature passes, and image-contained real ASR smoke passes. Re-sign the full bundle and rebuild the DMG using the established V0.1 procedure before this Gate if needed.
+The `dmg` scenario must deterministically locate the produced DMG, mount it read-only with `hdiutil`, verify the image-contained `.app` signature, run its `Contents/MacOS/lifesub --acceptance-scenario packaged-smoke` under an isolated HOME, verify real SenseVoice, Whisper, and Qwen3-ASR 0.6B results plus Receipt identity, then detach the image even on failure. Expected: no unresolved sherpa-onnx/onnxruntime dylib, signature passes, and image-contained real ASR smoke passes. Re-sign the full bundle and rebuild the DMG using the established V0.1 procedure before this Gate if needed.
 
 - [ ] **Step 9: Capture visual and verification evidence**
 

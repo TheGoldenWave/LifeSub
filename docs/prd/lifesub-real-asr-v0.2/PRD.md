@@ -354,6 +354,8 @@ ui --> user: 展示真实转写和来源
 - [ ] 固定中文语音样本通过 SenseVoice 产生 Segment，并达到本节规定的 CER 与时间误差阈值。
 - [ ] 固定英文和中英混合语音样本通过 Whisper 产生 Segment，并达到本节规定的 WER、关键短语与时间误差阈值。
 - [ ] 固定中文、英文和中英混合样本通过 Qwen3-ASR 0.6B 产生 Segment，并达到与主发布模型一致的质量和时间误差阈值。
+- [ ] Qwen3-ASR 0.6B 的普通话 CER <= 20%、英语 WER <= 20%、中英混合关键短语召回率为 100%，并通过相同 Segment 时间阈值。
+- [ ] Qwen3-ASR 1.7B 启用前在 Apple Silicon / 16 GB / macOS 14+ 基线上满足 CER/WER <= 20%、混合关键短语 100%、质量不劣于 0.6B、5 分钟音频 RTF <= 1.0、峰值 RSS <= 6 GiB；否则设置页仅展示不可安装说明。
 - [ ] 用户导入音频后，真实 ASR Job 状态可见，成功后自动追加 Transcript Revision。
 - [ ] 同一记录切换 Provider 重转写后存在两个可独立查看的 revision，旧结果未被覆盖。
 - [ ] 每个成功 revision 有可解析 Provider Receipt，包含模型、参数、输入 hash、耗时和本地数据去向。

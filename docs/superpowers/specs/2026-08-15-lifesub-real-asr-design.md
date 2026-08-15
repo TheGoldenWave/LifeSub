@@ -290,8 +290,9 @@ V0.2 的文件导入 Session 只有一个 Chunk，`session_offset_ms = 0`。未�
 Manifest 作为版本控制下的静态数据，至少包含：
 
 - `model_id`、Provider、显示名和模型版本。
-- 下载 URL、归档大小和 SHA-256。
-- 解压后的必需文件及可选单文件 hash。
+- 明确的 `availability`：`Installable(ArtifactSpec)` 或 `ExperimentalUnavailable { reason, unmet_gates }`。
+- `Installable` 条目包含下载 URL、归档大小、SHA-256、解压后的必需文件及可选单文件 hash。
+- `ExperimentalUnavailable` 条目不伪造资产字段，且不能保存为生效设置、下载、创建 Job 或构造 Provider。
 - 支持语言、默认参数和推荐硬件。
 - 上游项目、模型卡、许可证和 notice。
 
@@ -307,6 +308,18 @@ Manifest 作为版本控制下的静态数据，至少包含：
 | `qwen3-asr-1.7b` | Qwen3-ASR | 待固定 | 高质量实验档；通过资产与设备 Gate 后启用 |
 
 Qwen3-ASR 0.6B 使用 sherpa-onnx 发布资产 `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2`，SHA-256 为 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`；执行文件至少包含 `conv_frontend.onnx`、`encoder.int8.onnx`、`decoder.int8.onnx` 与完整 `tokenizer/` 目录。Qwen3-ASR 1.7B 的 Hugging Face 原始权重不能直接交给当前 Rust Provider；在固定可执行 ONNX/MLX 资产、转换来源和真实 Apple Silicon 证据前，manifest 只能声明不可安装的实验条目。
+
+```rust
+enum ModelAvailability {
+    Installable(ArtifactSpec),
+    ExperimentalUnavailable {
+        reason: &'static str,
+        unmet_gates: &'static [ModelGate],
+    },
+}
+```
+
+`ModelLookup` 必须分别暴露 `selectable`、`installable` 与 `executable` 能力。1.7B 可在模型列表中 `selectable = true` 以展示说明，但在 Gate 前 `installable = false`、`executable = false`。设置草稿可以暂存该选择用于查看信息，保存为生效 ASR 设置、下载命令、Job 创建和 Provider Factory 必须返回稳定的 `model_capability_unavailable`；防御性 Provider 校验不得成为唯一控制点。
 
 实现前必须下载每个发布模型归档并冻结 SHA-256。Silero VAD 也作为独立 `provider = vad` 的 manifest 条目管理，包含版本、模型 hash 和运行参数。若上游同名资产发生变化，必须发布新的 manifest version 和 model ID；禁止在原 ID 下替换资产。
 
@@ -409,6 +422,8 @@ Worker 使用 compare-and-swap claim：仅当 Job 为 `queued`、`cancel_request
 取消请求先写 `cancel_requested_at` 并立即反馈 UI。成功发布使用 `BEGIN IMMEDIATE`：先以 `id + claimed_by + claim_generation + state = transcribing + cancel_requested_at IS NULL` 条件确认 fencing token，再插入 Receipt、Revision、Segment 和 FTS，最后以相同 token 将 Job 更新为 `succeeded`；任一条件更新影响行数不是 1 时整体回滚并丢弃结果。事务提交前已存在取消请求则转 `cancelled` 且不发布 revision；成功事务提交后到达的取消请求不回滚 Evidence，Job 保持 `succeeded`。任何事务前错误只更新 Job 失败状态。事务内错误整体回滚，不发布部分 revision。
 
 默认只有一个 ASR Worker，避免同时驻留多个大模型。后续性能数据证明有收益后再增加并发。
+
+Qwen3-ASR 1.7B 的启用 Gate 固定在 macOS 14+、Apple Silicon、16 GB unified memory 基线。使用同一中文、英文和中英混合 fixture 时，中文 CER 与英文 WER 均不得超过 20%，混合关键短语召回率必须为 100%，且三项质量不得劣于 0.6B 对应结果；5 分钟 fixture 的 RTF 必须 `<= 1.0`，进程峰值 RSS 必须 `<= 6 GiB`，UI heartbeat 与取消阈值沿用发布 Gate。证据必须记录芯片型号、内存、macOS 版本、运行时/模型/fixture hash、峰值 RSS 与 RTF；任一条件缺失时保持不可安装。
 
 ## 14. 设置体验
 

@@ -11,7 +11,7 @@ status: implementation-in-progress-dirty-worktree
 
 ## 1. 新会话目标
 
-继续完成 LifeSub V0.2 真实本地 ASR：SenseVoice、Whisper、Qwen3-ASR 0.6B/1.7B、模型管理、持久设置、任务/Receipt/Revision、设置与重转写 UI、真实模型 Gate、桌面与 DMG 验证。
+继续完成 LifeSub V0.2 真实本地 ASR：SenseVoice、Whisper、Qwen3-ASR 0.6B/1.7B、模型管理、持久设置、任务/Receipt/Revision、设置与重转写 UI、真实模型 Gate、桌面与 DMG 验证。ASR V0.2 完成后继续 native capture 里程碑；只有 DeepSeek Harness 真实录音到 `lifesub://` Evidence Ref 的完整闭环通过，LifeSub 整体 MVP 才完成。
 
 不要把当前 Goal 标记完成，直到 Tasks 5-15、真实模型、UI、desktop harness 和 DMG Gate 全部通过。
 
@@ -161,7 +161,7 @@ docs/superpowers/specs/2026-08-16-lifesub-local-tool-api-design.md
 
 `3972c28` 的初版架构审查未批准。当前未提交修订已处理：
 
-- ASR V0.2 的 native `start_capture/stop_capture` capability 明确 unsupported；真实 DeepSeek capture 闭环推迟到 ScreenCaptureKit + AVAudioEngine 里程碑。
+- ASR V0.2 的 native `start_capture/stop_capture` capability 可暂时明确为 unsupported；随后必须进入 ScreenCaptureKit + AVAudioEngine 采集里程碑，完成真实 DeepSeek capture 闭环。ASR V0.2 完成不等于 LifeSub 整体 MVP 完成。
 - full Core ownership lock 必须在任何 writable Catalog open/migration 和 socket bind 前获取。
 - 第二 Tauri 进程必须连接 primary socket，不得打开 SQLite。
 - Catalog v3 `tool_requests` 持久 idempotency 合同。
@@ -223,7 +223,9 @@ tokenizer.json 11,429,653 B sha256 fe1fad59be22a41ee293363fcf95fdedbc7c93f3b4927
 - SQLite、capture、model manager、reconciliation、ASR worker 只有一个 Core owner。
 - 插件/Gateway 不得调用 Tauri Command、打开 SQLite 或读取内部路径。
 - ChatGPT 通过认证 Gateway 映射 MCP，daemon 不直接暴露网络。
-- V0.2 不实现真实 native capture；`get_capabilities` 必须诚实返回 unsupported。
+- ASR V0.2 不实现真实 native capture 时，`get_capabilities` 必须诚实返回 unsupported。
+- LifeSub 整体 MVP 的完成 Gate 不变：DeepSeek Harness 必须完整跑通 `start_capture -> capture/asr status -> stop_capture -> search_transcripts -> resolve_evidence -> open_evidence -> answer with lifesub:// ref`。
+- 完成 ASR V0.2 后必须继续原生采集里程碑；在 DeepSeek Harness 真实闭环通过前，不得把项目状态标记为 MVP complete。
 
 ## 8. 推荐恢复顺序
 
@@ -233,6 +235,7 @@ tokenizer.json 11,429,653 B sha256 fe1fad59be22a41ee293363fcf95fdedbc7c93f3b4927
 4. 更新 Qwen 1.7B PRD/design/plan，做独立规格审查。
 5. 重写 Task 5 failing tests，使 1.7B 为 installable Candle/Metal 模型；确定 multi-file artifact/bundle identity、tokenizer provenance和下载事务。
 6. 完成 Task 5 manifests 与第三方 notices，双审后继续 Tasks 6-15。
+7. Tasks 5-15 完成后进入 native capture 里程碑，接入 ScreenCaptureKit + AVAudioEngine，并以 DeepSeek Harness 完整闭环作为 LifeSub 整体 MVP Gate。
 
 后续任务顺序：
 
@@ -248,6 +251,7 @@ Task 12 settings/model UI
 Task 13 job/provenance/retranscription UI
 Task 14 real-model Gate including both Qwen sizes
 Task 15 desktop/DMG/release verification
+Next    native capture adapters + DeepSeek Harness full MVP closure
 ```
 
 ## 9. 已知质量要求与坑点

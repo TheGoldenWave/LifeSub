@@ -37,12 +37,14 @@ fn runtime_identity_rejects_version_mismatch() {
 
 #[cfg(feature = "asr-runtime")]
 #[test]
-fn runtime_identity_rejects_git_sha1_mismatch() {
-    assert_eq!(
-        crate::asr::verify_runtime_identity_values("1.13.5", "deadbeef"),
-        Err(crate::asr::RuntimeIdentityError::GitSha1Mismatch {
-            observed: "deadbeef".to_owned(),
-            pinned: "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5",
-        })
-    );
+fn runtime_identity_rejects_noncanonical_git_sha1s() {
+    for observed in ["3", "3d", "deadbeef"] {
+        assert_eq!(
+            crate::asr::verify_runtime_identity_values("1.13.5", observed),
+            Err(crate::asr::RuntimeIdentityError::GitSha1Mismatch {
+                observed: observed.to_owned(),
+                pinned: "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5",
+            })
+        );
+    }
 }

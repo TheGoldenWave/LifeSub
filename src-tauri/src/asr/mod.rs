@@ -1,6 +1,8 @@
 #[cfg(feature = "asr-runtime")]
 const PINNED_RUNTIME_VERSION: &str = "1.13.5";
 #[cfg(feature = "asr-runtime")]
+const PINNED_RUNTIME_GIT_SHA1_ABBREVIATED: &str = "3dc7c569";
+#[cfg(feature = "asr-runtime")]
 const PINNED_RUNTIME_GIT_SHA1: &str = "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5";
 
 #[cfg(feature = "asr-runtime")]
@@ -60,7 +62,9 @@ pub(crate) fn verify_runtime_identity_values(
         });
     }
 
-    if observed_git_sha1.is_empty() || !PINNED_RUNTIME_GIT_SHA1.starts_with(observed_git_sha1) {
+    if observed_git_sha1 != PINNED_RUNTIME_GIT_SHA1_ABBREVIATED
+        && observed_git_sha1 != PINNED_RUNTIME_GIT_SHA1
+    {
         return Err(RuntimeIdentityError::GitSha1Mismatch {
             observed: observed_git_sha1.to_owned(),
             pinned: PINNED_RUNTIME_GIT_SHA1,

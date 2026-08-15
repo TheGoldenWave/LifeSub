@@ -1,4 +1,4 @@
-use crate::domain::AsrProviderKind;
+use crate::domain::{AsrLanguage, AsrProviderKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelCapabilities {
@@ -33,8 +33,10 @@ impl ModelCapabilities {
         }
     }
 
-    pub fn supports_language(&self, language: &str) -> bool {
-        self.languages.iter().any(|supported| supported == language)
+    pub fn supports_language(&self, language: &AsrLanguage) -> bool {
+        self.languages
+            .iter()
+            .any(|supported| supported == language.as_str())
     }
 }
 

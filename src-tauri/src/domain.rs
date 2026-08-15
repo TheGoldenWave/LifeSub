@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -25,6 +26,15 @@ pub enum AsrProviderKind {
     SenseVoice,
     Whisper,
     Qwen3Asr,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct AsrLanguage(String);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AsrLanguageError {
+    Empty,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -64,14 +74,20 @@ pub enum ProviderOutcome {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AsrErrorCode {
+    ModelNotInstalled,
     ModelCapabilityUnavailable,
     ModelDownloadFailed,
     ModelIntegrityFailed,
+    InsufficientDiskSpace,
     UnsupportedOrCorruptAudio,
-    ProviderFailed,
-    ReceiptInvalid,
-    ChunkUnavailable,
+    InputIntegrityFailed,
+    InputUnavailable,
+    InvalidProviderParameter,
+    ProviderInitializationFailed,
+    TranscriptionFailed,
     Cancelled,
+    RecoveryRequired,
+    ReceiptInvalid,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -102,6 +118,7 @@ pub struct ProviderReceipt {
 pub struct TranscriptTimeRange {
     start_ms: i64,
     end_ms: i64,
+    audio_duration_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,6 +228,30 @@ impl TranscriptSegment {
     }
 }
 
+impl AsrLanguage {
+    pub fn new(value: impl Into<String>) -> Result<Self, AsrLanguageError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(AsrLanguageError::Empty);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for AsrLanguage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(|_| D::Error::custom("ASR language must not be empty"))
+    }
+}
+
 impl TranscriptTimeRange {
     pub fn new(
         start_ms: i64,
@@ -226,7 +267,11 @@ impl TranscriptTimeRange {
         if end_ms > audio_duration_ms {
             return Err(TranscriptTimeRangeError::ExceedsAudioDuration);
         }
-        Ok(Self { start_ms, end_ms })
+        Ok(Self {
+            start_ms,
+            end_ms,
+            audio_duration_ms,
+        })
     }
 
     pub const fn start_ms(self) -> i64 {
@@ -235,5 +280,27 @@ impl TranscriptTimeRange {
 
     pub const fn end_ms(self) -> i64 {
         self.end_ms
+    }
+
+    pub const fn audio_duration_ms(self) -> i64 {
+        self.audio_duration_ms
+    }
+}
+
+impl<'de> Deserialize<'de> for TranscriptTimeRange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireRange {
+            start_ms: i64,
+            end_ms: i64,
+            audio_duration_ms: i64,
+        }
+
+        let wire = WireRange::deserialize(deserializer)?;
+        Self::new(wire.start_ms, wire.end_ms, wire.audio_duration_ms)
+            .map_err(|_| D::Error::custom("invalid transcript time range"))
     }
 }

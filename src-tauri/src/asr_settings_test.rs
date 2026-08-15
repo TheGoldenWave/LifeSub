@@ -3,9 +3,9 @@ use chrono::Utc;
 use crate::asr::model_lookup::{ModelCapabilities, ModelLookup};
 use crate::asr::settings::{AsrProviderOptions, AsrSettings, AsrSettingsError, WhisperTask};
 use crate::domain::{
-    AsrErrorCode, AsrJobState, AsrProviderKind, AudioSource, ChunkIntegrityState, DataDestination,
-    ProviderOutcome, ProviderReceipt, TranscriptRevision, TranscriptSegment, TranscriptTimeRange,
-    TranscriptTimeRangeError,
+    AsrErrorCode, AsrJobState, AsrLanguage, AsrLanguageError, AsrProviderKind, AudioSource,
+    ChunkIntegrityState, DataDestination, ProviderOutcome, ProviderReceipt, TranscriptRevision,
+    TranscriptSegment, TranscriptTimeRange, TranscriptTimeRangeError,
 };
 
 const SENSE_VOICE_MODEL: &str = "sense-voice-small-int8-2024-07-17";
@@ -97,14 +97,31 @@ fn active_settings_require_an_executable_model() {
 
 #[test]
 fn language_support_comes_from_the_selected_model() {
-    let supported = AsrSettings::sense_voice(SENSE_VOICE_MODEL).with_language("yue");
-    let unsupported = AsrSettings::whisper(WHISPER_MODEL).with_language("yue");
+    let language = AsrLanguage::new("yue").unwrap();
+    let supported = AsrSettings::sense_voice(SENSE_VOICE_MODEL).with_language(language.clone());
+    let unsupported = AsrSettings::whisper(WHISPER_MODEL).with_language(language);
 
     assert_eq!(supported.validate(&StubModels), Ok(()));
     assert_eq!(
         unsupported.validate(&StubModels),
         Err(AsrSettingsError::UnsupportedLanguage)
     );
+}
+
+#[test]
+fn languages_are_validated_dynamic_strings_with_transparent_serde() {
+    let language = AsrLanguage::new("zh-Hans").unwrap();
+    let settings_json = serde_json::to_value(AsrSettings::whisper(WHISPER_MODEL)).unwrap();
+
+    assert_eq!(language.as_str(), "zh-Hans");
+    assert_eq!(settings_json["language"], "auto");
+    assert_eq!(serde_json::to_string(&language).unwrap(), "\"zh-Hans\"");
+    assert_eq!(
+        serde_json::from_str::<AsrLanguage>("\"zh-Hans\"").unwrap(),
+        language
+    );
+    assert_eq!(AsrLanguage::new("   "), Err(AsrLanguageError::Empty));
+    assert!(serde_json::from_str::<AsrLanguage>("\"\t\"").is_err());
 }
 
 #[test]
@@ -183,18 +200,76 @@ fn persisted_enums_and_tagged_options_use_stable_snake_case_strings() {
         serde_json::to_string(&ChunkIntegrityState::Available).unwrap(),
         "\"available\""
     );
-    assert_eq!(
-        serde_json::to_string(&AsrErrorCode::UnsupportedOrCorruptAudio).unwrap(),
-        "\"unsupported_or_corrupt_audio\""
-    );
+}
+
+#[test]
+fn all_asr_error_codes_have_stable_serde_strings() {
+    let cases = [
+        (AsrErrorCode::ModelNotInstalled, "model_not_installed"),
+        (
+            AsrErrorCode::ModelCapabilityUnavailable,
+            "model_capability_unavailable",
+        ),
+        (AsrErrorCode::ModelDownloadFailed, "model_download_failed"),
+        (AsrErrorCode::ModelIntegrityFailed, "model_integrity_failed"),
+        (
+            AsrErrorCode::InsufficientDiskSpace,
+            "insufficient_disk_space",
+        ),
+        (
+            AsrErrorCode::UnsupportedOrCorruptAudio,
+            "unsupported_or_corrupt_audio",
+        ),
+        (AsrErrorCode::InputIntegrityFailed, "input_integrity_failed"),
+        (AsrErrorCode::InputUnavailable, "input_unavailable"),
+        (
+            AsrErrorCode::InvalidProviderParameter,
+            "invalid_provider_parameter",
+        ),
+        (
+            AsrErrorCode::ProviderInitializationFailed,
+            "provider_initialization_failed",
+        ),
+        (AsrErrorCode::TranscriptionFailed, "transcription_failed"),
+        (AsrErrorCode::Cancelled, "cancelled"),
+        (AsrErrorCode::RecoveryRequired, "recovery_required"),
+        (AsrErrorCode::ReceiptInvalid, "receipt_invalid"),
+    ];
+
+    for (code, stable) in cases {
+        let json = format!("\"{stable}\"");
+        assert_eq!(serde_json::to_string(&code).unwrap(), json);
+        assert_eq!(serde_json::from_str::<AsrErrorCode>(&json).unwrap(), code);
+    }
+    assert!(serde_json::from_str::<AsrErrorCode>("\"provider_failed\"").is_err());
+    assert!(serde_json::from_str::<AsrErrorCode>("\"chunk_unavailable\"").is_err());
 }
 
 #[test]
 fn transcript_ranges_must_be_positive_ordered_and_within_audio_bounds() {
     let range = TranscriptTimeRange::new(0, 500, 1_000).unwrap();
+    let wire = serde_json::json!({
+        "start_ms": 0,
+        "end_ms": 500,
+        "audio_duration_ms": 1_000
+    });
 
     assert_eq!(range.start_ms(), 0);
     assert_eq!(range.end_ms(), 500);
+    assert_eq!(range.audio_duration_ms(), 1_000);
+    assert_eq!(serde_json::to_value(range).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<TranscriptTimeRange>(wire).unwrap(),
+        range
+    );
+    assert!(
+        serde_json::from_value::<TranscriptTimeRange>(serde_json::json!({
+            "start_ms": 500,
+            "end_ms": 1_001,
+            "audio_duration_ms": 1_000
+        }))
+        .is_err()
+    );
     assert_eq!(
         TranscriptTimeRange::new(-1, 500, 1_000),
         Err(TranscriptTimeRangeError::NegativeStart)

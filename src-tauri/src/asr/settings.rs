@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::asr::model_lookup::ModelLookup;
-use crate::domain::AsrProviderKind;
+use crate::domain::{AsrLanguage, AsrProviderKind};
 
 const DEFAULT_LANGUAGE: &str = "auto";
 const DEFAULT_MAX_THREADS: usize = 4;
@@ -38,7 +38,7 @@ impl AsrProviderOptions {
 pub struct AsrSettings {
     pub provider: AsrProviderKind,
     pub model_id: String,
-    pub language: String,
+    pub language: AsrLanguage,
     pub num_threads: u16,
     pub vad_enabled: bool,
     pub auto_transcribe_imports: bool,
@@ -88,8 +88,8 @@ impl AsrSettings {
         self
     }
 
-    pub fn with_language(mut self, language: impl Into<String>) -> Self {
-        self.language = language.into();
+    pub fn with_language(mut self, language: AsrLanguage) -> Self {
+        self.language = language;
         self
     }
 
@@ -128,7 +128,8 @@ impl AsrSettings {
         Self {
             provider,
             model_id: model_id.into(),
-            language: DEFAULT_LANGUAGE.to_owned(),
+            language: AsrLanguage::new(DEFAULT_LANGUAGE)
+                .expect("the built-in default ASR language must be valid"),
             num_threads: default_num_threads(),
             vad_enabled: true,
             auto_transcribe_imports: true,

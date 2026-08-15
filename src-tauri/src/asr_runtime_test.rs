@@ -1,3 +1,9 @@
+#[cfg(not(feature = "asr-runtime"))]
+#[test]
+fn asr_module_boundary_is_available_without_native_runtime() {
+    assert!(!crate::asr::native_runtime_enabled());
+}
+
 #[cfg(feature = "asr-runtime")]
 #[test]
 fn sherpa_runtime_reports_the_pinned_build() {

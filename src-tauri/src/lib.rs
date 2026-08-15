@@ -1,4 +1,3 @@
-#[cfg(feature = "asr-runtime")]
 pub mod asr;
 pub mod catalog;
 pub mod domain;

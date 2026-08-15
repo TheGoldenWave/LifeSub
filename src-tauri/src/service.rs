@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::catalog::Catalog;
 use crate::domain::{
-    AudioChunk, AudioSource, CaptureSession, ChunkIntegrityState, TranscriptRevision,
+    AsrErrorCode, AudioChunk, AudioSource, CaptureSession, ChunkIntegrityState, TranscriptRevision,
 };
 
 use self::audio_store::{AudioStore, ValidationError};
@@ -35,6 +35,16 @@ impl EvidenceService {
         }
     }
 
+    pub fn initialize(catalog: Catalog, data_dir: impl AsRef<Path>) -> Result<Self, ServiceError> {
+        let service = Self::new(catalog, data_dir);
+        service.reconcile_audio()?;
+        Ok(service)
+    }
+
+    pub fn into_catalog(self) -> Catalog {
+        self.catalog
+    }
+
     #[cfg(test)]
     pub fn with_import_fault(
         catalog: Catalog,
@@ -59,15 +69,10 @@ impl EvidenceService {
         source_path: impl AsRef<Path>,
     ) -> Result<AudioChunk, ServiceError> {
         let source_path = source_path.as_ref();
-        self.catalog.insert_session(session)?;
-        let store = AudioStore::new(&self.data_dir);
+        let store = self.audio_store();
         let id = format!("chk_{}", Uuid::new_v4().simple());
         let pending = store.write_temp(source_path, &id)?;
         self.fail_import_at(ImportFault::AfterTempSync)?;
-        if self.has_import_fault(ImportFault::RenameIo) {
-            store.discard_pending(&pending);
-            return Err(injected_io_error("rename").into());
-        }
 
         let extension = source_path
             .extension()
@@ -75,10 +80,6 @@ impl EvidenceService {
             .unwrap_or("audio");
         let stored = store.rename_to_final(&pending, &id, extension)?;
         self.fail_import_at(ImportFault::AfterFinalRename)?;
-        if self.has_import_fault(ImportFault::ParentSyncIo) {
-            store.discard_stored(&stored);
-            return Err(injected_io_error("parent sync").into());
-        }
         store.sync_final(&stored)?;
 
         let chunk = AudioChunk {
@@ -89,7 +90,7 @@ impl EvidenceService {
             sha256: pending.digest,
             byte_length: pending.byte_length,
         };
-        self.catalog.insert_chunk(&chunk)?;
+        self.catalog.insert_imported_chunk(session, &chunk)?;
         Ok(chunk)
     }
 
@@ -103,17 +104,19 @@ impl EvidenceService {
             .iter()
             .map(|chunk| chunk.path.as_str())
             .collect::<HashSet<_>>();
-        AudioStore::new(&self.data_dir).reconcile_orphans(&referenced_paths, stale_before)?;
+        self.audio_store()
+            .reconcile_orphans(&referenced_paths, stale_before)?;
 
         for chunk in chunks {
             let (state, error_code) = match self.validate_chunk_bytes(&chunk) {
                 Ok(()) => (ChunkIntegrityState::Available, None),
-                Err(ChunkValidationError::Missing) => {
-                    (ChunkIntegrityState::Missing, Some("input_unavailable"))
-                }
+                Err(ChunkValidationError::Missing) => (
+                    ChunkIntegrityState::Missing,
+                    Some(AsrErrorCode::InputUnavailable),
+                ),
                 Err(ChunkValidationError::Corrupted) => (
                     ChunkIntegrityState::Corrupted,
-                    Some("input_integrity_failed"),
+                    Some(AsrErrorCode::InputIntegrityFailed),
                 ),
             };
             self.catalog
@@ -140,7 +143,7 @@ impl EvidenceService {
                 self.catalog.update_chunk_integrity(
                     chunk_id,
                     ChunkIntegrityState::Missing,
-                    Some("input_unavailable"),
+                    Some(AsrErrorCode::InputUnavailable),
                 )?;
                 Err(ServiceError::InputUnavailable)
             }
@@ -148,7 +151,7 @@ impl EvidenceService {
                 self.catalog.update_chunk_integrity(
                     chunk_id,
                     ChunkIntegrityState::Corrupted,
-                    Some("input_integrity_failed"),
+                    Some(AsrErrorCode::InputIntegrityFailed),
                 )?;
                 Err(ServiceError::InputIntegrityFailed)
             }
@@ -162,7 +165,7 @@ impl EvidenceService {
     }
 
     fn validate_chunk_bytes(&self, chunk: &AudioChunk) -> Result<(), ChunkValidationError> {
-        match AudioStore::new(&self.data_dir).validate(chunk) {
+        match self.audio_store().validate(chunk) {
             Ok(()) => Ok(()),
             Err(ValidationError::Missing) => Err(ChunkValidationError::Missing),
             Err(ValidationError::Corrupted) => Err(ChunkValidationError::Corrupted),
@@ -183,14 +186,15 @@ impl EvidenceService {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn has_import_fault(&self, point: ImportFault) -> bool {
-        self.import_fault == Some(point)
-    }
-
-    #[cfg(not(test))]
-    fn has_import_fault(&self, _point: ImportFault) -> bool {
-        false
+    fn audio_store(&self) -> AudioStore {
+        #[cfg(test)]
+        {
+            AudioStore::with_fault(&self.data_dir, self.import_fault)
+        }
+        #[cfg(not(test))]
+        {
+            AudioStore::new(&self.data_dir)
+        }
     }
 
     pub fn render_markdown(
@@ -224,10 +228,6 @@ impl EvidenceService {
 enum ChunkValidationError {
     Missing,
     Corrupted,
-}
-
-fn injected_io_error(operation: &str) -> std::io::Error {
-    std::io::Error::other(format!("injected {operation} failure"))
 }
 
 fn source_label(source: AudioSource) -> &'static str {

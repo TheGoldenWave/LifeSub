@@ -61,7 +61,7 @@ fn imported_audio_crash_after_temp_sync_leaves_only_reconcilable_temp() {
         .unwrap()
         .to_string_lossy()
         .ends_with(".tmp"));
-    assert!(service.catalog().list_chunks().unwrap().is_empty());
+    assert_no_import_metadata(&service, &session);
     assert_eq!(fs::read(&source).unwrap(), SOURCE_BYTES);
 }
 
@@ -90,7 +90,44 @@ fn imported_audio_crash_after_final_rename_leaves_only_final_orphan() {
         .unwrap()
         .to_string_lossy()
         .ends_with(".tmp"));
-    assert!(service.catalog().list_chunks().unwrap().is_empty());
+    assert_no_import_metadata(&service, &session);
+}
+
+#[test]
+fn source_copy_failure_creates_no_import_metadata() {
+    let source_dir = tempdir().unwrap();
+    let data_dir = tempdir().unwrap();
+    let service = EvidenceService::new(Catalog::in_memory().unwrap(), data_dir.path());
+    let session = CaptureSession::new("copy failure");
+
+    assert!(matches!(
+        service.import_audio(&session, source_dir.path()),
+        Err(ServiceError::Io(_))
+    ));
+    assert_no_import_metadata(&service, &session);
+    assert!(audio_files(data_dir.path()).is_empty());
+}
+
+#[test]
+fn initial_audio_directory_sync_failure_creates_no_import_metadata_or_audio() {
+    let source_dir = tempdir().unwrap();
+    let data_dir = tempdir().unwrap();
+    let source = source_dir.path().join("sample.wav");
+    fs::write(&source, SOURCE_BYTES).unwrap();
+    let service = EvidenceService::with_import_fault(
+        Catalog::in_memory().unwrap(),
+        data_dir.path(),
+        ImportFault::DirectorySyncIo,
+    );
+    let session = CaptureSession::new("directory sync failure");
+
+    assert!(matches!(
+        service.import_audio(&session, &source),
+        Err(ServiceError::Io(_))
+    ));
+    assert_no_import_metadata(&service, &session);
+    assert!(!data_dir.path().join("audio").exists());
+    assert!(audio_files(data_dir.path()).is_empty());
 }
 
 #[test]
@@ -110,6 +147,7 @@ fn injected_rename_failure_removes_temp_and_preserves_source() {
         service.import_audio(&session, &source),
         Err(ServiceError::Io(_))
     ));
+    assert_no_import_metadata(&service, &session);
     assert!(audio_files(data_dir.path()).is_empty());
     assert_eq!(fs::read(&source).unwrap(), SOURCE_BYTES);
 }
@@ -131,6 +169,7 @@ fn injected_parent_sync_failure_removes_final_and_preserves_source() {
         service.import_audio(&session, &source),
         Err(ServiceError::Io(_))
     ));
+    assert_no_import_metadata(&service, &session);
     assert!(audio_files(data_dir.path()).is_empty());
     assert_eq!(fs::read(&source).unwrap(), SOURCE_BYTES);
 }
@@ -150,6 +189,7 @@ fn catalog_failure_after_rename_preserves_source_and_is_reconciled_without_sleep
         service.import_audio(&session, &source),
         Err(ServiceError::Catalog(_))
     ));
+    assert_no_import_metadata(&service, &session);
     assert_eq!(fs::read(&source).unwrap(), SOURCE_BYTES);
     assert_eq!(audio_files(data_dir.path()).len(), 1);
 
@@ -166,11 +206,8 @@ fn startup_reconciliation_removes_expired_temp_and_final_orphans() {
     fs::create_dir_all(&audio_dir).unwrap();
     fs::write(audio_dir.join(".lifesub-import-orphan.tmp"), b"partial").unwrap();
     fs::write(audio_dir.join("unreferenced.wav"), b"complete").unwrap();
-    let service = EvidenceService::new(Catalog::in_memory().unwrap(), data_dir.path());
-
-    service
-        .reconcile_audio_before(SystemTime::now() + Duration::from_secs(1))
-        .unwrap();
+    let _service =
+        EvidenceService::initialize(Catalog::in_memory().unwrap(), data_dir.path()).unwrap();
 
     assert!(audio_files(data_dir.path()).is_empty());
 }
@@ -205,6 +242,42 @@ fn startup_reconciliation_classifies_missing_changed_and_unreadable_chunks() {
         service.chunk_integrity(&unreadable.id).unwrap(),
         ChunkIntegrityState::Corrupted
     );
+
+    let missing_diagnostics = service
+        .catalog()
+        .chunk_diagnostics(&missing.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        missing_diagnostics.error_code,
+        Some(AsrErrorCode::InputUnavailable)
+    );
+    assert!(missing_diagnostics.error_at.is_some());
+    let changed_diagnostics = service
+        .catalog()
+        .chunk_diagnostics(&changed.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        changed_diagnostics.error_code,
+        Some(AsrErrorCode::InputIntegrityFailed)
+    );
+    assert!(changed_diagnostics.error_at.is_some());
+
+    fs::write(data_dir.path().join(&missing.path), b"missing").unwrap();
+    fs::write(data_dir.path().join(&changed.path), b"original").unwrap();
+    service.reconcile_audio().unwrap();
+
+    for repaired in [&missing, &changed] {
+        let diagnostics = service
+            .catalog()
+            .chunk_diagnostics(&repaired.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(diagnostics.integrity_state, ChunkIntegrityState::Available);
+        assert_eq!(diagnostics.error_code, None);
+        assert_eq!(diagnostics.error_at, None);
+    }
 }
 
 #[test]
@@ -327,4 +400,9 @@ fn chunk(
 fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))
+}
+
+fn assert_no_import_metadata(service: &EvidenceService, session: &CaptureSession) {
+    assert!(!service.catalog().session_exists(&session.id).unwrap());
+    assert!(service.catalog().list_chunks().unwrap().is_empty());
 }

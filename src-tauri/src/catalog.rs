@@ -1,17 +1,19 @@
 use std::sync::Mutex;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 
 use crate::domain::{
-    AudioChunk, AudioSource, CaptureSession, CaptureState, ChunkIntegrityState, TranscriptRevision,
-    TranscriptSegment,
+    AudioSource, CaptureSession, CaptureState, TranscriptRevision, TranscriptSegment,
 };
 
+mod chunks;
 pub(crate) mod migrations;
+
+pub use chunks::ChunkDiagnostics;
 
 pub struct Catalog {
     connection: Mutex<Connection>,
@@ -38,69 +40,6 @@ impl Catalog {
         };
         migrations::migrate(&mut catalog.connection.lock().unwrap())?;
         Ok(catalog)
-    }
-
-    pub fn insert_chunk(&self, chunk: &AudioChunk) -> rusqlite::Result<()> {
-        #[cfg(test)]
-        if self.fail_next_chunk_insert.swap(false, Ordering::SeqCst) {
-            return Err(rusqlite::Error::ExecuteReturnedResults);
-        }
-        self.connection.lock().unwrap().execute(
-            "INSERT INTO chunks(id, session_id, source, path, sha256, byte_length) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-            params![chunk.id, chunk.session_id, source_name(chunk.source), chunk.path, chunk.sha256, chunk.byte_length],
-        )?;
-        Ok(())
-    }
-
-    pub fn chunk(&self, id: &str) -> rusqlite::Result<Option<AudioChunk>> {
-        self.connection
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT id, session_id, source, path, sha256, byte_length FROM chunks WHERE id = ?1",
-                [id],
-                chunk_from_row,
-            )
-            .optional()
-    }
-
-    pub fn list_chunks(&self) -> rusqlite::Result<Vec<AudioChunk>> {
-        let connection = self.connection.lock().unwrap();
-        let mut statement = connection.prepare(
-            "SELECT id, session_id, source, path, sha256, byte_length FROM chunks ORDER BY id",
-        )?;
-        statement.query_map([], chunk_from_row)?.collect()
-    }
-
-    pub fn chunk_integrity(&self, id: &str) -> rusqlite::Result<Option<ChunkIntegrityState>> {
-        self.connection
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT integrity_state FROM chunks WHERE id = ?1",
-                [id],
-                |row| row.get::<_, String>(0).map(|value| parse_integrity(&value)),
-            )
-            .optional()
-    }
-
-    pub fn update_chunk_integrity(
-        &self,
-        id: &str,
-        state: ChunkIntegrityState,
-        error_code: Option<&str>,
-    ) -> rusqlite::Result<()> {
-        let error_at = error_code.map(|_| Utc::now().to_rfc3339());
-        self.connection.lock().unwrap().execute(
-            "UPDATE chunks SET integrity_state = ?2, last_error_code = ?3, last_error_at = ?4 WHERE id = ?1",
-            params![id, integrity_name(state), error_code, error_at],
-        )?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub fn fail_next_chunk_insert(&self) {
-        self.fail_next_chunk_insert.store(true, Ordering::SeqCst);
     }
 
     pub fn insert_session(&self, session: &CaptureSession) -> rusqlite::Result<()> {
@@ -206,18 +145,6 @@ impl Catalog {
     }
 }
 
-fn chunk_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioChunk> {
-    let source: String = row.get(2)?;
-    Ok(AudioChunk {
-        id: row.get(0)?,
-        session_id: row.get(1)?,
-        source: parse_source(&source),
-        path: row.get(3)?,
-        sha256: row.get(4)?,
-        byte_length: row.get(5)?,
-    })
-}
-
 fn state_name(state: CaptureState) -> &'static str {
     match state {
         CaptureState::Idle => "idle",
@@ -240,22 +167,6 @@ fn parse_source(value: &str) -> AudioSource {
         "system_audio" => AudioSource::SystemAudio,
         "imported" => AudioSource::Imported,
         _ => AudioSource::Microphone,
-    }
-}
-
-fn integrity_name(state: ChunkIntegrityState) -> &'static str {
-    match state {
-        ChunkIntegrityState::Available => "available",
-        ChunkIntegrityState::Corrupted => "corrupted",
-        ChunkIntegrityState::Missing => "missing",
-    }
-}
-
-fn parse_integrity(value: &str) -> ChunkIntegrityState {
-    match value {
-        "corrupted" => ChunkIntegrityState::Corrupted,
-        "missing" => ChunkIntegrityState::Missing,
-        _ => ChunkIntegrityState::Available,
     }
 }
 

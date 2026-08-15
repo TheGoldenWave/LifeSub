@@ -61,6 +61,7 @@ impl From<rusqlite::Error> for ServiceError {
 pub enum ImportFault {
     AfterTempSync,
     AfterFinalRename,
+    DirectorySyncIo,
     RenameIo,
     ParentSyncIo,
 }

@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::AudioChunk;
 
+use super::ImportFault;
+
 const AUDIO_DIRECTORY: &str = "audio";
 const IMPORT_TEMP_PREFIX: &str = ".lifesub-import-";
 const IMPORT_TEMP_SUFFIX: &str = ".tmp";
@@ -16,6 +18,8 @@ const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
 pub(super) struct AudioStore {
     data_dir: PathBuf,
+    #[cfg(test)]
+    import_fault: Option<ImportFault>,
 }
 
 pub(super) struct PendingAudio {
@@ -35,15 +39,25 @@ pub(super) enum ValidationError {
 }
 
 impl AudioStore {
+    #[cfg(not(test))]
     pub(super) fn new(data_dir: &Path) -> Self {
         Self {
             data_dir: data_dir.to_path_buf(),
+            #[cfg(test)]
+            import_fault: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_fault(data_dir: &Path, import_fault: Option<ImportFault>) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            import_fault,
         }
     }
 
     pub(super) fn write_temp(&self, source_path: &Path, id: &str) -> io::Result<PendingAudio> {
-        let audio_dir = self.audio_dir();
-        fs::create_dir_all(&audio_dir)?;
+        let audio_dir = self.prepare_directory()?;
         let temp_path = audio_dir.join(format!("{IMPORT_TEMP_PREFIX}{id}{IMPORT_TEMP_SUFFIX}"));
         match write_hashed_temp(source_path, &temp_path) {
             Ok((digest, byte_length)) => Ok(PendingAudio {
@@ -67,7 +81,7 @@ impl AudioStore {
         let relative_path =
             PathBuf::from(AUDIO_DIRECTORY).join(format!("{}-{id}.{extension}", pending.digest));
         let final_path = self.data_dir.join(&relative_path);
-        if let Err(error) = fs::rename(&pending.temp_path, &final_path) {
+        if let Err(error) = self.rename(&pending.temp_path, &final_path) {
             remove_file_if_present(&pending.temp_path);
             return Err(error);
         }
@@ -75,19 +89,11 @@ impl AudioStore {
     }
 
     pub(super) fn sync_final(&self, stored: &StoredAudio) -> io::Result<()> {
-        if let Err(error) = sync_directory(&self.audio_dir()) {
+        if let Err(error) = self.sync_directory(&self.audio_dir(), ImportFault::ParentSyncIo) {
             remove_file_if_present(&self.data_dir.join(&stored.relative_path));
             return Err(error);
         }
         Ok(())
-    }
-
-    pub(super) fn discard_pending(&self, pending: &PendingAudio) {
-        remove_file_if_present(&pending.temp_path);
-    }
-
-    pub(super) fn discard_stored(&self, stored: &StoredAudio) {
-        remove_file_if_present(&self.data_dir.join(&stored.relative_path));
     }
 
     pub(super) fn reconcile_orphans(
@@ -96,7 +102,9 @@ impl AudioStore {
         stale_before: SystemTime,
     ) -> io::Result<()> {
         let audio_dir = self.audio_dir();
-        fs::create_dir_all(&audio_dir)?;
+        if !audio_dir.exists() {
+            return Ok(());
+        }
         for entry in fs::read_dir(&audio_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -109,7 +117,7 @@ impl AudioStore {
                 remove_entry(&path)?;
             }
         }
-        sync_directory(&audio_dir)
+        self.sync_directory(&audio_dir, ImportFault::ParentSyncIo)
     }
 
     pub(super) fn validate(&self, chunk: &AudioChunk) -> Result<(), ValidationError> {
@@ -128,6 +136,42 @@ impl AudioStore {
 
     fn audio_dir(&self) -> PathBuf {
         self.data_dir.join(AUDIO_DIRECTORY)
+    }
+
+    fn prepare_directory(&self) -> io::Result<PathBuf> {
+        let audio_dir = self.audio_dir();
+        if !audio_dir.exists() {
+            fs::create_dir(&audio_dir)?;
+            if let Err(error) = self.sync_directory(&self.data_dir, ImportFault::DirectorySyncIo) {
+                let _ = fs::remove_dir(&audio_dir);
+                return Err(error);
+            }
+        }
+        Ok(audio_dir)
+    }
+
+    fn rename(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        self.inject_io_failure(ImportFault::RenameIo, "rename")?;
+        fs::rename(source, destination)
+    }
+
+    fn sync_directory(&self, path: &Path, fault: ImportFault) -> io::Result<()> {
+        self.inject_io_failure(fault, "directory sync")?;
+        File::open(path)?.sync_all()
+    }
+
+    #[cfg(test)]
+    fn inject_io_failure(&self, fault: ImportFault, operation: &str) -> io::Result<()> {
+        if self.import_fault == Some(fault) {
+            Err(io::Error::other(format!("injected {operation} failure")))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(not(test))]
+    fn inject_io_failure(&self, _fault: ImportFault, _operation: &str) -> io::Result<()> {
+        Ok(())
     }
 
     fn safe_chunk_path(&self, relative_path: &str) -> Result<PathBuf, ValidationError> {
@@ -181,10 +225,6 @@ fn hash_file(path: &Path) -> io::Result<(String, u64)> {
         byte_length += count as u64;
     }
     Ok((hex::encode(hasher.finalize()), byte_length))
-}
-
-fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
 }
 
 fn remove_entry(path: &Path) -> io::Result<()> {

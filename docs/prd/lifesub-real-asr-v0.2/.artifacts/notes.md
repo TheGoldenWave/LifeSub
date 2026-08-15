@@ -18,3 +18,5 @@
 - 2026-08-15：用户要求同时考虑 Qwen3-ASR 0.6B 与 1.7B。sherpa-onnx 1.13.5 已提供 Qwen3-ASR Rust 配置；其官方模型发布中存在 0.6B INT8 包（878,702,423 B，SHA-256 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`），因此 0.6B 可复用当前静态 Rust 运行时。
 - 2026-08-15：未发现 Qwen3-ASR 1.7B 的 sherpa-onnx 预转换发布包。Hugging Face `-hf` 原始权重需要 Transformers/Python 或另一原生适配器，不能直接交给当前 Rust Provider。V0.2 将其作为高质量实验选项，但在固定 size/hash/required-files/conversion provenance 和 Apple Silicon memory/RTF Gate 前禁止安装，且不得静默回退到 0.6B。
 - 2026-08-15：Task 2 最终质量复审发现 SQL normalizer 会丢失 token 边界，使 `TEXT NOT NULL` 与 `TEXTNOT NULL` 发生碰撞。修复必须先加入负向测试，再保留 token 边界或改用结构化 PRAGMA 校验。
+- 2026-08-16：Qwen 范围规格审查要求 Manifest 区分 `Installable` 与 `ExperimentalUnavailable`，并把 selectable/installable/executable 能力贯穿设置、下载、Core enqueue 与 Provider Factory。1.7B Gate 固定 Apple Silicon/16 GB/macOS 14+、CER/WER <= 20%、混合关键短语 100%、RTF <= 1.0、RSS <= 6 GiB，并使用确定性 300 秒 fixture。
+- 2026-08-16：Task 3 质量审查发现内部设置错误会形成第二套序列化错误码，且公开 Provider Receipt 字段可构造不可信 provenance。实现改为内部错误 exhaustive 映射到 `AsrErrorCode`，Receipt 仅能通过验证 draft/custom Deserialize 构造，并校验 hash、JSON、VAD identity 与时间顺序。

@@ -11,3 +11,4 @@
 - 2026-08-15：规格二审要求继续明确 Chunk integrity 状态、start_ms 兼容语义、boot ID lease 恢复、VAD artifact provenance、model_downloads Schema 和 CER/WER 计算协议；均已纳入第二轮设计。
 - 2026-08-15：规格三审发现 claim 与 `preparing` 状态之间存在崩溃窗口，且 boot ID 恢复隐含单实例假设；设计改为持有进程级 `asr-worker.lock`，并在同一 CAS 中完成 claim、attempt 递增和状态切换。
 - 2026-08-15：规格四审发现 lease 过期 Worker 可能在被接管后发布结果；设计增加 claim_generation fencing，所有续租、状态转换和 Evidence 成功事务必须校验 claimed_by 与 generation。
+- 2026-08-15：实施计划首审发现 `cargo test --exact` 可能零测试通过、Playwright 无法证明 native ASR、native runtime archive 未校验和 evidence commit 自失效等问题；计划已增加完整测试路径、verified archive、production desktop acceptance harness、单一 real-model Gate、固定 digest scope 和先提交代码后生成 evidence 的闭环。

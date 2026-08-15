@@ -7,7 +7,7 @@
 | 项目名称 | LifeSub 真实本地 ASR V0.2 |
 | 目标用户 | 在 macOS 本机保存、转写和检索个人音频证据的 LifeSub 用户 |
 | 核心价值 | 使用可切换的真实本地模型生成可定位、可追溯、可重转写的 Transcript Revision |
-| 成功指标 | SenseVoice 与 Whisper 均完成真实样本转写；设置切换、模型管理、自动转写和重转写流程通过验收 |
+| 成功指标 | SenseVoice、Whisper 与 Qwen3-ASR 0.6B 均完成真实样本转写；Qwen3-ASR 1.7B 通过设备兼容性 Gate 后可选；设置切换、模型管理、自动转写和重转写流程通过验收 |
 | 预估用户量级 | 本地单用户桌面应用，不涉及服务端并发 |
 | 预计上线 | 设计与真实模型 Gate 通过后发布 V0.2 |
 
@@ -28,8 +28,10 @@ flowchart TD
     Settings[打开 ASR 设置] --> Provider{选择 Provider}
     Provider --> SenseVoice[阿里 SenseVoice]
     Provider --> Whisper[OpenAI Whisper]
+    Provider --> Qwen[阿里 Qwen3-ASR]
     SenseVoice --> Model{模型已安装?}
     Whisper --> Model
+    Qwen --> Model
     Model -->|否| Download[下载并校验模型]
     Download --> Ready[模型就绪]
     Model -->|是| Ready
@@ -84,14 +86,14 @@ ui --> user: 展示真实转写和来源
 
 #### 5.1.1 切换 Provider 和模型
 
-**功能概述**: 用户在设置页选择 SenseVoice 或 Whisper，以及该 Provider 下的具体模型。
+**功能概述**: 用户在设置页选择 SenseVoice、Whisper 或 Qwen3-ASR，以及该 Provider 下的具体模型。
 
 **前置条件**: LifeSub 桌面版已启动，SQLite Catalog 可写。
 
 **操作步骤**:
 
 1. 用户进入设置页的 ASR 区域。
-2. 用户通过分段控件选择“阿里 SenseVoice”或“OpenAI Whisper”。
+2. 用户通过分段控件选择“阿里 SenseVoice”“OpenAI Whisper”或“阿里 Qwen3-ASR”。
 3. 用户从模型卡列表中选择一个已安装模型，或下载未安装模型。
 4. 用户保存设置。
 
@@ -112,7 +114,7 @@ ui --> user: 展示真实转写和来源
 
 **业务规则与数据约束**:
 
-- Provider 枚举仅允许 `sense_voice` 与 `whisper`。
+- Provider 枚举仅允许 `sense_voice`、`whisper` 与 `qwen3_asr`。
 - Provider 与模型 ID 必须来自内置、版本化 Model Manifest。
 - 不允许静默回退到另一 Provider 或另一模型。
 - 默认 Provider 为 SenseVoice，前提是对应模型已就绪；否则状态为待安装，不伪造成功。
@@ -128,7 +130,7 @@ ui --> user: 展示真实转写和来源
 1. 用户选择自动语言检测或 Provider 支持的具体语言。
 2. 用户调整线程数。
 3. 用户开启或关闭 VAD。
-4. SenseVoice 用户设置 ITN；Whisper 用户选择 transcribe 或 translate。
+4. SenseVoice 用户设置 ITN；Whisper 用户选择 transcribe 或 translate；Qwen3-ASR 用户可选择自动语言检测或固定支持语言。
 5. 用户保存设置。
 
 **预期结果**:
@@ -148,7 +150,7 @@ ui --> user: 展示真实转写和来源
 **业务规则与数据约束**:
 
 - 线程数为整数，范围 `1..=max(1, logical_cpu_count)`，默认不超过 4。
-- SenseVoice 支持 auto、zh、en、ja、ko、yue；Whisper 语言目录由模型 manifest 声明。
+- SenseVoice 支持 auto、zh、en、ja、ko、yue；Whisper 与 Qwen3-ASR 语言目录由模型 manifest 声明。
 - VAD 默认开启，阈值使用版本化默认值；高级参数不在首版开放。
 - SenseVoice ITN 默认开启；Whisper task 默认 `transcribe`。
 
@@ -188,7 +190,8 @@ ui --> user: 展示真实转写和来源
 
 **业务规则与数据约束**:
 
-- 首发模型：SenseVoiceSmall INT8；Whisper Tiny、Base、Small。
+- 首发模型：SenseVoiceSmall INT8；Whisper Tiny、Base、Small；Qwen3-ASR 0.6B INT8。
+- Qwen3-ASR 1.7B 作为高质量可选项展示，但只有存在固定来源、大小、SHA-256、必需文件及 Apple Silicon 真实性能证据时才允许下载和执行；否则明确标记为“实验性/暂不可安装”，不得回退到 0.6B。
 - 模型保存在应用数据目录 `models/asr/<provider>/<model-id>/<manifest-version>-<archive-hash>/`，已安装版本不可原地替换。
 - `model_downloads` 持久化下载、校验和安装状态；`model_installations` 只保存已激活、可执行版本。
 - Model Manifest 固定模型来源、版本、包体大小、SHA-256、许可证和必需文件。
@@ -316,7 +319,8 @@ ui --> user: 展示真实转写和来源
 
 **包含**:
 
-- SenseVoiceSmall 与 Whisper 的真实本地离线转写。
+- SenseVoiceSmall、Whisper 与 Qwen3-ASR 0.6B 的真实本地离线转写。
+- Qwen3-ASR 1.7B 的模型选择、设备能力说明和独立启用 Gate。
 - 模型安装、切换、删除、状态和许可证展示。
 - ASR 设置、自动转写、任务状态、重试和重新转写。
 - VAD 时间范围、Provider Receipt 和不可变 revision。
@@ -338,15 +342,18 @@ ui --> user: 展示真实转写和来源
 - **来源完整性**: Chunk 使用 `available | corrupted | missing` 状态；非 available Chunk 不执行新 ASR，既有文本仍可读但标记音频来源不可重新验证。
 - **恢复**: 应用启动 5 秒内处理过期 lease；最多自动恢复 3 次，之后进入 failed 并保留诊断。
 - **兼容性**: 首发验证 macOS 14+ Apple Silicon；Intel 构建不作为 V0.2 发布 Gate。
-- **许可**: sherpa-onnx Apache-2.0；SenseVoice 与 Whisper 上游声明 MIT。发布前逐个冻结模型资产 notice、来源、转换链和 hash，应用内展示。
+- **许可**: sherpa-onnx 与 Qwen3-ASR Apache-2.0；SenseVoice 与 Whisper 上游声明 MIT。发布前逐个冻结模型资产 notice、来源、转换链和 hash，应用内展示。
 
 ## 9. 验收标准
 
-- [ ] 设置页可选择 SenseVoice 或 Whisper，并持久化 Provider、模型和参数。
+- [ ] 设置页可选择 SenseVoice、Whisper 或 Qwen3-ASR，并持久化 Provider、模型和参数。
 - [ ] SenseVoiceSmall INT8 可从固定 manifest 下载、校验、安装、删除和重新安装。
 - [ ] Whisper 至少一个模型可从固定 manifest 下载、校验、安装、删除和重新安装。
+- [ ] Qwen3-ASR 0.6B INT8 可从固定 manifest 下载、校验、安装、删除、真实转写和重新安装。
+- [ ] Qwen3-ASR 1.7B 以高质量可选项展示；仅在固定可执行资产和 Apple Silicon Gate 通过后允许安装，否则保持明确不可用状态。
 - [ ] 固定中文语音样本通过 SenseVoice 产生 Segment，并达到本节规定的 CER 与时间误差阈值。
 - [ ] 固定英文和中英混合语音样本通过 Whisper 产生 Segment，并达到本节规定的 WER、关键短语与时间误差阈值。
+- [ ] 固定中文、英文和中英混合样本通过 Qwen3-ASR 0.6B 产生 Segment，并达到与主发布模型一致的质量和时间误差阈值。
 - [ ] 用户导入音频后，真实 ASR Job 状态可见，成功后自动追加 Transcript Revision。
 - [ ] 同一记录切换 Provider 重转写后存在两个可独立查看的 revision，旧结果未被覆盖。
 - [ ] 每个成功 revision 有可解析 Provider Receipt，包含模型、参数、输入 hash、耗时和本地数据去向。

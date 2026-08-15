@@ -2,18 +2,19 @@
 
 ## 1. 决策摘要
 
-LifeSub V0.2 将演示 ASR 替换为两个可切换的真实本地 Provider：
+LifeSub V0.2 将演示 ASR 替换为三个可切换的真实本地 Provider：
 
 - 阿里开源模型：SenseVoiceSmall INT8。
 - OpenAI 开源模型：Whisper Tiny、Base、Small。
+- 阿里开源模型：Qwen3-ASR 0.6B INT8，以及通过独立设备 Gate 后启用的 Qwen3-ASR 1.7B 高质量档。
 
-两者统一使用 sherpa-onnx 1.13.5 Rust API，并静态链接到 Tauri Core。该方案不依赖 Python，不启动本地 HTTP 服务，不向云端发送音频，也不复制 GPLv3 参考项目代码。
+SenseVoice、Whisper 与 Qwen3-ASR 0.6B 统一使用 sherpa-onnx 1.13.5 Rust API，并静态链接到 Tauri Core。Qwen3-ASR 1.7B 只有在获得可复现的 sherpa-onnx 资产或经单独批准的 Apple Silicon 原生适配器后才启用；V0.2 不为它引入 Python Sidecar。该方案不启动本地 HTTP 服务，不向云端发送音频，也不复制 GPLv3 参考项目代码。
 
 ## 2. 方案比较
 
 | 方案 | 优点 | 缺点 | 结论 |
 |---|---|---|---|
-| sherpa-onnx 统一运行时 | 同一 Rust API 支持 SenseVoice/Whisper；静态链接；错误与模型管理统一 | Whisper 的平台专项优化可能弱于 whisper.cpp | 采用 |
+| sherpa-onnx 统一运行时 | 同一 Rust API 支持 SenseVoice/Whisper/Qwen3-ASR 0.6B；静态链接；错误与模型管理统一 | Qwen3-ASR 1.7B 暂无同等成熟的预转换发布包 | 采用，0.6B 首发，1.7B 受 Gate 控制 |
 | sherpa-onnx + whisper.cpp | 可分别使用每个模型的成熟运行时 | 两套 FFI、构建、模型管理和诊断体系 | 延后到性能证据证明必要时 |
 | FunASR + faster-whisper Python Sidecar | 模型覆盖广，原型快 | 包体、Python 环境、进程恢复、签名复杂 | 不采用 |
 
@@ -61,6 +62,7 @@ Rust Core
 ├── asr/provider.rs          Provider 接口与结果类型
 ├── asr/sense_voice.rs       SenseVoice 配置
 ├── asr/whisper.rs           Whisper 配置
+├── asr/qwen3_asr.rs         Qwen3-ASR 配置与能力 Gate
 ├── asr/job.rs               状态机、取消、恢复
 └── asr/service.rs           事务编排与 revision 发布
 ```
@@ -73,6 +75,7 @@ Rust Core
 enum AsrProviderKind {
     SenseVoice,
     Whisper,
+    Qwen3Asr,
 }
 
 struct AsrSettings {
@@ -88,6 +91,7 @@ struct AsrSettings {
 enum AsrProviderOptions {
     SenseVoice { use_itn: bool },
     Whisper { task: WhisperTask },
+    Qwen3Asr,
 }
 
 enum AsrJobState {
@@ -143,7 +147,7 @@ v2 的新增表与索引如下；实际 SQL 名称和约束视为 Contract，计
 ```sql
 CREATE TABLE asr_settings (
   singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
-  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper')),
+  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr')),
   model_id TEXT NOT NULL,
   language TEXT NOT NULL,
   num_threads INTEGER NOT NULL CHECK(num_threads >= 1),
@@ -155,7 +159,7 @@ CREATE TABLE asr_settings (
 
 CREATE TABLE model_installations (
   model_id TEXT PRIMARY KEY,
-  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper', 'vad')),
+  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr', 'vad')),
   manifest_version TEXT NOT NULL,
   archive_sha256 TEXT NOT NULL,
   install_dir TEXT NOT NULL UNIQUE,
@@ -188,7 +192,7 @@ CREATE TABLE asr_jobs (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id),
   chunk_id TEXT NOT NULL REFERENCES chunks(id),
-  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper')),
+  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr')),
   model_id TEXT NOT NULL,
   manifest_version TEXT NOT NULL,
   archive_sha256 TEXT NOT NULL,
@@ -299,6 +303,10 @@ Manifest 作为版本控制下的静态数据，至少包含：
 | `whisper-tiny` | Whisper | 116,204,861 B | 快速验证和低资源 |
 | `whisper-base` | Whisper | 207,557,382 B | 默认 Whisper 平衡档 |
 | `whisper-small` | Whisper | 639,387,718 B | 更高质量、较高资源 |
+| `qwen3-asr-0.6b-int8-2026-03-25` | Qwen3-ASR | 878,702,423 B | 52 种语言/方言覆盖，首发 Qwen 档 |
+| `qwen3-asr-1.7b` | Qwen3-ASR | 待固定 | 高质量实验档；通过资产与设备 Gate 后启用 |
+
+Qwen3-ASR 0.6B 使用 sherpa-onnx 发布资产 `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2`，SHA-256 为 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`。Qwen3-ASR 1.7B 的 Hugging Face 原始权重不能直接交给当前 Rust Provider；在固定可执行 ONNX/MLX 资产、转换来源和真实 Apple Silicon 证据前，manifest 只能声明不可安装的实验条目。
 
 实现前必须下载每个发布模型归档并冻结 SHA-256。Silero VAD 也作为独立 `provider = vad` 的 manifest 条目管理，包含版本、模型 hash 和运行参数。若上游同名资产发生变化，必须发布新的 manifest version 和 model ID；禁止在原 ID 下替换资产。
 
@@ -343,7 +351,7 @@ ASR 开始前重新读取最终文件并计算 SHA-256，与 Chunk metadata 及 
 4. 在 VAD 开启时形成有开始/结束采样位置的语音区间。
 5. 对每个语音区间独立执行识别。
 
-VAD 是两个 Provider 的共同时间轴。SenseVoice 不需要伪造模型 token 时间戳；Transcript Segment 的时间范围来自 VAD 区间。关闭 VAD 时，首个 Segment 覆盖完整音频时长。
+VAD 是三个 Provider 的共同时间轴。SenseVoice 与 Qwen3-ASR 不伪造模型 token 时间戳；Transcript Segment 的时间范围来自 VAD 区间。关闭 VAD 时，首个 Segment 覆盖完整音频时长。
 
 标准工作格式为 16 kHz `f32` 单声道。多声道按每帧算术平均下混，并在写入 Provider 前 clamp 到 `[-1, 1]`。重采样器必须暴露或补偿 delay；时间换算以原始解码 frame 索引为权威，开始时间向下取整、结束时间向上取整，并校验 `0 <= start < end <= duration`。
 
@@ -406,12 +414,13 @@ Worker 使用 compare-and-swap claim：仅当 Job 为 `queued`、`cancel_request
 
 设置页使用适合选项切换的控件，而不是静态说明行：
 
-- Provider：SenseVoice / Whisper 分段控件。
+- Provider：SenseVoice / Whisper / Qwen3-ASR 分段控件。
 - Model Cards：名称、说明、大小、许可、推荐标识、安装/下载/错误状态和操作图标。
 - Language：Provider 支持语言菜单。
 - Threads：数值步进器。
 - VAD、自动转写、SenseVoice ITN：开关。
 - Whisper task：transcribe / translate 分段控件。
+- Qwen3-ASR：展示模型档位、语言覆盖、预计内存与实验性 Gate 状态；不可执行的 1.7B 不显示下载动作。
 - Advanced：模型目录、运行时版本、最近错误。
 
 下载过程中卡片尺寸固定，进度、错误和长模型名不能推动布局跳动。移动端宽度下设置项改为单列，按钮保持可触达尺寸。所有颜色、间距和字体使用现有 Design Token。

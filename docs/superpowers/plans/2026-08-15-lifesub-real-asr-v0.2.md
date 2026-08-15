@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the demo transcript path with real, local SenseVoice and Whisper transcription, model switching, persistent ASR settings, recoverable jobs, immutable revisions, and a complete settings experience.
+**Goal:** Replace the demo transcript path with real, local SenseVoice, Whisper, and Qwen3-ASR transcription, model switching, persistent ASR settings, recoverable jobs, immutable revisions, and a complete settings experience.
 
-**Architecture:** The Rust Core owns schema migration, immutable audio, model installation, ASR jobs, sherpa-onnx providers, receipts, and revision publication. React only reads and changes settings, displays model/job state, and requests retranscription. SenseVoiceSmall and Whisper share sherpa-onnx 1.13.5 with a single fenced background worker.
+**Architecture:** The Rust Core owns schema migration, immutable audio, model installation, ASR jobs, sherpa-onnx providers, receipts, and revision publication. React only reads and changes settings, displays model/job state, and requests retranscription. SenseVoiceSmall, Whisper, and Qwen3-ASR 0.6B share sherpa-onnx 1.13.5 with a single fenced background worker; Qwen3-ASR 1.7B remains disabled until its independent asset/device Gate passes.
 
 **Tech Stack:** Rust 2024, rusqlite, sherpa-onnx 1.13.5 static runtime, Symphonia 0.6, Rubato 5, reqwest blocking + rustls, tar/bzip2, fs2, React 19, TypeScript, Vitest, Testing Library, Playwright, Tauri 2.
 
@@ -36,6 +36,7 @@
 - Create `src-tauri/src/asr/provider.rs`: provider trait, request/result/error types, fake provider.
 - Create `src-tauri/src/asr/sense_voice.rs`: sherpa-onnx SenseVoice adapter.
 - Create `src-tauri/src/asr/whisper.rs`: sherpa-onnx Whisper adapter.
+- Create `src-tauri/src/asr/qwen3_asr.rs`: sherpa-onnx Qwen3-ASR adapter and 1.7B capability Gate.
 - Create `src-tauri/src/asr/job.rs`: job state machine, singleton lock, claims, leases, fencing, cancellation.
 - Create `src-tauri/src/asr/service.rs`: job execution and atomic Receipt/Revision publication.
 - Create `src-tauri/src/asr/model_lookup.rs`: minimal model lookup interface used by settings and the static manifest.
@@ -51,7 +52,7 @@
 - Create `src-tauri/src/asr_model_manager_test.rs`: interrupted download, integrity, extraction, reconciliation.
 - Create `src-tauri/src/asr_audio_test.rs`: declared formats, resampling, VAD partition and timestamps.
 - Create `src-tauri/src/asr_job_test.rs`: claim/lease/fencing/cancel/recovery/atomic publish tests.
-- Create `src-tauri/src/asr_runtime_test.rs`: opt-in real SenseVoice/Whisper fixture tests.
+- Create `src-tauri/src/asr_runtime_test.rs`: opt-in real SenseVoice/Whisper/Qwen3-ASR fixture tests.
 - Create `tests/fixtures/asr/fixture-manifest.json`: hashes, transcripts, intervals, phrases, licenses.
 - Create `tests/fixtures/asr/zh.wav`, `en.wav`, `zh-en.wav`: redistributable fixed speech samples.
 - Create `tests/fixtures/catalog/lifesub-v0.1.sqlite3`: pre-v2 migration fixture.
@@ -61,7 +62,7 @@
 - Modify `src/domain.ts`: ASR settings, models, downloads, jobs, receipts, revision provenance.
 - Create `src/services/asr.ts`: typed Tauri command client.
 - Modify `src/services/lifesub.ts`: import returns chunk/job information instead of demo revision.
-- Create `src/components/asr/ProviderSelector.tsx`: SenseVoice/Whisper segmented control.
+- Create `src/components/asr/ProviderSelector.tsx`: SenseVoice/Whisper/Qwen3-ASR segmented control.
 - Create `src/components/asr/ModelCardList.tsx`: stable model cards and download controls.
 - Create `src/components/asr/AsrSettingsForm.tsx`: language, threads, VAD, ITN/task, auto-transcribe.
 - Create `src/components/asr/AsrJobStatus.tsx`: queued, progress, cancel, retry, diagnostic state.
@@ -256,7 +257,7 @@ let invalid = AsrSettings::whisper("whisper-base")
 assert_eq!(invalid.validate(&stub_models), Err(AsrSettingsError::ProviderOptionsMismatch));
 ```
 
-Test thread bounds, language support, model/provider ownership, Whisper translate, and SenseVoice ITN.
+Test thread bounds, language support, model/provider ownership, Whisper translate, SenseVoice ITN, Qwen3-ASR option isolation, and unavailable 1.7B rejection.
 
 - [ ] **Step 2: Run the tests and confirm missing types**
 
@@ -366,6 +367,13 @@ Whisper Small
 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2
 size 639,387,718; compute and freeze sha256
 
+Qwen3-ASR 0.6B INT8
+https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2
+size 878,702,423; sha256 393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96
+
+Qwen3-ASR 1.7B
+Declare an experimental, non-installable registry entry until an immutable sherpa-onnx or approved native Apple Silicon package has exact size, SHA-256, required files, conversion provenance, and passing Gate evidence. Raw Hugging Face Transformers weights are not executable by the Rust provider.
+
 Silero VAD
 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
 size 643,854; sha256 9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6
@@ -380,6 +388,7 @@ SenseVoice: model.int8.onnx, tokens.txt
 Whisper Tiny: tiny-encoder.onnx, tiny-decoder.onnx, tiny-tokens.txt
 Whisper Base: base-encoder.onnx, base-decoder.onnx, base-tokens.txt
 Whisper Small: small-encoder.onnx, small-decoder.onnx, small-tokens.txt
+Qwen3-ASR 0.6B: conv-frontend.int8.onnx, encoder.int8.onnx, decoder.int8.onnx, tokenizer.json (verify exact archive paths before freezing)
 VAD: silero_vad.onnx
 ```
 
@@ -502,19 +511,20 @@ git add src-tauri/src/asr/audio.rs src-tauri/src/asr/vad.rs src-tauri/src/asr_au
 git commit -m "feat: prepare timestamped ASR audio"
 ```
 
-### Task 8: Implement SenseVoice And Whisper Providers
+### Task 8: Implement SenseVoice, Whisper, And Qwen3-ASR Providers
 
 **Files:**
 
 - Create: `src-tauri/src/asr/provider.rs`
 - Create: `src-tauri/src/asr/sense_voice.rs`
 - Create: `src-tauri/src/asr/whisper.rs`
+- Create: `src-tauri/src/asr/qwen3_asr.rs`
 - Create: `src-tauri/src/asr_provider_test.rs`
 - Modify: `src-tauri/src/lib.rs`
 
 - [ ] **Step 1: Write fake-provider contract tests**
 
-Test provider/model identity, language mapping, SenseVoice ITN, Whisper task, empty-output rejection, cancellation between windows, and error mapping without loading native models.
+Test provider/model identity, language mapping, SenseVoice ITN, Whisper task, Qwen3-ASR parameters and 1.7B capability rejection, empty-output rejection, cancellation between windows, and error mapping without loading native models.
 
 - [ ] **Step 2: Run tests and verify missing providers**
 
@@ -539,7 +549,7 @@ Providers receive validated PCM and do not read settings, select fallback, write
 
 - [ ] **Step 4: Implement sherpa adapters behind `asr-runtime`**
 
-Map manifest files into `OfflineSenseVoiceModelConfig` and `OfflineWhisperModelConfig`. Enable the approved language/task/ITN values. Capture runtime version and build identity.
+Map manifest files into `OfflineSenseVoiceModelConfig`, `OfflineWhisperModelConfig`, and `OfflineQwen3ASRModelConfig`. Enable the approved language/task/ITN values. Capture runtime version and build identity. The Qwen adapter must refuse a manifest whose executable capability Gate is not satisfied; it must never substitute 0.6B for 1.7B.
 
 - [ ] **Step 5: Run provider tests and compile both feature sets**
 
@@ -554,8 +564,8 @@ cargo check --manifest-path src-tauri/Cargo.toml --features desktop
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src-tauri/src/asr/provider.rs src-tauri/src/asr/sense_voice.rs src-tauri/src/asr/whisper.rs src-tauri/src/asr_provider_test.rs src-tauri/src/lib.rs
-git commit -m "feat: add SenseVoice and Whisper providers"
+git add src-tauri/src/asr/provider.rs src-tauri/src/asr/sense_voice.rs src-tauri/src/asr/whisper.rs src-tauri/src/asr/qwen3_asr.rs src-tauri/src/asr_provider_test.rs src-tauri/src/lib.rs
+git commit -m "feat: add local ASR providers"
 ```
 
 ### Chunk 2 Checkpoint
@@ -800,7 +810,7 @@ git add src/components/asr/AsrJobStatus.tsx src/components/TranscriptView.tsx sr
 git commit -m "feat: add ASR jobs and retranscription"
 ```
 
-### Task 14: Prove Both Real Models Against Fixed Fixtures
+### Task 14: Prove Real Provider Families Against Fixed Fixtures
 
 **Files:**
 
@@ -817,7 +827,7 @@ NFKC + lowercase Latin; CER removes punctuation/whitespace and uses grapheme clu
 
 - [ ] **Step 2: Implement a single real-model Gate runner**
 
-`lifesub-asr-gate` loads the fixture manifest, verifies every fixture/model/runtime input hash, runs SenseVoice and both Whisper fixtures, calculates all approved metrics, and writes the result JSON atomically. The JSON includes `tested_commit`, a deterministic digest of the exact paths listed in version-controlled `scripts/asr-gate-scope.txt`, executable hash, runtime version/git SHA, native archive hash, model/VAD artifact hashes, and fixture hashes. Dynamic globs are prohibited. Unrelated dirty files outside the declared source scope do not invalidate the Gate; any scoped modification does.
+`lifesub-asr-gate` loads the fixture manifest, verifies every fixture/model/runtime input hash, runs SenseVoice, Whisper, and Qwen3-ASR 0.6B fixtures, calculates all approved metrics, and writes the result JSON atomically. Qwen3-ASR 1.7B is enabled only when the same Gate includes its immutable executable asset and records peak memory plus RTF on the supported Apple Silicon baseline. The JSON includes `tested_commit`, a deterministic digest of the exact paths listed in version-controlled `scripts/asr-gate-scope.txt`, executable hash, runtime version/git SHA, native archive hash, model/VAD artifact hashes, and fixture hashes. Dynamic globs are prohibited. Unrelated dirty files outside the declared source scope do not invalidate the Gate; any scoped modification does.
 
 `scripts/verify-asr-gate.sh` must:
 

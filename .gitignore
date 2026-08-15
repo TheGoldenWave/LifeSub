@@ -27,7 +27,12 @@ xcuserdata/
 node_modules/
 dist/
 coverage/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+src-tauri/target/
+src-tauri/gen/
+docs/design/lifesub-logo-concepts/
 
 # Logs
 *.log
-

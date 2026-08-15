@@ -3,6 +3,10 @@ use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub use crate::asr::receipt::{
+    DataDestination, ProviderOutcome, ProviderReceipt, ProviderReceiptDraft, ProviderReceiptError,
+};
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureState {
@@ -59,20 +63,6 @@ pub enum ChunkIntegrityState {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DataDestination {
-    LocalDevice,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderOutcome {
-    Succeeded,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum AsrErrorCode {
     ModelNotInstalled,
     ModelCapabilityUnavailable,
@@ -88,30 +78,6 @@ pub enum AsrErrorCode {
     Cancelled,
     RecoveryRequired,
     ReceiptInvalid,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProviderReceipt {
-    pub job_id: String,
-    pub chunk_id: String,
-    pub provider: AsrProviderKind,
-    pub model_id: String,
-    pub manifest_version: String,
-    pub archive_sha256: String,
-    pub required_file_hashes_json: String,
-    pub model_source_json: String,
-    pub vad_model_id: Option<String>,
-    pub vad_manifest_version: Option<String>,
-    pub vad_archive_sha256: Option<String>,
-    pub vad_required_file_hashes_json: Option<String>,
-    pub runtime_version: String,
-    pub runtime_build_id: String,
-    pub parameters_json: String,
-    pub input_sha256: String,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: DateTime<Utc>,
-    pub data_destination: DataDestination,
-    pub outcome: ProviderOutcome,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

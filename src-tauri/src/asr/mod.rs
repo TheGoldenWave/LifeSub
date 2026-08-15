@@ -1,4 +1,5 @@
 pub mod model_lookup;
+pub mod receipt;
 pub mod settings;
 
 #[cfg(feature = "asr-runtime")]

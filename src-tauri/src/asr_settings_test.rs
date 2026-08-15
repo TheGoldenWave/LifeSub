@@ -1,11 +1,12 @@
-use chrono::Utc;
+use chrono::{Duration, Utc};
 
 use crate::asr::model_lookup::{ModelCapabilities, ModelLookup};
 use crate::asr::settings::{AsrProviderOptions, AsrSettings, AsrSettingsError, WhisperTask};
 use crate::domain::{
     AsrErrorCode, AsrJobState, AsrLanguage, AsrLanguageError, AsrProviderKind, AudioSource,
-    ChunkIntegrityState, DataDestination, ProviderOutcome, ProviderReceipt, TranscriptRevision,
-    TranscriptSegment, TranscriptTimeRange, TranscriptTimeRangeError,
+    ChunkIntegrityState, DataDestination, ProviderOutcome, ProviderReceipt, ProviderReceiptDraft,
+    ProviderReceiptError, TranscriptRevision, TranscriptSegment, TranscriptTimeRange,
+    TranscriptTimeRangeError,
 };
 
 const SENSE_VOICE_MODEL: &str = "sense-voice-small-int8-2024-07-17";
@@ -89,10 +90,54 @@ fn active_settings_require_an_executable_model() {
         settings.validate(&StubModels),
         Err(AsrSettingsError::ModelCapabilityUnavailable)
     );
+    let public_error = AsrErrorCode::from(AsrSettingsError::ModelCapabilityUnavailable);
     assert_eq!(
-        serde_json::to_string(&AsrSettingsError::ModelCapabilityUnavailable).unwrap(),
+        serde_json::to_string(&public_error).unwrap(),
         "\"model_capability_unavailable\""
     );
+}
+
+#[test]
+fn settings_errors_map_exhaustively_to_public_error_codes() {
+    let cases = [
+        (
+            AsrSettingsError::UnknownModel,
+            AsrErrorCode::ModelNotInstalled,
+        ),
+        (
+            AsrSettingsError::ModelCapabilityUnavailable,
+            AsrErrorCode::ModelCapabilityUnavailable,
+        ),
+        (
+            AsrSettingsError::ModelProviderMismatch,
+            AsrErrorCode::InvalidProviderParameter,
+        ),
+        (
+            AsrSettingsError::UnsupportedLanguage,
+            AsrErrorCode::InvalidProviderParameter,
+        ),
+        (
+            AsrSettingsError::ProviderOptionsMismatch,
+            AsrErrorCode::InvalidProviderParameter,
+        ),
+        (
+            AsrSettingsError::InvalidThreadCount,
+            AsrErrorCode::InvalidProviderParameter,
+        ),
+    ];
+
+    for (internal, public) in cases {
+        let mapped = AsrErrorCode::from(internal);
+        assert_eq!(mapped, public);
+        assert!(serde_json::to_string(&mapped).is_ok());
+    }
+}
+
+#[test]
+fn settings_validation_accepts_trait_object_model_lookups() {
+    let models: &dyn ModelLookup = &StubModels;
+
+    assert_eq!(AsrSettings::whisper(WHISPER_MODEL).validate(models), Ok(()));
 }
 
 #[test]
@@ -285,9 +330,173 @@ fn transcript_ranges_must_be_positive_ordered_and_within_audio_bounds() {
 }
 
 #[test]
+fn transcript_range_deserialization_rejects_every_invalid_wire_boundary() {
+    let invalid = [
+        serde_json::json!({"start_ms": -1, "end_ms": 1, "audio_duration_ms": 1}),
+        serde_json::json!({"start_ms": 1, "end_ms": 1, "audio_duration_ms": 1}),
+        serde_json::json!({"start_ms": 2, "end_ms": 1, "audio_duration_ms": 2}),
+        serde_json::json!({"start_ms": 0, "end_ms": 1, "audio_duration_ms": -1}),
+        serde_json::json!({"start_ms": i64::MIN, "end_ms": i64::MAX, "audio_duration_ms": i64::MAX}),
+        serde_json::json!({"start_ms": 0, "end_ms": 1}),
+    ];
+
+    for wire in invalid {
+        assert!(serde_json::from_value::<TranscriptTimeRange>(wire).is_err());
+    }
+
+    let edge = serde_json::json!({
+        "start_ms": i64::MAX - 1,
+        "end_ms": i64::MAX,
+        "audio_duration_ms": i64::MAX
+    });
+    assert!(serde_json::from_value::<TranscriptTimeRange>(edge).is_ok());
+}
+
+#[test]
 fn provider_receipt_round_trips_without_debug_persistence() {
+    let receipt = ProviderReceipt::try_from(valid_receipt_draft()).unwrap();
+
+    let json = serde_json::to_string(&receipt).unwrap();
+    let restored: ProviderReceipt = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(restored, receipt);
+    assert_eq!(receipt.job_id(), "job-1");
+    assert_eq!(receipt.outcome(), ProviderOutcome::Succeeded);
+    assert!(json.contains("\"provider\":\"whisper\""));
+    assert!(json.contains("\"data_destination\":\"local_device\""));
+}
+
+#[test]
+fn provider_receipt_rejects_invalid_fields_and_partial_vad_identity() {
+    let empty_fields = [
+        ("job_id", {
+            let mut draft = valid_receipt_draft();
+            draft.job_id.clear();
+            draft
+        }),
+        ("chunk_id", {
+            let mut draft = valid_receipt_draft();
+            draft.chunk_id.clear();
+            draft
+        }),
+        ("model_id", {
+            let mut draft = valid_receipt_draft();
+            draft.model_id.clear();
+            draft
+        }),
+        ("manifest_version", {
+            let mut draft = valid_receipt_draft();
+            draft.manifest_version.clear();
+            draft
+        }),
+        ("runtime_version", {
+            let mut draft = valid_receipt_draft();
+            draft.runtime_version.clear();
+            draft
+        }),
+        ("runtime_build_id", {
+            let mut draft = valid_receipt_draft();
+            draft.runtime_build_id.clear();
+            draft
+        }),
+    ];
+    for (field, draft) in empty_fields {
+        assert_eq!(
+            ProviderReceipt::try_from(draft),
+            Err(ProviderReceiptError::EmptyField(field))
+        );
+    }
+
+    let mut invalid_hash = valid_receipt_draft();
+    invalid_hash.archive_sha256 = "z".repeat(64);
+    assert_eq!(
+        ProviderReceipt::try_from(invalid_hash),
+        Err(ProviderReceiptError::InvalidSha256("archive_sha256"))
+    );
+
+    let mut invalid_input_hash = valid_receipt_draft();
+    invalid_input_hash.input_sha256 = "a".repeat(63);
+    assert_eq!(
+        ProviderReceipt::try_from(invalid_input_hash),
+        Err(ProviderReceiptError::InvalidSha256("input_sha256"))
+    );
+
+    let mut malformed_json = valid_receipt_draft();
+    malformed_json.model_source_json = "{".to_owned();
+    assert_eq!(
+        ProviderReceipt::try_from(malformed_json),
+        Err(ProviderReceiptError::InvalidJson("model_source_json"))
+    );
+
+    let mut non_object = valid_receipt_draft();
+    non_object.required_file_hashes_json = "[]".to_owned();
+    assert_eq!(
+        ProviderReceipt::try_from(non_object),
+        Err(ProviderReceiptError::ExpectedJsonObject(
+            "required_file_hashes_json"
+        ))
+    );
+
+    let mut partial_vad = valid_receipt_draft();
+    partial_vad.vad_archive_sha256 = None;
+    assert_eq!(
+        ProviderReceipt::try_from(partial_vad),
+        Err(ProviderReceiptError::PartialVadIdentity)
+    );
+
+    let mut invalid_vad_hash = valid_receipt_draft();
+    invalid_vad_hash.vad_archive_sha256 = Some("x".repeat(64));
+    assert_eq!(
+        ProviderReceipt::try_from(invalid_vad_hash),
+        Err(ProviderReceiptError::InvalidSha256("vad_archive_sha256"))
+    );
+
+    let mut invalid_vad_json = valid_receipt_draft();
+    invalid_vad_json.vad_required_file_hashes_json = Some("[]".to_owned());
+    assert_eq!(
+        ProviderReceipt::try_from(invalid_vad_json),
+        Err(ProviderReceiptError::ExpectedJsonObject(
+            "vad_required_file_hashes_json"
+        ))
+    );
+
+    let mut no_vad = valid_receipt_draft();
+    no_vad.vad_model_id = None;
+    no_vad.vad_manifest_version = None;
+    no_vad.vad_archive_sha256 = None;
+    no_vad.vad_required_file_hashes_json = None;
+    assert!(ProviderReceipt::try_from(no_vad).is_ok());
+
+    let mut reversed = valid_receipt_draft();
+    reversed.finished_at = reversed.started_at - Duration::milliseconds(1);
+    assert_eq!(
+        ProviderReceipt::try_from(reversed),
+        Err(ProviderReceiptError::FinishedBeforeStarted)
+    );
+}
+
+#[test]
+fn provider_receipt_deserialization_rejects_non_success_outcomes_and_invalid_drafts() {
+    let receipt = ProviderReceipt::try_from(valid_receipt_draft()).unwrap();
+    let mut value = serde_json::to_value(&receipt).unwrap();
+
+    for outcome in ["failed", "cancelled"] {
+        value["outcome"] = serde_json::json!(outcome);
+        assert!(serde_json::from_value::<ProviderReceipt>(value.clone()).is_err());
+    }
+
+    let mut remote = serde_json::to_value(&receipt).unwrap();
+    remote["data_destination"] = serde_json::json!("remote");
+    assert!(serde_json::from_value::<ProviderReceipt>(remote).is_err());
+
+    let mut invalid = serde_json::to_value(&receipt).unwrap();
+    invalid["parameters_json"] = serde_json::json!("{");
+    assert!(serde_json::from_value::<ProviderReceipt>(invalid).is_err());
+}
+
+fn valid_receipt_draft() -> ProviderReceiptDraft {
     let now = Utc::now();
-    let receipt = ProviderReceipt {
+    ProviderReceiptDraft {
         job_id: "job-1".to_owned(),
         chunk_id: "chunk-1".to_owned(),
         provider: AsrProviderKind::Whisper,
@@ -296,26 +505,19 @@ fn provider_receipt_round_trips_without_debug_persistence() {
         archive_sha256: "a".repeat(64),
         required_file_hashes_json: "{}".to_owned(),
         model_source_json: "{}".to_owned(),
-        vad_model_id: None,
-        vad_manifest_version: None,
-        vad_archive_sha256: None,
-        vad_required_file_hashes_json: None,
+        vad_model_id: Some("silero-vad".to_owned()),
+        vad_manifest_version: Some("1".to_owned()),
+        vad_archive_sha256: Some("c".repeat(64)),
+        vad_required_file_hashes_json: Some("{}".to_owned()),
         runtime_version: "1.13.5".to_owned(),
         runtime_build_id: "build-1".to_owned(),
-        parameters_json: "{}".to_owned(),
+        parameters_json: "{\"task\":\"transcribe\"}".to_owned(),
         input_sha256: "b".repeat(64),
         started_at: now,
         finished_at: now,
         data_destination: DataDestination::LocalDevice,
         outcome: ProviderOutcome::Succeeded,
-    };
-
-    let json = serde_json::to_string(&receipt).unwrap();
-    let restored: ProviderReceipt = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(restored, receipt);
-    assert!(json.contains("\"provider\":\"whisper\""));
-    assert!(json.contains("\"data_destination\":\"local_device\""));
+    }
 }
 
 #[test]

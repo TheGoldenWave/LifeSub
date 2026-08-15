@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::asr::model_lookup::ModelLookup;
-use crate::domain::{AsrLanguage, AsrProviderKind};
+use crate::domain::{AsrErrorCode, AsrLanguage, AsrProviderKind};
 
 const DEFAULT_LANGUAGE: &str = "auto";
 const DEFAULT_MAX_THREADS: usize = 4;
@@ -45,8 +45,7 @@ pub struct AsrSettings {
     pub options: AsrProviderOptions,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AsrSettingsError {
     UnknownModel,
     ModelProviderMismatch,
@@ -98,7 +97,10 @@ impl AsrSettings {
         self
     }
 
-    pub fn validate(&self, models: &impl ModelLookup) -> Result<(), AsrSettingsError> {
+    pub fn validate<M>(&self, models: &M) -> Result<(), AsrSettingsError>
+    where
+        M: ModelLookup + ?Sized,
+    {
         let capabilities = models
             .lookup(&self.model_id)
             .ok_or(AsrSettingsError::UnknownModel)?;
@@ -134,6 +136,19 @@ impl AsrSettings {
             vad_enabled: true,
             auto_transcribe_imports: true,
             options,
+        }
+    }
+}
+
+impl From<AsrSettingsError> for AsrErrorCode {
+    fn from(error: AsrSettingsError) -> Self {
+        match error {
+            AsrSettingsError::UnknownModel => Self::ModelNotInstalled,
+            AsrSettingsError::ModelCapabilityUnavailable => Self::ModelCapabilityUnavailable,
+            AsrSettingsError::ModelProviderMismatch
+            | AsrSettingsError::UnsupportedLanguage
+            | AsrSettingsError::ProviderOptionsMismatch
+            | AsrSettingsError::InvalidThreadCount => Self::InvalidProviderParameter,
         }
     }
 }

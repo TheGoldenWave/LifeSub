@@ -71,7 +71,20 @@ Harness 插件只负责把原生 Tool 调用转换成共享 SDK 请求，不重�
 
 ## Malow 插件
 
-Malow 是 LifeSub 的重点生态宿主。插件应使用 Malow 的原生扩展方式呈现搜索、引用与授权体验，同时调用同一 LifeSub Core。Malow 的具体插件接口和 UI 能力尚未在本轮讨论中提供，将在正式规格前补充。
+Malow 是 LifeSub 的重点生态宿主，也是**项目型记录结果的主要处理与人工审核层**。插件使用 Malow 的原生 Project / Matter / Organizer / Review 体验，同时只通过 LifeSub Core 的稳定接口访问证据。
+
+推荐流程：
+
+1. 用户在 Matter 中关联一个 LifeSub Session，或按时间、人物、关键词搜索相关记录。
+2. Malow 保存 `lifesub://` Evidence Ref，不复制原始音频和完整转写数据库。
+3. Organizer 将 LifeSub 的 ASR 结果、当前 Matter 对话、Agent Run 结果和已授权的 GoldenWave Context 组合为有界输入。
+4. Malow 生成阶段摘要、主题、决定、行动项及 Knowledge Patch Draft，并保留到 Transcript Segment 的来源映射。
+5. 用户执行接受、修改、拒绝或拆分；只有人工确认后的 Patch 才能通过 GoldenWave Adapter 写入 Inbox。
+6. GoldenWave 独立完成 route、score、冲突检查、敏感度、新鲜度、render 与 inject；Malow Review 成功不等于正式知识已经生效。
+
+LifeSub 拥有 Evidence Contract 与音频访问授权；GoldenWave 拥有 Knowledge Patch Contract；Malow 分别作为 Evidence consumer 与 Knowledge Patch producer。三个项目不得共享数据库，也不得用内部目录或实现类型代替版本化 Contract。
+
+非项目型的个人记录不强制经过 Malow。LifeSub 可以在独立人工确认后直接产生符合 GoldenWave Contract 的候选，但仍只能进入 Inbox，不能直接修改正式知识层。
 
 ## 一致性要求
 

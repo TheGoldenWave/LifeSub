@@ -8,10 +8,27 @@ LifeSub 由 goldenwave 与 Malow 产品协同打造，可作为 Malow 生态插�
 
 ## 生态关系
 
-- [GoldenWave](https://github.com/TheGoldenWave/goldenwave)：负责将 LifeSub 中经用户选择的记忆候选治理为可审计、可撤回、可跨 Agent 使用的长期上下文。
-- [malow / 吗喽](https://github.com/TheGoldenWave/malow)：计划通过 LifeSub 插件在 Project / Matter 中搜索和引用会议记忆，并在用户确认后把值得长期沉淀的内容提交给 GoldenWave。
+LifeSub、[malow / 吗喽](https://github.com/TheGoldenWave/malow) 与 [GoldenWave](https://github.com/TheGoldenWave/goldenwave) 组成一条解耦链路：**LifeSub 记录现实，Malow 处理工作，GoldenWave 治理长期上下文。**
 
-三个项目保持独立源码仓库和数据权威：LifeSub 管声音与情境记忆，malow 管当前项目工作，GoldenWave 管经过治理的长期上下文。
+| 项目 | 职责 | 权威数据 |
+|---|---|---|
+| LifeSub | 采集声音，完成 ASR、说话人、时间戳、检索与证据回溯 | 原始音频、Transcript、Session、Evidence Segment |
+| Malow | 在 Project / Matter 中引用 LifeSub 证据，整理主题、决定、行动项和候选内容，并提供人工 Review | Project、Matter、Conversation、Agent Run、Review、Knowledge Patch Draft |
+| GoldenWave | 接收人工确认后的 Knowledge Patch，继续执行路由、冲突、新鲜度、敏感度与 Git 审计治理 | Profile、Knowledge、Persona、正式 Project Context 与治理历史 |
+
+主链路是：
+
+```text
+LifeSub Evidence
+  -> Malow Organizer / Review
+  -> user-confirmed Knowledge Patch
+  -> GoldenWave Inbox
+  -> GoldenWave route / score / render / inject
+```
+
+Malow 可以作为 LifeSub ASR 结果的主要处理层，但不是必经层：与明确 Project / Matter 相关的记录优先经 Malow 整理和确认；健康、生活、偏好等非项目内容可以由 LifeSub 通过同一 GoldenWave Contract 直接提交候选。Malow 的“接受”只表示候选已获用户确认并提交，不能替代 GoldenWave 的正式治理。
+
+三个项目保持独立源码仓库、数据库和发布节奏，不共享 SQLite，不复制彼此的权威数据。Malow 只保存稳定的 LifeSub Evidence Ref；LifeSub 不维护 Project 状态；任何 producer 都不得绕过 GoldenWave Inbox 直接修改正式 Profile / Knowledge / Persona。
 
 ## 当前状态
 

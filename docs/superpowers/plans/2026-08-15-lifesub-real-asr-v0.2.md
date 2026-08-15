@@ -388,7 +388,7 @@ SenseVoice: model.int8.onnx, tokens.txt
 Whisper Tiny: tiny-encoder.onnx, tiny-decoder.onnx, tiny-tokens.txt
 Whisper Base: base-encoder.onnx, base-decoder.onnx, base-tokens.txt
 Whisper Small: small-encoder.onnx, small-decoder.onnx, small-tokens.txt
-Qwen3-ASR 0.6B: conv-frontend.int8.onnx, encoder.int8.onnx, decoder.int8.onnx, tokenizer.json (verify exact archive paths before freezing)
+Qwen3-ASR 0.6B: conv_frontend.onnx, encoder.int8.onnx, decoder.int8.onnx, tokenizer/ directory (verify the complete tokenizer file set before freezing)
 VAD: silero_vad.onnx
 ```
 
@@ -744,7 +744,7 @@ Assert exact Tauri command names and payloads for settings and model operations.
 
 - [ ] **Step 2: Write failing settings interaction tests**
 
-Test SenseVoice/Whisper segmented control, compatible model cards, download/cancel/delete buttons, language menu, thread stepper, VAD and auto-transcribe toggles, SenseVoice ITN, Whisper task, save errors, and fixed loading layout.
+Test SenseVoice/Whisper/Qwen3-ASR segmented control, compatible model cards, download/cancel/delete buttons, language menu, thread stepper, VAD and auto-transcribe toggles, SenseVoice ITN, Whisper task, Qwen3-ASR 0.6B readiness, disabled 1.7B capability messaging without a download action, save errors, and fixed loading layout.
 
 - [ ] **Step 3: Implement typed DTOs and client**
 

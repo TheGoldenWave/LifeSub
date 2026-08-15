@@ -306,7 +306,7 @@ Manifest 作为版本控制下的静态数据，至少包含：
 | `qwen3-asr-0.6b-int8-2026-03-25` | Qwen3-ASR | 878,702,423 B | 52 种语言/方言覆盖，首发 Qwen 档 |
 | `qwen3-asr-1.7b` | Qwen3-ASR | 待固定 | 高质量实验档；通过资产与设备 Gate 后启用 |
 
-Qwen3-ASR 0.6B 使用 sherpa-onnx 发布资产 `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2`，SHA-256 为 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`。Qwen3-ASR 1.7B 的 Hugging Face 原始权重不能直接交给当前 Rust Provider；在固定可执行 ONNX/MLX 资产、转换来源和真实 Apple Silicon 证据前，manifest 只能声明不可安装的实验条目。
+Qwen3-ASR 0.6B 使用 sherpa-onnx 发布资产 `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2`，SHA-256 为 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`；执行文件至少包含 `conv_frontend.onnx`、`encoder.int8.onnx`、`decoder.int8.onnx` 与完整 `tokenizer/` 目录。Qwen3-ASR 1.7B 的 Hugging Face 原始权重不能直接交给当前 Rust Provider；在固定可执行 ONNX/MLX 资产、转换来源和真实 Apple Silicon 证据前，manifest 只能声明不可安装的实验条目。
 
 实现前必须下载每个发布模型归档并冻结 SHA-256。Silero VAD 也作为独立 `provider = vad` 的 manifest 条目管理，包含版本、模型 hash 和运行参数。若上游同名资产发生变化，必须发布新的 manifest version 和 model ID；禁止在原 ID 下替换资产。
 

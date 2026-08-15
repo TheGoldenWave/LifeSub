@@ -21,3 +21,7 @@
 - 2026-08-16：Qwen 范围规格审查要求 Manifest 区分 `Installable` 与 `ExperimentalUnavailable`，并把 selectable/installable/executable 能力贯穿设置、下载、Core enqueue 与 Provider Factory。1.7B Gate 固定 Apple Silicon/16 GB/macOS 14+、CER/WER <= 20%、混合关键短语 100%、RTF <= 1.0、RSS <= 6 GiB，并使用确定性 300 秒 fixture。
 - 2026-08-16：Task 3 质量审查发现内部设置错误会形成第二套序列化错误码，且公开 Provider Receipt 字段可构造不可信 provenance。实现改为内部错误 exhaustive 映射到 `AsrErrorCode`，Receipt 仅能通过验证 draft/custom Deserialize 构造，并校验 hash、JSON、VAD identity 与时间顺序。
 - 2026-08-16：Agent MVP 架构采用 C -> A：先抽出 CoreRuntime 与版本化 Local Tool API，Tauri/Unix socket 仅作适配器；最终由 launchd `lifesubd` 托管。插件/Gateway 不得调用 Tauri Command、打开 SQLite 或读取内部路径。C 阶段退出 Tauri 进程仍会停止录音，不能提前宣称 daemon 生命周期。
+- 2026-08-16：Task 4 安全复审证明 `symlink_metadata` 后再按路径打开存在 check/use 竞态。音频导入、校验和 reconciliation 改为以 no-follow 目录 fd 为锚点，使用 descriptor-relative 操作，并在文件副作用与 DB commit 前复验目录 `(dev, ino)`。
+- 2026-08-16：文件锁必须绑定完整 Core 生命周期，且所有 Catalog 写入口必须结构化经过 ownership guard。当前单用户 macOS 产品以 canonical parent directory inode 锁防止协作式第二 LifeSub 实例进入 writable Catalog/migration/reconciliation；同 UID 恶意篡改文件系统 namespace 不属于该并发锁的安全边界，因为该主体本已能直接修改本地 SQLite 与音频。
+- 2026-08-16：reconciliation 的可删除文件 grammar 必须与 importer 生成规则完全一致。最终仅接受 lowercase SHA/chunk ID 和规范化的 1–16 字节 ASCII 字母数字扩展名；空、非 UTF-8、过长或含标点扩展名统一落为 `audio`，未知或伪装 entry fail closed 且不删除。
+- 2026-08-16：未知持久化 `integrity_state` 不能在启动修复或 ASR 前校验中被重新哈希后覆盖为 `available`；服务在任何文件副作用与状态更新前先解析当前 DB 状态，未知值直接返回 Catalog 错误。

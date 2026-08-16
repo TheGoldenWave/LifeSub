@@ -47,7 +47,9 @@ pub(super) fn installed_records(root: &Path) -> Result<Vec<MarkerInstalledFile>,
                 return Err(ManagerError::structural("special file in installed bundle"));
             } else if !matches!(
                 p.file_name().and_then(|n| n.to_str()),
-                Some(STRUCTURAL_MARKER) | Some(DELETE_MARKER)
+                Some(STRUCTURAL_MARKER)
+                    | Some(DELETE_MARKER)
+                    | Some(crate::asr::runtime_qualifier::RUNTIME_QUALIFICATION_MARKER)
             ) {
                 out.push(MarkerInstalledFile {
                     relative_path: p

@@ -86,6 +86,9 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             transport,
             catalog,
             observed_sherpa_runtime: None,
+            execution_leases: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             #[cfg(test)]
             available_space_override: None,
             #[cfg(test)]

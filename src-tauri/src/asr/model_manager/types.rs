@@ -24,6 +24,115 @@ pub struct DeviceProfile {
     pub chip: String,
 }
 
+impl DeviceProfile {
+    pub fn current() -> Self {
+        Self {
+            os: std::env::consts::OS.to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            macos_major: current_macos_major(),
+            memory_gib: current_memory_gib(),
+            metal_available: cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            chip: current_chip(),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_macos_major() -> u16 {
+    std::process::Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|version| version.trim().split('.').next()?.parse().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn current_macos_major() -> u16 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+fn current_memory_gib() -> u16 {
+    let mut bytes = 0_u64;
+    let mut length = std::mem::size_of::<u64>();
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&mut bytes as *mut u64).cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result == 0 {
+        u16::try_from(bytes / (1024 * 1024 * 1024)).unwrap_or(u16::MAX)
+    } else {
+        0
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn current_memory_gib() -> u16 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+fn current_chip() -> String {
+    sysctl_string("machdep.cpu.brand_string")
+        .and_then(|brand| {
+            brand
+                .split_whitespace()
+                .find(|part| part.starts_with('M'))
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_chip() -> String {
+    String::new()
+}
+
+#[cfg(target_os = "macos")]
+fn sysctl_string(name: &str) -> Option<String> {
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut length = 0_usize;
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || length == 0
+    {
+        return None;
+    }
+    let mut bytes = vec![0_u8; length];
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    bytes.truncate(length);
+    if bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    String::from_utf8(bytes).ok()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeviceRequirement {
     AnyDesktop,
@@ -225,6 +334,61 @@ pub trait ModelCatalog: Send + Sync + 'static {
     fn abort_delete(&self, lease: &DeletionLease) -> Result<(), ManagerError>;
 }
 
+impl<T: ModelCatalog> ModelCatalog for std::sync::Arc<T> {
+    fn begin_download(&self, plan: &ModelInstallPlan) -> Result<String, ManagerError> {
+        (**self).begin_download(plan)
+    }
+
+    fn checkpoint(
+        &self,
+        download_id: &str,
+        artifact_id: &str,
+    ) -> Result<Option<ArtifactCheckpoint>, ManagerError> {
+        (**self).checkpoint(download_id, artifact_id)
+    }
+
+    fn save_checkpoint(
+        &self,
+        download_id: &str,
+        checkpoint: &ArtifactCheckpoint,
+    ) -> Result<(), ManagerError> {
+        (**self).save_checkpoint(download_id, checkpoint)
+    }
+
+    fn set_download_state(
+        &self,
+        download_id: &str,
+        state: &str,
+        error_code: Option<&str>,
+    ) -> Result<(), ManagerError> {
+        (**self).set_download_state(download_id, state, error_code)
+    }
+
+    fn publish_installation(&self, installation: &StoredInstallation) -> Result<(), ManagerError> {
+        (**self).publish_installation(installation)
+    }
+
+    fn record_installation_recovery(
+        &self,
+        model_id: &str,
+        error_code: &str,
+    ) -> Result<(), ManagerError> {
+        (**self).record_installation_recovery(model_id, error_code)
+    }
+
+    fn begin_delete(&self, model_id: &str) -> Result<Option<DeletionLease>, ManagerError> {
+        (**self).begin_delete(model_id)
+    }
+
+    fn finish_delete(&self, lease: &DeletionLease) -> Result<(), ManagerError> {
+        (**self).finish_delete(lease)
+    }
+
+    fn abort_delete(&self, lease: &DeletionLease) -> Result<(), ManagerError> {
+        (**self).abort_delete(lease)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DownloadRequest {
     pub url: String,
@@ -336,6 +500,8 @@ pub struct ModelManager<T, C> {
     pub(super) transport: T,
     pub(super) catalog: C,
     pub(super) observed_sherpa_runtime: Option<FullSherpaRuntimeIdentity>,
+    pub(super) execution_leases:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
     #[cfg(test)]
     pub(super) available_space_override: Option<u64>,
     #[cfg(test)]

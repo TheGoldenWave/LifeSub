@@ -1382,8 +1382,9 @@ const fn modelscope_file(
 }
 
 const LANG_SENSE: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
-const LANG_WHISPER: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue", "multilingual"];
-const LANG_QWEN: &[&str] = &[
+const LANG_WHISPER: &[&str] = &["auto", "zh", "en", "ja", "ko", "yue"];
+const LANG_QWEN06: &[&str] = &["auto"];
+const LANG_QWEN17: &[&str] = &[
     "auto", "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th", "vi",
     "ja", "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cs", "fil", "fa", "el", "hu", "mk",
     "ro",
@@ -1441,7 +1442,7 @@ const MODELS: &[ModelManifest] = &[
         manifest_version: "1",
         display_name: "Qwen3-ASR 0.6B INT8",
         provider: AsrProviderKind::Qwen3Asr,
-        supported_languages: LANG_QWEN,
+        supported_languages: LANG_QWEN06,
         bundle: ArtifactBundle {
             artifacts: QWEN06_ARTIFACTS,
             required_paths: QWEN06_PATHS,
@@ -1463,7 +1464,7 @@ const MODELS: &[ModelManifest] = &[
         manifest_version: "2",
         display_name: "Qwen3-ASR 1.7B",
         provider: AsrProviderKind::Qwen3Asr,
-        supported_languages: LANG_QWEN,
+        supported_languages: LANG_QWEN17,
         bundle: ArtifactBundle {
             artifacts: QWEN17_ARTIFACTS,
             required_paths: QWEN17_PATHS,

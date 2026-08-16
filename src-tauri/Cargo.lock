@@ -2579,6 +2579,7 @@ name = "lifesub"
 version = "0.1.0"
 dependencies = [
  "bzip2 0.5.2",
+ "candle-core",
  "chrono",
  "fs2",
  "hex",

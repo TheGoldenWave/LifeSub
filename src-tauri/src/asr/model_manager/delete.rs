@@ -9,6 +9,12 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
     }
     pub(crate) fn delete(&self, id: &str, install: &Path) -> Result<(), ManagerError> {
         validate_component("model_id", id)?;
+        if self.execution_lease_count(id) != 0 {
+            return Err(ManagerError::new(
+                "model_in_use",
+                "active provider execution lease prevents deletion",
+            ));
+        }
         let Some(lease) = self.catalog.begin_delete(id)? else {
             return Err(ManagerError::new(
                 "model_in_use",

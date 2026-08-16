@@ -11,6 +11,20 @@ use crate::asr::manifest::{
     RuntimeRequirement, canonical_bundle_payload, model_registry, vad_manifest,
     validate_qwen_config_shape, validate_registry,
 };
+
+#[test]
+fn runtime_language_catalog_excludes_pseudo_values_and_qwen06_explicit_languages() {
+    let registry = model_registry();
+    let whisper = registry.model("whisper-tiny").unwrap();
+    assert!(!whisper.supported_languages.contains(&"multilingual"));
+
+    let qwen06 = registry.model("qwen3-asr-0.6b-int8-2026-03-25").unwrap();
+    assert_eq!(qwen06.supported_languages, &["auto"]);
+
+    let qwen17 = registry.model("qwen3-asr-1.7b").unwrap();
+    assert!(qwen17.supported_languages.contains(&"zh"));
+    assert!(qwen17.supported_languages.contains(&"en"));
+}
 use crate::asr::model_lookup::{
     DeviceSupport, InstallationQualification, ModelLookup, ModelLookupContext,
 };
@@ -729,7 +743,10 @@ fn cargo_and_notice_contract_pin_qwen_metal_runtime_closure() {
         "qwen3-asr = { git = \"https://github.com/alan890104/qwen3-asr-rs.git\", rev = \"c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc\", version = \"=0.2.2\", default-features = false, features = [\"metal\"], optional = true }"
     ));
     assert!(cargo_toml.contains("asr-runtime = [\"dep:sherpa-onnx\"]"));
-    assert!(cargo_toml.contains("asr-qwen17-runtime = [\"dep:qwen3-asr\"]"));
+    assert!(cargo_toml.contains(
+        "candle-core = { version = \"=0.9.2\", default-features = false, features = [\"metal\"], optional = true }"
+    ));
+    assert!(cargo_toml.contains("asr-qwen17-runtime = [\"dep:qwen3-asr\", \"dep:candle-core\"]"));
     assert!(cargo_toml.contains("\"asr-qwen17-runtime\""));
     assert!(cargo_lock.contains(
         "git+https://github.com/alan890104/qwen3-asr-rs.git?rev=c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc#c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc"
@@ -748,7 +765,7 @@ fn cargo_feature_contract_is_semantically_pinned() {
     assert_eq!(toml_array(features, "asr-runtime"), ["dep:sherpa-onnx"]);
     assert_eq!(
         toml_array(features, "asr-qwen17-runtime"),
-        ["dep:qwen3-asr"]
+        ["dep:qwen3-asr", "dep:candle-core"]
     );
     let desktop = toml_array(features, "desktop");
     assert!(desktop.contains(&"asr-runtime".to_owned()));
@@ -756,6 +773,8 @@ fn cargo_feature_contract_is_semantically_pinned() {
 
     let qwen = &manifest["target"]["cfg(all(target_os = \"macos\", target_arch = \"aarch64\"))"]["dependencies"]
         ["qwen3-asr"];
+    let candle = &manifest["target"]["cfg(all(target_os = \"macos\", target_arch = \"aarch64\"))"]
+        ["dependencies"]["candle-core"];
     assert!(manifest["dependencies"].get("qwen3-asr").is_none());
     let targets = manifest["target"].as_table().unwrap();
     assert_eq!(targets.len(), 1);
@@ -773,6 +792,18 @@ fn cargo_feature_contract_is_semantically_pinned() {
     assert_eq!(qwen["default-features"].as_bool(), Some(false));
     assert_eq!(
         qwen["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["metal"]
+    );
+    assert_eq!(candle["version"].as_str(), Some("=0.9.2"));
+    assert_eq!(candle["optional"].as_bool(), Some(true));
+    assert_eq!(candle["default-features"].as_bool(), Some(false));
+    assert_eq!(
+        candle["features"]
             .as_array()
             .unwrap()
             .iter()

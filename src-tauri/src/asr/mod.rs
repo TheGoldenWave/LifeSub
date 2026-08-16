@@ -2,9 +2,14 @@ pub mod audio;
 pub mod manifest;
 pub mod model_lookup;
 pub mod model_manager;
+pub mod provider;
+pub mod qwen3_asr;
 pub mod receipt;
+pub mod runtime_qualifier;
+pub mod sense_voice;
 pub mod settings;
 pub mod vad;
+pub mod whisper;
 
 const PINNED_RUNTIME_VERSION: &str = "1.13.5";
 #[cfg(feature = "asr-runtime")]

@@ -16,6 +16,10 @@ mod asr_manifest_test;
 #[cfg(test)]
 mod asr_model_manager_test;
 #[cfg(test)]
+mod asr_provider_test;
+#[cfg(test)]
+mod asr_runtime_qualifier_test;
+#[cfg(test)]
 mod asr_runtime_test;
 #[cfg(test)]
 mod asr_settings_test;

@@ -4,8 +4,11 @@ use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
 
 use crate::asr::model_manager::{
-    ArtifactCheckpoint, DeletionLease, ManagerError, ModelCatalog, ModelInstallPlan,
-    StoredInstallation,
+    ArtifactCheckpoint, DeletionLease, ExecutionInstallationRecord, ManagerError, ModelCatalog,
+    ModelInstallPlan, StoredInstallation,
+};
+use crate::asr::runtime_qualifier::{
+    QualificationCatalog, QualificationHandle, QualificationRecord, QualifierError,
 };
 
 use super::Catalog;
@@ -317,6 +320,141 @@ impl ModelCatalog for Catalog {
         } else {
             Err(ManagerError::catalog("deletion rollback ownership lost"))
         }
+    }
+}
+
+impl QualificationCatalog for Catalog {
+    fn qualification_record(
+        &self,
+        model_id: &str,
+    ) -> Result<Option<QualificationRecord>, QualifierError> {
+        self.connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT state, manifest_version, archive_sha256, install_dir, runtime_identity_json
+                 FROM model_installations WHERE model_id = ?1",
+                [model_id],
+                |row| {
+                    Ok(QualificationRecord {
+                        state: row.get(0)?,
+                        manifest_version: row.get(1)?,
+                        bundle_identity: row.get(2)?,
+                        install_dir: PathBuf::from(row.get::<_, String>(3)?),
+                        runtime_identity_json: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| QualifierError::new("model_catalog_failed", error.to_string()))
+    }
+
+    fn cas_runtime_qualified(
+        &self,
+        handle: &QualificationHandle,
+        runtime_identity_json: &str,
+    ) -> Result<bool, QualifierError> {
+        let changed = self
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE model_installations
+             SET state = 'runtime_qualified', runtime_identity_json = ?5,
+                 qualified_at = ?6, last_error_code = NULL
+             WHERE model_id = ?1 AND state = 'installed_unqualified'
+               AND manifest_version = ?2 AND archive_sha256 = ?3 AND install_dir = ?4",
+                params![
+                    handle.model_id,
+                    handle.manifest_version,
+                    handle.bundle_identity,
+                    handle.install_dir.to_string_lossy(),
+                    runtime_identity_json,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(|error| QualifierError::new("model_catalog_failed", error.to_string()))?;
+        Ok(changed == 1)
+    }
+
+    fn demote_runtime_qualification(
+        &self,
+        handle: &QualificationHandle,
+        error_code: &str,
+    ) -> Result<bool, QualifierError> {
+        let changed = self
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE model_installations
+             SET state = 'installed_unqualified', runtime_identity_json = NULL,
+                 qualified_at = NULL, last_error_code = ?5
+             WHERE model_id = ?1 AND state = 'runtime_qualified'
+               AND manifest_version = ?2 AND archive_sha256 = ?3 AND install_dir = ?4",
+                params![
+                    handle.model_id,
+                    handle.manifest_version,
+                    handle.bundle_identity,
+                    handle.install_dir.to_string_lossy(),
+                    error_code,
+                ],
+            )
+            .map_err(|error| QualifierError::new("model_catalog_failed", error.to_string()))?;
+        Ok(changed == 1)
+    }
+
+    fn record_qualification_error(
+        &self,
+        handle: &QualificationHandle,
+        error_code: &str,
+    ) -> Result<(), QualifierError> {
+        self.connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE model_installations SET last_error_code = ?5
+             WHERE model_id = ?1 AND state = 'installed_unqualified'
+               AND manifest_version = ?2 AND archive_sha256 = ?3 AND install_dir = ?4",
+                params![
+                    handle.model_id,
+                    handle.manifest_version,
+                    handle.bundle_identity,
+                    handle.install_dir.to_string_lossy(),
+                    error_code,
+                ],
+            )
+            .map_err(|error| QualifierError::new("model_catalog_failed", error.to_string()))?;
+        Ok(())
+    }
+}
+
+impl Catalog {
+    pub(crate) fn execution_installation(
+        &self,
+        model_id: &str,
+    ) -> Result<Option<ExecutionInstallationRecord>, ManagerError> {
+        self.connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT model_id, manifest_version, archive_sha256, install_dir, state,
+                        runtime_identity_json
+                 FROM model_installations WHERE model_id = ?1",
+                [model_id],
+                |row| {
+                    Ok(ExecutionInstallationRecord {
+                        model_id: row.get(0)?,
+                        manifest_version: row.get(1)?,
+                        bundle_identity: row.get(2)?,
+                        install_dir: PathBuf::from(row.get::<_, String>(3)?),
+                        state: row.get(4)?,
+                        runtime_identity_json: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 }
 

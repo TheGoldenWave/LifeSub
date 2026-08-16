@@ -77,6 +77,70 @@ fn delete_cas_has_one_winner_and_active_lease_blocks_it() {
 }
 
 #[test]
+fn provider_execution_lease_blocks_delete_until_provider_drop() {
+    use crate::asr::provider::{
+        AudioSlice, NativeBackend, NativeBackendFactory, NativeRequest, ProviderError,
+        ProviderFactory, ProviderSelection,
+    };
+
+    #[derive(Clone)]
+    struct BackendFactory;
+    struct Backend;
+    impl NativeBackendFactory for BackendFactory {
+        fn create(
+            &self,
+            _request: &NativeRequest,
+        ) -> Result<Box<dyn NativeBackend>, ProviderError> {
+            Ok(Box::new(Backend))
+        }
+    }
+    impl NativeBackend for Backend {
+        fn transcribe(&mut self, _audio: AudioSlice<'_>) -> Result<String, ProviderError> {
+            Ok("lease".to_owned())
+        }
+    }
+
+    let root = TempDir::new().unwrap();
+    let model_id = "sense-voice-small-int8-2024-07-17";
+    let manifest = model_registry().model(model_id).unwrap();
+    let install_dir = root.path().join("provider-lease-install");
+    fs::create_dir_all(&install_dir).unwrap();
+    fs::write(install_dir.join("model.bin"), b"model").unwrap();
+    let catalog = Arc::new(Catalog::in_memory().unwrap());
+    catalog
+        .publish_installation(&StoredInstallation {
+            model_id: model_id.to_owned(),
+            provider: "sense_voice".to_owned(),
+            manifest_version: manifest.manifest_version.to_owned(),
+            bundle_identity: manifest.bundle.identity_sha256.to_owned(),
+            install_dir: install_dir.clone(),
+            state: "runtime_qualified".to_owned(),
+            runtime_identity_json: Some("{}".to_owned()),
+        })
+        .unwrap();
+    let manager = ModelManager::new(root.path(), ScriptedTransport::default(), catalog);
+    let delete_manager = manager.clone();
+    let lease = manager
+        .hold_execution_lease_for_test(model_id, &install_dir)
+        .unwrap();
+    let provider = ProviderFactory::new(BackendFactory)
+        .create_verified(lease, ProviderSelection::for_test(model_id))
+        .unwrap();
+
+    assert_eq!(
+        delete_manager
+            .delete(model_id, &install_dir)
+            .unwrap_err()
+            .code(),
+        "model_in_use"
+    );
+    assert!(install_dir.is_dir());
+    drop(provider);
+    delete_manager.delete(model_id, &install_dir).unwrap();
+    assert!(!install_dir.exists());
+}
+
+#[test]
 fn qualified_delete_db_failure_restores_directory_and_exact_prior_state() {
     let root = TempDir::new().unwrap();
     let install_dir = root.path().join("models/asr/whisper/qualified/1-bundle");

@@ -154,6 +154,24 @@ fn language_support_comes_from_the_selected_model() {
 }
 
 #[test]
+fn qwen06_explicit_language_and_whisper_multilingual_are_invalid_provider_parameters() {
+    let models = crate::asr::manifest::model_registry();
+    let qwen = AsrSettings::qwen3_asr("qwen3-asr-0.6b-int8-2026-03-25")
+        .with_language(AsrLanguage::new("en").unwrap());
+    assert_eq!(
+        AsrErrorCode::from(qwen.validate(models).unwrap_err()),
+        AsrErrorCode::InvalidProviderParameter
+    );
+
+    let whisper = AsrSettings::whisper("whisper-tiny")
+        .with_language(AsrLanguage::new("multilingual").unwrap());
+    assert_eq!(
+        AsrErrorCode::from(whisper.validate(models).unwrap_err()),
+        AsrErrorCode::InvalidProviderParameter
+    );
+}
+
+#[test]
 fn languages_are_validated_dynamic_strings_with_transparent_serde() {
     let language = AsrLanguage::new("zh-Hans").unwrap();
     let settings_json = serde_json::to_value(AsrSettings::whisper(WHISPER_MODEL)).unwrap();

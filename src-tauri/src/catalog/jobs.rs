@@ -2,6 +2,11 @@ use chrono::DateTime;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
 
+use crate::asr::job::ClaimToken;
+use crate::catalog::PublicationError;
+#[cfg(test)]
+use crate::catalog::PublicationFailurePoint;
+use crate::domain::{ProviderReceipt, TranscriptRevision, TranscriptSegmentPublication};
 use crate::service::{JobOwnershipCapability, RuntimeOwnershipError};
 
 use super::Catalog;
@@ -148,6 +153,31 @@ impl<'a> JobCatalog<'a> {
         self.catalog
             .retry_asr_job(id, model, now)
             .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn publish(
+        &self,
+        token: &ClaimToken,
+        receipt: &ProviderReceipt,
+        segments: &[TranscriptSegmentPublication],
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<TranscriptRevision, PublicationError> {
+        self.ensure().map_err(|error| match error {
+            JobCatalogError::Ownership(error) => PublicationError::Ownership(error),
+            JobCatalogError::Catalog(error) => PublicationError::Catalog(error.to_string()),
+        })?;
+        self.catalog
+            .publish_asr_result(token, receipt, segments, now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_publication_at(&self, point: PublicationFailurePoint) {
+        self.catalog.fail_publication_at(point);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute_fixture_sql(&self, sql: &str) -> rusqlite::Result<()> {
+        self.catalog.connection.lock().unwrap().execute_batch(sql)
     }
 
     fn ensure(&self) -> Result<(), JobCatalogError> {

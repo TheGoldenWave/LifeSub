@@ -83,6 +83,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
     pub fn new(root: impl AsRef<Path>, transport: T, catalog: C) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
+            anchored_root: None,
             transport,
             catalog,
             observed_sherpa_runtime: None,
@@ -98,6 +99,11 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             #[cfg(test)]
             available_space_sequence: None,
         }
+    }
+    pub fn new_anchored(root: impl AsRef<Path>, root_dir: File, transport: T, catalog: C) -> Self {
+        let mut manager = Self::new(root, transport, catalog);
+        manager.anchored_root = Some(std::sync::Arc::new(root_dir));
+        manager
     }
     pub fn with_sherpa_runtime_identity(mut self, v: FullSherpaRuntimeIdentity) -> Self {
         self.observed_sherpa_runtime = Some(v);

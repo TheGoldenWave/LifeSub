@@ -3,9 +3,13 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::catalog::Catalog;
+use crate::catalog::PublicationError;
+#[cfg(test)]
+use crate::catalog::PublicationFailurePoint;
 use crate::catalog::jobs::OwnedMutationResult;
 use crate::catalog::jobs::{CancelResult, JobCatalog, JobCatalogError, ReadyModel, RetryResult};
 use crate::domain::AsrErrorCode;
+use crate::domain::{ProviderReceipt, TranscriptRevision, TranscriptSegmentPublication};
 use crate::service::{JobOwnershipCapability, RuntimeOwnershipError};
 
 const LEASE_SECONDS: i64 = 30;
@@ -248,6 +252,26 @@ impl<'a, C: Clock> JobRepository<'a, C> {
         })
     }
 
+    pub(crate) fn publish(
+        &self,
+        token: &ClaimToken,
+        receipt: &ProviderReceipt,
+        segments: &[TranscriptSegmentPublication],
+    ) -> Result<TranscriptRevision, PublicationError> {
+        self.jobs
+            .publish(token, receipt, segments, self.clock.now())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_publication_at(&self, point: PublicationFailurePoint) {
+        self.jobs.fail_publication_at(point);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute_fixture_sql(&self, sql: &str) -> rusqlite::Result<()> {
+        self.jobs.execute_fixture_sql(sql)
+    }
+
     fn owns_running(&self, token: &ClaimToken) -> Result<bool, JobError> {
         self.jobs
             .owns_running(&token.job_id, &token.claimed_by, token.claim_generation)
@@ -278,6 +302,17 @@ impl<'a, C: Clock> JobRepository<'a, C> {
             RetryResult::InvalidTransition => Err(JobError::InvalidTransition),
             RetryResult::ModelNotReady => Err(JobError::ModelNotReady),
         }
+    }
+}
+
+impl<C: Clock> JobCoordinator<'_, C> {
+    pub fn publish(
+        &self,
+        token: &ClaimToken,
+        receipt: &ProviderReceipt,
+        segments: &[TranscriptSegmentPublication],
+    ) -> Result<TranscriptRevision, PublicationError> {
+        self.repository.publish(token, receipt, segments)
     }
 }
 

@@ -1,21 +1,22 @@
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, OsStr, OsString};
-use std::fs::File;
 #[cfg(test)]
 use std::fs;
+use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime};
 #[cfg(test)]
 use std::sync::{Arc, Barrier};
+use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
 use crate::domain::AudioChunk;
 
 use super::ImportFault;
+use super::runtime_lock::DataDirectoryCapability;
 
 const AUDIO_DIRECTORY: &str = "audio";
 const IMPORT_TEMP_PREFIX: &str = ".lifesub-import-";
@@ -24,8 +25,19 @@ const DEFAULT_AUDIO_EXTENSION: &str = "audio";
 const MAX_AUDIO_EXTENSION_BYTES: usize = 16;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_CLEANUP_IDENTITY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(super) fn set_cleanup_identity_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CLEANUP_IDENTITY.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
 pub(super) struct AudioStore {
-    data_dir: PathBuf,
+    data_dir: DataDirectory,
     #[cfg(test)]
     import_fault: Option<ImportFault>,
     #[cfg(test)]
@@ -34,20 +46,27 @@ pub(super) struct AudioStore {
     first_audio_create_barrier: Option<Arc<Barrier>>,
 }
 
+enum DataDirectory {
+    Path(PathBuf),
+    Anchored(DirectoryHandle),
+}
+
 pub(super) struct PendingAudio {
     pub(super) digest: String,
     pub(super) byte_length: u64,
     directory: AnchoredDirectory,
     temp_name: OsString,
+    identity: FileIdentity,
 }
 
 pub(super) struct StoredAudio {
     pub(super) relative_path: PathBuf,
     directory: AnchoredDirectory,
     final_name: OsString,
+    identity: FileIdentity,
 }
 
-struct DirectoryHandle(File);
+struct DirectoryHandle(std::sync::Arc<File>);
 
 struct AnchoredDirectory {
     parent: DirectoryHandle,
@@ -68,9 +87,22 @@ pub(super) enum ValidationError {
 }
 
 impl AudioStore {
+    #[cfg_attr(test, allow(dead_code))]
     pub(super) fn new(data_dir: &Path) -> Self {
         Self {
-            data_dir: data_dir.to_path_buf(),
+            data_dir: DataDirectory::Path(data_dir.to_path_buf()),
+            #[cfg(test)]
+            import_fault: None,
+            #[cfg(test)]
+            audio_directory_swap_target: None,
+            #[cfg(test)]
+            first_audio_create_barrier: None,
+        }
+    }
+
+    pub(super) fn anchored(data_dir: DataDirectoryCapability) -> Self {
+        Self {
+            data_dir: DataDirectory::Anchored(DirectoryHandle(data_dir.into_file())),
             #[cfg(test)]
             import_fault: None,
             #[cfg(test)]
@@ -88,7 +120,7 @@ impl AudioStore {
         first_audio_create_barrier: Option<Arc<Barrier>>,
     ) -> Self {
         Self {
-            data_dir: data_dir.to_path_buf(),
+            data_dir: DataDirectory::Path(data_dir.to_path_buf()),
             import_fault,
             audio_directory_swap_target: audio_directory_swap_target.map(Path::to_path_buf),
             first_audio_create_barrier,
@@ -98,20 +130,15 @@ impl AudioStore {
     pub(super) fn write_temp(&self, source_path: &Path, id: &str) -> io::Result<PendingAudio> {
         let directory = self.prepare_directory()?;
         let temp_name = OsString::from(format!("{IMPORT_TEMP_PREFIX}{id}{IMPORT_TEMP_SUFFIX}"));
-        match write_hashed_temp(source_path, &directory.directory, &temp_name) {
-            Ok((digest, byte_length)) => Ok(PendingAudio {
-                digest,
-                byte_length,
-                directory,
-                temp_name,
-            }),
-            Err(error) => {
-                if directory.ensure_current().is_ok() {
-                    directory.directory.unlink_if_present(&temp_name);
-                }
-                Err(error)
-            }
-        }
+        let (digest, byte_length, identity) =
+            write_hashed_temp(source_path, &directory.directory, &temp_name)?;
+        Ok(PendingAudio {
+            digest,
+            byte_length,
+            directory,
+            temp_name,
+            identity,
+        })
     }
 
     pub(super) fn rename_to_final(
@@ -122,36 +149,96 @@ impl AudioStore {
     ) -> io::Result<StoredAudio> {
         let final_name = OsString::from(format!("{}-{id}.{extension}", pending.digest));
         let relative_path = PathBuf::from(AUDIO_DIRECTORY).join(&final_name);
-        pending.directory.ensure_current()?;
-        let stored_directory = pending.directory.try_clone()?;
-        if let Err(error) = self.rename(&pending.directory.directory, &pending.temp_name, &final_name) {
-            if pending.directory.ensure_current().is_ok() {
-                pending.directory.directory.unlink_if_present(&pending.temp_name);
-            }
+        if let Err(error) = pending.directory.ensure_current() {
+            pending
+                .directory
+                .directory
+                .cleanup_regular_file(&pending.temp_name, pending.identity)?;
             return Err(error);
         }
-        pending.directory.ensure_current()?;
-        Ok(StoredAudio {
+        let stored_directory = match pending.directory.try_clone() {
+            Ok(directory) => directory,
+            Err(error) => {
+                pending
+                    .directory
+                    .directory
+                    .cleanup_regular_file(&pending.temp_name, pending.identity)?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.rename(
+            &pending.directory.directory,
+            &pending.temp_name,
+            &final_name,
+        ) {
+            pending
+                .directory
+                .directory
+                .cleanup_regular_file(&pending.temp_name, pending.identity)?;
+            return Err(error);
+        }
+        let stored = StoredAudio {
             relative_path,
             directory: stored_directory,
             final_name,
-        })
+            identity: pending.identity,
+        };
+        if let Err(error) = pending.directory.ensure_current() {
+            stored
+                .directory
+                .directory
+                .cleanup_regular_file(&stored.final_name, stored.identity)?;
+            return Err(error);
+        }
+        Ok(stored)
     }
 
     pub(super) fn sync_final(&self, stored: &StoredAudio) -> io::Result<()> {
-        stored.directory.ensure_current()?;
-        if let Err(error) = self.sync_directory(&stored.directory.directory, ImportFault::ParentSyncIo) {
-            if stored.directory.ensure_current().is_ok() {
-                stored.directory.directory.unlink_if_present(&stored.final_name);
-            }
+        if let Err(error) = stored.directory.ensure_current() {
+            stored
+                .directory
+                .directory
+                .cleanup_regular_file(&stored.final_name, stored.identity)?;
             return Err(error);
         }
-        stored.directory.ensure_current()?;
+        if let Err(error) =
+            self.sync_directory(&stored.directory.directory, ImportFault::ParentSyncIo)
+        {
+            stored
+                .directory
+                .directory
+                .cleanup_regular_file(&stored.final_name, stored.identity)?;
+            return Err(error);
+        }
+        if let Err(error) = stored.directory.ensure_current() {
+            stored
+                .directory
+                .directory
+                .cleanup_regular_file(&stored.final_name, stored.identity)?;
+            return Err(error);
+        }
         Ok(())
     }
 
     pub(super) fn ensure_stored_current(&self, stored: &StoredAudio) -> io::Result<()> {
-        stored.directory.ensure_current()
+        stored.directory.ensure_current()?;
+        if stored
+            .directory
+            .directory
+            .regular_file_identity(&stored.final_name)?
+            == Some(stored.identity)
+        {
+            Ok(())
+        } else {
+            Err(unsafe_storage_error())
+        }
+    }
+
+    pub(super) fn discard_stored(&self, stored: &StoredAudio) -> io::Result<()> {
+        stored
+            .directory
+            .directory
+            .cleanup_regular_file(&stored.final_name, stored.identity)
     }
 
     pub(super) fn reconcile_orphans(
@@ -178,7 +265,9 @@ impl AudioStore {
             }
             if metadata.modified <= stale_before {
                 audio_dir.ensure_current()?;
-                audio_dir.directory.unlink(&name)?;
+                audio_dir
+                    .directory
+                    .cleanup_regular_file(&name, metadata.identity)?;
             }
         }
         audio_dir.ensure_current()?;
@@ -210,11 +299,14 @@ impl AudioStore {
 
     #[cfg(test)]
     fn audio_dir(&self) -> PathBuf {
-        self.data_dir.join(AUDIO_DIRECTORY)
+        match &self.data_dir {
+            DataDirectory::Path(path) => path.join(AUDIO_DIRECTORY),
+            DataDirectory::Anchored(_) => unreachable!("test swap requires a path-backed store"),
+        }
     }
 
     fn prepare_directory(&self) -> io::Result<AnchoredDirectory> {
-        let data_dir = DirectoryHandle::open_path(&self.data_dir)?;
+        let data_dir = self.open_data_dir()?;
         let audio_dir = match data_dir.open_directory(OsStr::new(AUDIO_DIRECTORY)) {
             Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -237,7 +329,7 @@ impl AudioStore {
     }
 
     fn existing_audio_dir(&self) -> io::Result<Option<AnchoredDirectory>> {
-        let data_dir = DirectoryHandle::open_path(&self.data_dir)?;
+        let data_dir = self.open_data_dir()?;
         match data_dir.open_directory(OsStr::new(AUDIO_DIRECTORY)) {
             Ok(audio_dir) => {
                 self.swap_audio_directory_for_test()?;
@@ -245,6 +337,13 @@ impl AudioStore {
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
+        }
+    }
+
+    fn open_data_dir(&self) -> io::Result<DirectoryHandle> {
+        match &self.data_dir {
+            DataDirectory::Path(path) => DirectoryHandle::open_path(path),
+            DataDirectory::Anchored(directory) => directory.try_clone(),
         }
     }
 
@@ -300,7 +399,11 @@ impl AudioStore {
             return Ok(());
         };
         let audio_dir = self.audio_dir();
-        fs::rename(&audio_dir, self.data_dir.join("audio-held"))?;
+        let data_dir = match &self.data_dir {
+            DataDirectory::Path(data_dir) => data_dir,
+            DataDirectory::Anchored(_) => return Err(unsafe_storage_error()),
+        };
+        fs::rename(&audio_dir, data_dir.join("audio-held"))?;
         symlink(target, audio_dir)
     }
 
@@ -329,9 +432,8 @@ impl DirectoryHandle {
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
-        descriptor_result(descriptor).map(|descriptor| unsafe {
-            Self(File::from_raw_fd(descriptor))
-        })
+        descriptor_result(descriptor)
+            .map(|descriptor| unsafe { Self(std::sync::Arc::new(File::from_raw_fd(descriptor))) })
     }
 
     fn open_directory(&self, name: &OsStr) -> io::Result<Self> {
@@ -343,9 +445,8 @@ impl DirectoryHandle {
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
-        descriptor_result(descriptor).map(|descriptor| unsafe {
-            Self(File::from_raw_fd(descriptor))
-        })
+        descriptor_result(descriptor)
+            .map(|descriptor| unsafe { Self(std::sync::Arc::new(File::from_raw_fd(descriptor))) })
     }
 
     fn create_directory(&self, name: &OsStr) -> io::Result<()> {
@@ -368,11 +469,7 @@ impl DirectoryHandle {
             libc::openat(
                 self.0.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_WRONLY
-                    | libc::O_CREAT
-                    | libc::O_EXCL
-                    | libc::O_CLOEXEC
-                    | libc::O_NOFOLLOW,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 0o600,
             )
         };
@@ -411,13 +508,42 @@ impl DirectoryHandle {
         })
     }
 
+    fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> io::Result<()> {
+        let source = c_string(source)?;
+        let destination = c_string(destination)?;
+        #[cfg(target_os = "macos")]
+        let result = unsafe {
+            libc::renameatx_np(
+                self.0.as_raw_fd(),
+                source.as_ptr(),
+                self.0.as_raw_fd(),
+                destination.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                self.0.as_raw_fd(),
+                source.as_ptr(),
+                self.0.as_raw_fd(),
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            ) as libc::c_int
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic no-replace rename is unavailable",
+        ));
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        syscall_result(result)
+    }
+
     fn unlink(&self, name: &OsStr) -> io::Result<()> {
         let name = c_string(name)?;
         syscall_result(unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) })
-    }
-
-    fn unlink_if_present(&self, name: &OsStr) {
-        let _ = self.unlink(name);
     }
 
     fn metadata(&self, name: &OsStr) -> io::Result<EntryMetadata> {
@@ -436,7 +562,78 @@ impl DirectoryHandle {
         Ok(EntryMetadata {
             is_regular: stat.st_mode & libc::S_IFMT == libc::S_IFREG,
             modified,
+            identity: FileIdentity {
+                device: stat.st_dev as u64,
+                inode: stat.st_ino,
+            },
         })
+    }
+
+    fn regular_file_identity(&self, name: &OsStr) -> io::Result<Option<FileIdentity>> {
+        let name = c_string(name)?;
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let result = unsafe {
+            libc::fstatat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            return if error.kind() == io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(error)
+            };
+        }
+        let stat = unsafe { stat.assume_init() };
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Ok(None);
+        }
+        Ok(Some(FileIdentity {
+            device: stat.st_dev as u64,
+            inode: stat.st_ino,
+        }))
+    }
+
+    fn cleanup_regular_file(&self, name: &OsStr, identity: FileIdentity) -> io::Result<()> {
+        if self.regular_file_identity(name)? != Some(identity) {
+            return Ok(());
+        }
+        #[cfg(test)]
+        AFTER_CLEANUP_IDENTITY.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().take() {
+                hook();
+            }
+        });
+        let tombstone = OsString::from(format!(
+            "{IMPORT_TEMP_PREFIX}chk_{}{IMPORT_TEMP_SUFFIX}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        self.rename_noreplace(name, &tombstone)?;
+        let tombstone_identity = self.regular_file_identity(&tombstone);
+        match tombstone_identity {
+            Ok(Some(current)) if current == identity => {
+                self.unlink(&tombstone)?;
+                self.0.sync_all()
+            }
+            Ok(_) => {
+                self.restore_cleanup_tombstone(&tombstone, name)?;
+                Err(unsafe_storage_error())
+            }
+            Err(error) => {
+                self.restore_cleanup_tombstone(&tombstone, name)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn restore_cleanup_tombstone(&self, tombstone: &OsStr, name: &OsStr) -> io::Result<()> {
+        self.rename_noreplace(tombstone, name)
+            .map_err(|_| unsafe_storage_error())?;
+        self.0.sync_all()
     }
 
     fn identity(&self) -> io::Result<FileIdentity> {
@@ -508,7 +705,7 @@ impl DirectoryHandle {
     }
 
     fn try_clone(&self) -> io::Result<Self> {
-        self.0.try_clone().map(Self)
+        Ok(Self(std::sync::Arc::clone(&self.0)))
     }
 }
 
@@ -545,6 +742,7 @@ impl AnchoredDirectory {
 struct EntryMetadata {
     is_regular: bool,
     modified: SystemTime,
+    identity: FileIdentity,
 }
 
 fn stat_modified_time(stat: &libc::stat) -> SystemTime {
@@ -614,7 +812,9 @@ fn is_lowercase_hex(byte: u8) -> bool {
 fn is_canonical_extension(extension: &str) -> bool {
     !extension.is_empty()
         && extension.len() <= MAX_AUDIO_EXTENSION_BYTES
-        && extension.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && extension
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
 pub(super) fn canonical_extension(path: &Path) -> String {
@@ -626,33 +826,48 @@ pub(super) fn canonical_extension(path: &Path) -> String {
 }
 
 fn unsafe_storage_error() -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, "unsafe audio storage layout")
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "unsafe audio storage layout",
+    )
 }
 
 fn write_hashed_temp(
     source_path: &Path,
     directory: &DirectoryHandle,
     temp_name: &OsStr,
-) -> io::Result<(String, u64)> {
+) -> io::Result<(String, u64, FileIdentity)> {
     let source = File::open(source_path)?;
     let temp = directory.create_file(temp_name)?;
+    let metadata = temp.metadata()?;
+    use std::os::unix::fs::MetadataExt;
+    let identity = FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
     let mut reader = BufReader::new(source);
     let mut writer = BufWriter::new(temp);
-    let mut hasher = Sha256::new();
-    let mut byte_length = 0_u64;
-    let mut buffer = [0_u8; COPY_BUFFER_BYTES];
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
+    let write_result = (|| {
+        let mut hasher = Sha256::new();
+        let mut byte_length = 0_u64;
+        let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            writer.write_all(&buffer[..count])?;
+            hasher.update(&buffer[..count]);
+            byte_length += count as u64;
         }
-        writer.write_all(&buffer[..count])?;
-        hasher.update(&buffer[..count]);
-        byte_length += count as u64;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        Ok((hex::encode(hasher.finalize()), byte_length, identity))
+    })();
+    if write_result.is_err() {
+        directory.cleanup_regular_file(temp_name, identity)?;
     }
-    writer.flush()?;
-    writer.get_ref().sync_all()?;
-    Ok((hex::encode(hasher.finalize()), byte_length))
+    write_result
 }
 
 fn hash_file(file: File) -> io::Result<(String, u64)> {

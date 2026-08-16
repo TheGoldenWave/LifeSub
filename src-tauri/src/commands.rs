@@ -7,14 +7,10 @@ use crate::catalog::Catalog;
 use crate::domain::{
     AudioChunk, CaptureSession, CaptureState, TranscriptRevision, TranscriptSegment,
 };
-use crate::service::{
-    parse_evidence_uri, CoreRuntime, EvidenceService, RuntimeOwnershipGuard,
-};
+use crate::service::{CoreRuntime, EvidenceService, parse_evidence_uri};
 
 pub struct AppState {
-    pub catalog: Catalog,
-    pub data_dir: PathBuf,
-    runtime_ownership: RuntimeOwnershipGuard,
+    runtime: CoreRuntime,
 }
 
 #[derive(Serialize)]
@@ -37,33 +33,18 @@ impl AppState {
 
     fn initialize_at(data_dir: PathBuf) -> Result<Self, String> {
         let runtime = CoreRuntime::initialize(&data_dir).map_err(|error| format!("{error:?}"))?;
-        let (catalog, runtime_ownership) = runtime.into_parts();
         // Task 11 replaces secondary failure with socket connection and structured Tauri errors.
-        Ok(Self {
-            catalog,
-            data_dir,
-            runtime_ownership,
-        })
+        Ok(Self { runtime })
     }
 
     fn with_current_catalog<T>(
         &self,
         mutation: impl FnOnce(&Catalog) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.runtime_ownership
+        self.runtime
             .ensure_current()
             .map_err(|error| format!("{error:?}"))?;
-        mutation(&self.catalog)
-    }
-
-    fn with_current_service<T>(
-        &self,
-        mutation: impl FnOnce(&Catalog, &std::path::Path) -> Result<T, String>,
-    ) -> Result<T, String> {
-        self.runtime_ownership
-            .ensure_current()
-            .map_err(|error| format!("{error:?}"))?;
-        mutation(&self.catalog, &self.data_dir)
+        mutation(self.runtime.catalog())
     }
 
     fn create_capture_session(&self, title: String) -> Result<CaptureSession, String> {
@@ -97,10 +78,72 @@ impl AppState {
         session: CaptureSession,
         path: String,
     ) -> Result<AudioChunk, String> {
-        self.with_current_service(|catalog, data_dir| {
-            EvidenceService::import_audio_with_existing_catalog(catalog, data_dir, &session, path)
-                .map_err(|error| format!("{error:?}"))
+        let data_dir = self
+            .runtime
+            .try_clone_data_directory()
+            .map_err(|error| format!("{error:?}"))?;
+        EvidenceService::import_audio_with_existing_catalog(
+            self.runtime.catalog(),
+            data_dir,
+            &session,
+            path,
+            || self.ensure_import_current(),
+        )
+        .map_err(|error| format!("{error:?}"))
+    }
+
+    fn ensure_import_current(&self) -> Result<(), crate::service::ServiceError> {
+        self.runtime.ensure_current().map_err(|error| {
+            crate::service::ServiceError::Io(std::io::Error::other(format!("{error:?}")))
         })
+    }
+
+    #[cfg(test)]
+    fn import_audio_file_with_open_barriers(
+        &self,
+        session: CaptureSession,
+        path: String,
+        checked: &std::sync::Barrier,
+        resume: &std::sync::Barrier,
+    ) -> Result<AudioChunk, String> {
+        let data_dir = self
+            .runtime
+            .try_clone_data_directory()
+            .map_err(|error| format!("{error:?}"))?;
+        checked.wait();
+        resume.wait();
+        EvidenceService::import_audio_with_existing_catalog(
+            self.runtime.catalog(),
+            data_dir,
+            &session,
+            path,
+            || self.ensure_import_current(),
+        )
+        .map_err(|error| format!("{error:?}"))
+    }
+
+    #[cfg(test)]
+    fn import_audio_file_with_commit_barriers(
+        &self,
+        session: CaptureSession,
+        path: String,
+        checked: &std::sync::Barrier,
+        resume: &std::sync::Barrier,
+    ) -> Result<AudioChunk, String> {
+        let data_dir = self
+            .runtime
+            .try_clone_data_directory()
+            .map_err(|error| format!("{error:?}"))?;
+        EvidenceService::import_audio_with_existing_catalog_and_commit_barriers(
+            self.runtime.catalog(),
+            data_dir,
+            &session,
+            path,
+            || self.ensure_import_current(),
+            checked,
+            resume,
+        )
+        .map_err(|error| format!("{error:?}"))
     }
 
     fn append_transcript_revision(
@@ -159,7 +202,8 @@ pub fn search_transcripts(
     state: State<'_, AppState>,
 ) -> Result<Vec<TranscriptSegment>, String> {
     state
-        .catalog
+        .runtime
+        .catalog()
         .search_segments(&query)
         .map_err(|error| error.to_string())
 }
@@ -199,6 +243,7 @@ pub fn resolve_evidence(uri: String) -> Result<EvidenceResolution, String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::{Arc, Barrier};
 
     use tempfile::tempdir;
 
@@ -215,39 +260,63 @@ mod tests {
             .unwrap();
         let source = parent.path().join("sample.wav");
         fs::write(&source, b"audio").unwrap();
-        let baseline_sessions = state.catalog.session_count().unwrap();
+        let baseline_sessions = state.runtime.catalog().session_count().unwrap();
         let lock = data_dir.join("asr-worker.lock");
         fs::rename(&lock, data_dir.join("old-lock")).unwrap();
         fs::write(&lock, b"replacement").unwrap();
 
-        assert!(state.create_capture_session("blocked create".into()).is_err());
-        assert!(state
-            .transition_capture_session(session.clone(), CaptureState::Recording)
-            .is_err());
-        assert!(state
-            .append_transcript_revision(
-                session.id.clone(),
-                "blocked".into(),
-                vec![TranscriptSegment::new(
-                    0,
-                    1,
-                    AudioSource::Imported,
-                    "blocked",
-                )],
-            )
-            .is_err());
-        assert!(state
-            .import_audio_file(session.clone(), source.to_string_lossy().into_owned())
-            .is_err());
+        assert!(
+            state
+                .create_capture_session("blocked create".into())
+                .is_err()
+        );
+        assert!(
+            state
+                .transition_capture_session(session.clone(), CaptureState::Recording)
+                .is_err()
+        );
+        assert!(
+            state
+                .append_transcript_revision(
+                    session.id.clone(),
+                    "blocked".into(),
+                    vec![TranscriptSegment::new(
+                        0,
+                        1,
+                        AudioSource::Imported,
+                        "blocked",
+                    )],
+                )
+                .is_err()
+        );
+        assert!(
+            state
+                .import_audio_file(session.clone(), source.to_string_lossy().into_owned())
+                .is_err()
+        );
 
-        assert_eq!(state.catalog.session_count().unwrap(), baseline_sessions);
         assert_eq!(
-            state.catalog.persisted_session_state(&session.id).unwrap(),
+            state.runtime.catalog().session_count().unwrap(),
+            baseline_sessions
+        );
+        assert_eq!(
+            state
+                .runtime
+                .catalog()
+                .persisted_session_state(&session.id)
+                .unwrap(),
             "idle"
         );
-        assert!(state.catalog.list_revisions(&session.id).unwrap().is_empty());
-        assert!(state.catalog.list_chunks().unwrap().is_empty());
-        assert!(state.catalog.search_segments("blocked").is_ok());
+        assert!(
+            state
+                .runtime
+                .catalog()
+                .list_revisions(&session.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(state.runtime.catalog().list_chunks().unwrap().is_empty());
+        assert!(state.runtime.catalog().search_segments("blocked").is_ok());
     }
 
     #[test]
@@ -255,12 +324,7 @@ mod tests {
         let parent = tempdir().unwrap();
         let data_dir = parent.path().join("data");
         let runtime = CoreRuntime::initialize(&data_dir).unwrap();
-        let (_disk_catalog, runtime_ownership) = runtime.into_parts();
-        let state = AppState {
-            catalog: Catalog::in_memory().unwrap(),
-            data_dir: data_dir.clone(),
-            runtime_ownership,
-        };
+        let state = AppState { runtime };
         let session = state
             .create_capture_session("existing catalog import".into())
             .unwrap();
@@ -271,6 +335,89 @@ mod tests {
             .import_audio_file(session, source.to_string_lossy().into_owned())
             .unwrap();
 
-        assert_eq!(state.catalog.list_chunks().unwrap(), vec![chunk]);
+        assert_eq!(state.runtime.catalog().list_chunks().unwrap(), vec![chunk]);
+    }
+
+    #[test]
+    fn guarded_import_rejects_data_root_swap_between_check_and_audio_open() {
+        let parent = tempdir().unwrap();
+        let data_dir = parent.path().join("data");
+        let state = AppState::initialize_at(data_dir.clone()).unwrap();
+        let session = CaptureSession::new("guarded import race");
+        let source = parent.path().join("sample.wav");
+        fs::write(&source, b"audio").unwrap();
+        let checked = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let import_checked = Arc::clone(&checked);
+        let import_resume = Arc::clone(&resume);
+        let import = std::thread::spawn(move || {
+            let result = state.import_audio_file_with_open_barriers(
+                session,
+                source.to_string_lossy().into_owned(),
+                &import_checked,
+                &import_resume,
+            );
+            (state, result)
+        });
+
+        checked.wait();
+        let anchored_data_dir = parent.path().join("anchored-data");
+        fs::rename(&data_dir, &anchored_data_dir).unwrap();
+        fs::create_dir(&data_dir).unwrap();
+        resume.wait();
+
+        let (state, result) = import.join().unwrap();
+        assert!(result.is_err());
+        assert_eq!(state.runtime.catalog().session_count().unwrap(), 0);
+        assert!(state.runtime.catalog().list_chunks().unwrap().is_empty());
+        assert!(audio_files(&data_dir).is_empty());
+        assert!(audio_files(&anchored_data_dir).is_empty());
+    }
+
+    #[test]
+    fn guarded_import_rolls_back_swap_after_storage_check_before_commit() {
+        let parent = tempdir().unwrap();
+        let data_dir = parent.path().join("data");
+        let state = AppState::initialize_at(data_dir.clone()).unwrap();
+        let session = CaptureSession::new("guarded commit race");
+        let source = parent.path().join("sample.wav");
+        fs::write(&source, b"audio").unwrap();
+        let checked = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let import_checked = Arc::clone(&checked);
+        let import_resume = Arc::clone(&resume);
+        let import = std::thread::spawn(move || {
+            let result = state.import_audio_file_with_commit_barriers(
+                session,
+                source.to_string_lossy().into_owned(),
+                &import_checked,
+                &import_resume,
+            );
+            (state, result)
+        });
+
+        checked.wait();
+        let anchored_data_dir = parent.path().join("anchored-data");
+        fs::rename(&data_dir, &anchored_data_dir).unwrap();
+        fs::create_dir(&data_dir).unwrap();
+        resume.wait();
+
+        let (state, result) = import.join().unwrap();
+        assert!(result.is_err());
+        assert_eq!(state.runtime.catalog().session_count().unwrap(), 0);
+        assert!(state.runtime.catalog().list_chunks().unwrap().is_empty());
+        assert!(audio_files(&data_dir).is_empty());
+        assert!(audio_files(&anchored_data_dir).is_empty());
+    }
+
+    fn audio_files(data_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let audio_dir = data_dir.join("audio");
+        if !audio_dir.exists() {
+            return Vec::new();
+        }
+        fs::read_dir(audio_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect()
     }
 }

@@ -124,6 +124,15 @@ pub struct TranscriptRevision {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TranscriptSegmentPublication {
+    pub id: String,
+    pub chunk_start_ms: i64,
+    pub chunk_end_ms: i64,
+    pub source: AudioSource,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AudioChunk {
     pub id: String,
     pub session_id: String,

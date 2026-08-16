@@ -1,17 +1,18 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 #[cfg(test)]
 use std::sync::{Arc, Barrier};
+use std::time::{Duration, SystemTime};
 
 use uuid::Uuid;
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, ImportedChunkInsertError};
 use crate::domain::{
     AsrErrorCode, AudioChunk, AudioSource, CaptureSession, ChunkIntegrityState, TranscriptRevision,
 };
 
 use self::audio_store::{AudioStore, ValidationError, canonical_extension};
+use self::runtime_lock::DataDirectoryCapability;
 
 mod audio_store;
 mod error;
@@ -19,7 +20,7 @@ mod evidence_uri;
 mod runtime_lock;
 
 pub use error::{ImportFault, ServiceError};
-pub use evidence_uri::{parse_evidence_uri, EvidenceTarget};
+pub use evidence_uri::{EvidenceTarget, parse_evidence_uri};
 pub(crate) use runtime_lock::JobOwnershipCapability;
 pub use runtime_lock::{
     CoreRuntime, CoreRuntimeError, RuntimeOwnershipError, RuntimeOwnershipGuard,
@@ -35,6 +36,7 @@ pub(crate) fn normalized_audio_extension(path: &Path) -> String {
 pub struct EvidenceService {
     catalog: Catalog,
     data_dir: PathBuf,
+    data_dir_capability: Option<DataDirectoryCapability>,
     #[cfg(test)]
     import_fault: Option<ImportFault>,
     #[cfg(test)]
@@ -48,6 +50,7 @@ impl EvidenceService {
         Self {
             catalog,
             data_dir: data_dir.as_ref().to_path_buf(),
+            data_dir_capability: None,
             #[cfg(test)]
             import_fault: None,
             #[cfg(test)]
@@ -59,6 +62,25 @@ impl EvidenceService {
 
     pub fn initialize(catalog: Catalog, data_dir: impl AsRef<Path>) -> Result<Self, ServiceError> {
         let service = Self::new(catalog, data_dir);
+        service.reconcile_audio()?;
+        Ok(service)
+    }
+
+    pub(crate) fn initialize_anchored(
+        catalog: Catalog,
+        data_dir: DataDirectoryCapability,
+    ) -> Result<Self, ServiceError> {
+        let service = Self {
+            catalog,
+            data_dir: PathBuf::new(),
+            data_dir_capability: Some(data_dir),
+            #[cfg(test)]
+            import_fault: None,
+            #[cfg(test)]
+            audio_directory_swap_target: None,
+            #[cfg(test)]
+            first_audio_create_barrier: None,
+        };
         service.reconcile_audio()?;
         Ok(service)
     }
@@ -76,6 +98,7 @@ impl EvidenceService {
         Self {
             catalog,
             data_dir: data_dir.as_ref().to_path_buf(),
+            data_dir_capability: None,
             import_fault: Some(import_fault),
             audio_directory_swap_target: None,
             first_audio_create_barrier: None,
@@ -91,6 +114,7 @@ impl EvidenceService {
         Self {
             catalog,
             data_dir: data_dir.as_ref().to_path_buf(),
+            data_dir_capability: None,
             import_fault: None,
             audio_directory_swap_target: Some(target.as_ref().to_path_buf()),
             first_audio_create_barrier: None,
@@ -106,6 +130,7 @@ impl EvidenceService {
         Self {
             catalog,
             data_dir: data_dir.as_ref().to_path_buf(),
+            data_dir_capability: None,
             import_fault: None,
             audio_directory_swap_target: None,
             first_audio_create_barrier: Some(barrier),
@@ -127,22 +152,175 @@ impl EvidenceService {
             self.audio_store(),
             session,
             source_path.as_ref(),
-            |point| self.fail_import_at(point),
+            ImportHooks {
+                fail_at: |point| self.fail_import_at(point),
+                ensure_current: || Ok(()),
+                before_stored_check: || {},
+                before_commit: || {},
+                before_cleanup: || {},
+            },
         )
     }
 
-    pub fn import_audio_with_existing_catalog(
+    #[cfg(feature = "desktop")]
+    pub(crate) fn import_audio_with_existing_catalog(
         catalog: &Catalog,
-        data_dir: impl AsRef<Path>,
+        data_dir: DataDirectoryCapability,
         session: &CaptureSession,
         source_path: impl AsRef<Path>,
+        ensure_current: impl FnMut() -> Result<(), ServiceError>,
     ) -> Result<AudioChunk, ServiceError> {
         import_audio_core(
             catalog,
-            AudioStore::new(data_dir.as_ref()),
+            AudioStore::anchored(data_dir),
             session,
             source_path.as_ref(),
-            |_| Ok(()),
+            ImportHooks {
+                fail_at: |_| Ok(()),
+                ensure_current,
+                before_stored_check: || {},
+                before_commit: || {},
+                before_cleanup: || {},
+            },
+        )
+    }
+
+    #[cfg(all(test, feature = "desktop"))]
+    pub(crate) fn import_audio_with_existing_catalog_and_commit_barriers(
+        catalog: &Catalog,
+        data_dir: DataDirectoryCapability,
+        session: &CaptureSession,
+        source_path: impl AsRef<Path>,
+        ensure_current: impl FnMut() -> Result<(), ServiceError>,
+        checked: &Barrier,
+        resume: &Barrier,
+    ) -> Result<AudioChunk, ServiceError> {
+        import_audio_core(
+            catalog,
+            AudioStore::anchored(data_dir),
+            session,
+            source_path.as_ref(),
+            ImportHooks {
+                fail_at: |_| Ok(()),
+                ensure_current,
+                before_stored_check: || {},
+                before_commit: || {
+                    checked.wait();
+                    resume.wait();
+                },
+                before_cleanup: || {},
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn import_audio_with_cleanup_barriers(
+        &self,
+        session: &CaptureSession,
+        source_path: impl AsRef<Path>,
+        cleanup_ready: &Barrier,
+        cleanup_resume: &Barrier,
+    ) -> Result<AudioChunk, ServiceError> {
+        import_audio_core(
+            &self.catalog,
+            self.audio_store(),
+            session,
+            source_path.as_ref(),
+            ImportHooks {
+                fail_at: |point| self.fail_import_at(point),
+                ensure_current: || Ok(()),
+                before_stored_check: || {},
+                before_commit: || {},
+                before_cleanup: || {
+                    cleanup_ready.wait();
+                    cleanup_resume.wait();
+                },
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn import_audio_with_cleanup_identity_barriers(
+        &self,
+        session: &CaptureSession,
+        source_path: impl AsRef<Path>,
+        ready: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    ) -> Result<AudioChunk, ServiceError> {
+        audio_store::set_cleanup_identity_hook(move || {
+            ready.wait();
+            resume.wait();
+        });
+        self.import_audio(session, source_path)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reconcile_audio_before_with_cleanup_identity_barriers(
+        &self,
+        stale_before: SystemTime,
+        ready: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    ) -> Result<(), ServiceError> {
+        audio_store::set_cleanup_identity_hook(move || {
+            ready.wait();
+            resume.wait();
+        });
+        self.reconcile_audio_before(stale_before)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn import_audio_with_fault_barriers(
+        &self,
+        session: &CaptureSession,
+        source_path: impl AsRef<Path>,
+        barrier_point: ImportFault,
+        ready: &Barrier,
+        resume: &Barrier,
+    ) -> Result<AudioChunk, ServiceError> {
+        import_audio_core(
+            &self.catalog,
+            self.audio_store(),
+            session,
+            source_path.as_ref(),
+            ImportHooks {
+                fail_at: |point| {
+                    if point == barrier_point {
+                        ready.wait();
+                        resume.wait();
+                    }
+                    self.fail_import_at(point)
+                },
+                ensure_current: || Ok(()),
+                before_stored_check: || {},
+                before_commit: || {},
+                before_cleanup: || {},
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn import_audio_with_stored_check_barriers(
+        &self,
+        session: &CaptureSession,
+        source_path: impl AsRef<Path>,
+        ready: &Barrier,
+        resume: &Barrier,
+    ) -> Result<AudioChunk, ServiceError> {
+        import_audio_core(
+            &self.catalog,
+            self.audio_store(),
+            session,
+            source_path.as_ref(),
+            ImportHooks {
+                fail_at: |point| self.fail_import_at(point),
+                ensure_current: || Ok(()),
+                before_stored_check: || {
+                    ready.wait();
+                    resume.wait();
+                },
+                before_commit: || {},
+                before_cleanup: || {},
+            },
         )
     }
 
@@ -246,6 +424,9 @@ impl EvidenceService {
     }
 
     fn audio_store(&self) -> AudioStore {
+        if let Some(data_dir) = &self.data_dir_capability {
+            return AudioStore::anchored(data_dir.clone());
+        }
         #[cfg(test)]
         {
             AudioStore::with_fault(
@@ -288,13 +469,35 @@ impl EvidenceService {
     }
 }
 
-fn import_audio_core(
+struct ImportHooks<FailAt, EnsureCurrent, BeforeStoredCheck, BeforeCommit, BeforeCleanup> {
+    fail_at: FailAt,
+    ensure_current: EnsureCurrent,
+    before_stored_check: BeforeStoredCheck,
+    before_commit: BeforeCommit,
+    before_cleanup: BeforeCleanup,
+}
+
+fn import_audio_core<FailAt, EnsureCurrent, BeforeStoredCheck, BeforeCommit, BeforeCleanup>(
     catalog: &Catalog,
     store: AudioStore,
     session: &CaptureSession,
     source_path: &Path,
-    mut fail_at: impl FnMut(ImportFault) -> Result<(), ServiceError>,
-) -> Result<AudioChunk, ServiceError> {
+    hooks: ImportHooks<FailAt, EnsureCurrent, BeforeStoredCheck, BeforeCommit, BeforeCleanup>,
+) -> Result<AudioChunk, ServiceError>
+where
+    FailAt: FnMut(ImportFault) -> Result<(), ServiceError>,
+    EnsureCurrent: FnMut() -> Result<(), ServiceError>,
+    BeforeStoredCheck: FnMut(),
+    BeforeCommit: FnMut(),
+    BeforeCleanup: FnMut(),
+{
+    let ImportHooks {
+        mut fail_at,
+        mut ensure_current,
+        mut before_stored_check,
+        mut before_commit,
+        mut before_cleanup,
+    } = hooks;
     let id = format!("chk_{}", Uuid::new_v4().simple());
     let pending = store.write_temp(source_path, &id)?;
     fail_at(ImportFault::AfterTempSync)?;
@@ -312,8 +515,23 @@ fn import_audio_core(
         sha256: pending.digest,
         byte_length: pending.byte_length,
     };
-    store.ensure_stored_current(&stored)?;
-    catalog.insert_imported_chunk(session, &chunk)?;
+    let import_result = (|| {
+        before_stored_check();
+        store.ensure_stored_current(&stored)?;
+        ensure_current()?;
+        before_commit();
+        catalog
+            .insert_imported_chunk(session, &chunk, &mut ensure_current)
+            .map_err(|error| match error {
+                ImportedChunkInsertError::Catalog(error) => ServiceError::Catalog(error),
+                ImportedChunkInsertError::Ensure(error) => error,
+            })
+    })();
+    if let Err(error) = import_result {
+        before_cleanup();
+        store.discard_stored(&stored)?;
+        return Err(error);
+    }
     Ok(chunk)
 }
 

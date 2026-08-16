@@ -1,15 +1,19 @@
 use std::ffi::{CString, OsStr};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
-use crate::asr::job::{Clock, JobRepository, SystemClock};
+use crate::asr::job::{
+    Clock, JobControl, JobCoordinator, JobCoordinatorReservation, JobError, JobRepository,
+    SystemClock,
+};
 #[cfg(feature = "asr-runtime")]
 use crate::asr::model_manager::FullSherpaRuntimeIdentity;
 use crate::asr::model_manager::{ManagerError, ModelManager, ReqwestTransport};
@@ -31,6 +35,9 @@ pub enum RuntimeOwnershipError {
 }
 
 pub struct RuntimeOwnershipGuard {
+    parent_container: File,
+    parent_name: CString,
+    parent_identity: FileIdentity,
     core_lock: File,
     core_lock_name: CString,
     core_lock_identity: FileIdentity,
@@ -43,9 +50,20 @@ pub struct RuntimeOwnershipGuard {
     lock_identity: FileIdentity,
 }
 
+#[derive(Clone)]
+pub(crate) struct DataDirectoryCapability(std::sync::Arc<File>);
+
+impl DataDirectoryCapability {
+    pub(super) fn into_file(self) -> std::sync::Arc<File> {
+        self.0
+    }
+}
+
 pub struct CoreRuntime {
     catalog: Catalog,
     ownership: RuntimeOwnershipGuard,
+    boot_id: String,
+    coordinator_reserved: AtomicBool,
 }
 
 pub(crate) struct JobOwnershipCapability<'a> {
@@ -78,6 +96,9 @@ struct FileIdentity {
 }
 
 struct ExternalOwnershipAnchor {
+    parent_container: File,
+    parent_name: CString,
+    parent_identity: FileIdentity,
     parent: File,
     lock: File,
     lock_name: CString,
@@ -90,10 +111,26 @@ impl ExternalOwnershipAnchor {
         let canonical_parent = parent_path
             .canonicalize()
             .map_err(RuntimeOwnershipError::Io)?;
+        let parent_name = c_string(
+            canonical_parent
+                .file_name()
+                .ok_or(RuntimeOwnershipError::UnsafePath)?,
+        )?;
+        let parent_container_path = canonical_parent
+            .parent()
+            .ok_or(RuntimeOwnershipError::UnsafePath)?;
+        let parent_container = open_directory_path(parent_container_path)?;
+        let parent = open_directory_at(&parent_container, &parent_name)?;
+        let parent_identity = file_identity(&parent)?;
+        ensure_entry_identity(
+            &parent_container,
+            &parent_name,
+            parent_identity,
+            libc::S_IFDIR,
+        )?;
         let data_dir_name = data_dir
             .file_name()
             .ok_or(RuntimeOwnershipError::UnsafePath)?;
-        let parent = open_directory_path(&canonical_parent)?;
         // LifeSub has one desktop data root per canonical parent. The parent inode is the only
         // coordination object that cannot be replaced independently from entries inside it.
         match parent.try_lock_exclusive() {
@@ -119,6 +156,9 @@ impl ExternalOwnershipAnchor {
         }
         ensure_entry_identity(&parent, &lock_name, lock_identity, libc::S_IFREG)?;
         Ok(Self {
+            parent_container,
+            parent_name,
+            parent_identity,
             parent,
             lock,
             lock_name,
@@ -177,7 +217,16 @@ impl RuntimeOwnershipGuard {
             data_dir_identity,
             libc::S_IFDIR,
         )?;
+        ensure_entry_identity(
+            &anchor.parent_container,
+            &anchor.parent_name,
+            anchor.parent_identity,
+            libc::S_IFDIR,
+        )?;
         Ok(Self {
+            parent_container: anchor.parent_container,
+            parent_name: anchor.parent_name,
+            parent_identity: anchor.parent_identity,
             core_lock: anchor.lock,
             core_lock_name: anchor.lock_name,
             core_lock_identity: anchor.lock_identity,
@@ -192,6 +241,13 @@ impl RuntimeOwnershipGuard {
     }
 
     pub fn ensure_current(&self) -> Result<(), RuntimeOwnershipError> {
+        ensure_file_identity(&self.parent, self.parent_identity, libc::S_IFDIR)?;
+        ensure_entry_identity(
+            &self.parent_container,
+            &self.parent_name,
+            self.parent_identity,
+            libc::S_IFDIR,
+        )?;
         ensure_file_identity(&self.data_dir, self.data_dir_identity, libc::S_IFDIR)?;
         ensure_file_identity(&self.core_lock, self.core_lock_identity, libc::S_IFREG)?;
         ensure_entry_identity(
@@ -215,6 +271,18 @@ impl RuntimeOwnershipGuard {
         )
     }
 
+    pub(crate) fn try_clone_data_directory(
+        &self,
+    ) -> Result<DataDirectoryCapability, RuntimeOwnershipError> {
+        self.ensure_current()?;
+        let data_dir = self
+            .data_dir
+            .try_clone()
+            .map_err(RuntimeOwnershipError::Io)?;
+        self.ensure_current()?;
+        Ok(DataDirectoryCapability(std::sync::Arc::new(data_dir)))
+    }
+
     #[cfg(test)]
     pub fn acquire_with_lock_swap(
         data_dir: &Path,
@@ -236,36 +304,82 @@ impl Drop for RuntimeOwnershipGuard {
 
 impl CoreRuntime {
     pub fn initialize(data_dir: impl AsRef<Path>) -> Result<Self, CoreRuntimeError> {
-        Self::initialize_with_hook(data_dir.as_ref(), || Ok(()))
+        Self::initialize_with_hooks(
+            data_dir.as_ref(),
+            uuid::Uuid::new_v4().to_string(),
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+        )
     }
 
-    fn initialize_with_hook(
+    fn initialize_with_hooks(
         data_dir: &Path,
-        hook: impl FnOnce() -> io::Result<()>,
+        boot_id: String,
+        parent_hook: impl FnOnce() -> io::Result<()>,
+        ownership_hook: impl FnOnce() -> io::Result<()>,
+        catalog_open_hook: impl FnOnce() -> io::Result<()>,
+        resolved_catalog_open_hook: impl FnOnce() -> io::Result<()>,
+        post_catalog_open_hook: impl FnOnce() -> io::Result<()>,
     ) -> Result<Self, CoreRuntimeError> {
         let anchor =
             ExternalOwnershipAnchor::acquire(data_dir).map_err(CoreRuntimeError::Ownership)?;
-        fs::create_dir_all(data_dir).map_err(CoreRuntimeError::Io)?;
+        parent_hook().map_err(CoreRuntimeError::Io)?;
+        ensure_entry_identity(
+            &anchor.parent_container,
+            &anchor.parent_name,
+            anchor.parent_identity,
+            libc::S_IFDIR,
+        )
+        .map_err(CoreRuntimeError::Ownership)?;
+        let data_dir_name = c_string(data_dir.file_name().ok_or(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::UnsafePath,
+        ))?)
+        .map_err(CoreRuntimeError::Ownership)?;
+        create_directory_at(&anchor.parent, &data_dir_name).map_err(CoreRuntimeError::Ownership)?;
         let ownership =
             RuntimeOwnershipGuard::acquire_with_anchor_and_hook(data_dir, anchor, || Ok(()))
                 .map_err(CoreRuntimeError::Ownership)?;
         ownership
             .ensure_current()
             .map_err(CoreRuntimeError::Ownership)?;
-        hook().map_err(CoreRuntimeError::Io)?;
+        ownership_hook().map_err(CoreRuntimeError::Io)?;
         ownership
             .ensure_current()
             .map_err(CoreRuntimeError::Ownership)?;
-        let catalog =
-            Catalog::open(data_dir.join(CATALOG_FILE)).map_err(CoreRuntimeError::Catalog)?;
+        catalog_open_hook().map_err(CoreRuntimeError::Io)?;
         ownership
             .ensure_current()
             .map_err(CoreRuntimeError::Ownership)?;
-        let catalog = EvidenceService::initialize(catalog, data_dir)
+        let catalog_open = Catalog::prepare_anchored(&ownership.data_dir, CATALOG_FILE)
+            .map_err(CoreRuntimeError::Catalog)?;
+        resolved_catalog_open_hook().map_err(CoreRuntimeError::Io)?;
+        ownership
+            .ensure_current()
+            .map_err(CoreRuntimeError::Ownership)?;
+        let catalog = catalog_open.open().map_err(CoreRuntimeError::Catalog)?;
+        post_catalog_open_hook().map_err(CoreRuntimeError::Io)?;
+        ownership
+            .ensure_current()
+            .map_err(CoreRuntimeError::Ownership)?;
+        let data_dir_capability = ownership
+            .try_clone_data_directory()
+            .map_err(CoreRuntimeError::Ownership)?;
+        let catalog = EvidenceService::initialize_anchored(catalog, data_dir_capability)
             .map_err(CoreRuntimeError::Service)?
             .into_catalog();
-        let manager = ModelManager::new(
+        ownership
+            .ensure_current()
+            .map_err(CoreRuntimeError::Ownership)?;
+        let model_root = ownership
+            .data_dir
+            .try_clone()
+            .map_err(CoreRuntimeError::Io)?;
+        let manager = ModelManager::new_anchored(
             data_dir,
+            model_root,
             ReqwestTransport::new().map_err(CoreRuntimeError::ModelManager)?,
             catalog,
         );
@@ -284,10 +398,34 @@ impl CoreRuntime {
         #[cfg(not(feature = "asr-runtime"))]
         let manager = manager;
         manager
-            .reconcile_all()
+            .reconcile_all_anchored()
             .map_err(CoreRuntimeError::ModelManager)?;
+        ownership
+            .ensure_current()
+            .map_err(CoreRuntimeError::Ownership)?;
         let catalog = manager.into_catalog();
-        Ok(Self { catalog, ownership })
+        Ok(Self {
+            catalog,
+            ownership,
+            boot_id,
+            coordinator_reserved: AtomicBool::new(false),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn initialize_with_boot_id(
+        data_dir: &Path,
+        boot_id: impl Into<String>,
+    ) -> Result<Self, CoreRuntimeError> {
+        Self::initialize_with_hooks(
+            data_dir,
+            boot_id.into(),
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+        )
     }
 
     #[cfg(test)]
@@ -295,40 +433,159 @@ impl CoreRuntime {
         data_dir: &Path,
         swap: impl FnOnce() -> io::Result<()>,
     ) -> Result<Self, CoreRuntimeError> {
-        Self::initialize_with_hook(data_dir, swap)
+        Self::initialize_with_hooks(
+            data_dir,
+            uuid::Uuid::new_v4().to_string(),
+            || Ok(()),
+            swap,
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+        )
     }
 
+    #[cfg(test)]
+    pub fn initialize_with_catalog_open_swap(
+        data_dir: &Path,
+        swap: impl FnOnce() -> io::Result<()>,
+    ) -> Result<Self, CoreRuntimeError> {
+        Self::initialize_with_hooks(
+            data_dir,
+            uuid::Uuid::new_v4().to_string(),
+            || Ok(()),
+            || Ok(()),
+            swap,
+            || Ok(()),
+            || Ok(()),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn initialize_with_resolved_catalog_open_swap(
+        data_dir: &Path,
+        swap: impl FnOnce() -> io::Result<()>,
+    ) -> Result<Self, CoreRuntimeError> {
+        Self::initialize_with_hooks(
+            data_dir,
+            uuid::Uuid::new_v4().to_string(),
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+            swap,
+            || Ok(()),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn initialize_with_post_catalog_open_swap(
+        data_dir: &Path,
+        swap: impl FnOnce() -> io::Result<()>,
+    ) -> Result<Self, CoreRuntimeError> {
+        Self::initialize_with_hooks(
+            data_dir,
+            uuid::Uuid::new_v4().to_string(),
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+            swap,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn initialize_with_parent_swap(
+        data_dir: &Path,
+        swap: impl FnOnce() -> io::Result<()>,
+    ) -> Result<Self, CoreRuntimeError> {
+        Self::initialize_with_hooks(
+            data_dir,
+            uuid::Uuid::new_v4().to_string(),
+            swap,
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+            || Ok(()),
+        )
+    }
+
+    #[cfg(test)]
     pub fn into_parts(self) -> (Catalog, RuntimeOwnershipGuard) {
         (self.catalog, self.ownership)
     }
 
-    pub fn job_repository(&self, boot_id: impl Into<String>) -> JobRepository<'_> {
-        self.build_job_repository(&self.catalog, boot_id, SystemClock)
+    #[cfg(feature = "desktop")]
+    pub(crate) fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn ensure_current(&self) -> Result<(), RuntimeOwnershipError> {
+        self.ownership.ensure_current()
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn try_clone_data_directory(
+        &self,
+    ) -> Result<DataDirectoryCapability, RuntimeOwnershipError> {
+        self.ownership.try_clone_data_directory()
+    }
+
+    fn job_repository(&self) -> JobRepository<'_> {
+        self.build_job_repository(&self.catalog, SystemClock)
+    }
+
+    pub fn job_coordinator(
+        &self,
+        worker_id: impl Into<String>,
+    ) -> Result<JobCoordinator<'_>, JobError> {
+        let reservation = self.reserve_job_coordinator()?;
+        Ok(JobCoordinator::from_core(
+            self.job_repository(),
+            worker_id,
+            reservation,
+        ))
+    }
+
+    pub fn job_control(&self) -> JobControl<'_> {
+        JobControl::from_core(self.job_repository())
     }
 
     #[cfg(test)]
-    pub(crate) fn job_repository_with_clock<C: Clock>(
+    pub(crate) fn job_repository_with_clock<C: Clock>(&self, clock: C) -> JobRepository<'_, C> {
+        self.build_job_repository(&self.catalog, clock)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn job_control_with_clock<C: Clock>(&self, clock: C) -> JobControl<'_, C> {
+        JobControl::from_core(self.job_repository_with_clock(clock))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn job_coordinator_with_clock<C: Clock>(
         &self,
-        boot_id: impl Into<String>,
+        worker_id: impl Into<String>,
         clock: C,
-    ) -> JobRepository<'_, C> {
-        self.build_job_repository(&self.catalog, boot_id, clock)
+    ) -> Result<JobCoordinator<'_, C>, JobError> {
+        let reservation = self.reserve_job_coordinator()?;
+        Ok(JobCoordinator::from_core(
+            self.job_repository_with_clock(clock),
+            worker_id,
+            reservation,
+        ))
     }
 
     #[cfg(test)]
     pub(crate) fn job_repository_for_foreign_core_with_clock<'a, C: Clock>(
         &'a self,
         foreign: &'a CoreRuntime,
-        boot_id: impl Into<String>,
         clock: C,
     ) -> JobRepository<'a, C> {
-        self.build_job_repository(&foreign.catalog, boot_id, clock)
+        self.build_job_repository(&foreign.catalog, clock)
     }
 
     fn build_job_repository<'a, C: Clock>(
         &'a self,
         catalog: &'a Catalog,
-        boot_id: impl Into<String>,
         clock: C,
     ) -> JobRepository<'a, C> {
         JobRepository::from_core(
@@ -337,9 +594,13 @@ impl CoreRuntime {
                 catalog_instance_id: self.catalog.instance_id(),
                 ownership: &self.ownership,
             },
-            boot_id,
+            self.boot_id.clone(),
             clock,
         )
+    }
+
+    fn reserve_job_coordinator(&self) -> Result<JobCoordinatorReservation<'_>, JobError> {
+        JobCoordinatorReservation::try_reserve(&self.coordinator_reserved)
     }
 }
 
@@ -365,6 +626,22 @@ fn open_directory_at(parent: &File, name: &CString) -> Result<File, RuntimeOwner
         )
     };
     file_from_descriptor(descriptor)
+}
+
+fn create_directory_at(parent: &File, name: &CString) -> Result<(), RuntimeOwnershipError> {
+    let result = unsafe {
+        // SAFETY: parent is an open directory and name is a valid relative C string.
+        libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700)
+    };
+    if result == -1 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(RuntimeOwnershipError::Io(error));
+        }
+    } else {
+        parent.sync_all().map_err(RuntimeOwnershipError::Io)?;
+    }
+    Ok(())
 }
 
 fn open_lock_at(data_dir: &File, name: &CString) -> Result<File, RuntimeOwnershipError> {

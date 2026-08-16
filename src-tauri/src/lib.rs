@@ -24,6 +24,8 @@ mod asr_runtime_qualifier_test;
 #[cfg(test)]
 mod asr_runtime_test;
 #[cfg(test)]
+mod asr_service_test;
+#[cfg(test)]
 mod asr_settings_test;
 #[cfg(test)]
 mod asr_vad_test;

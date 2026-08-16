@@ -2,17 +2,22 @@
 use std::sync::atomic::Ordering;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 
 use crate::domain::{AsrErrorCode, AudioChunk, CaptureSession, ChunkIntegrityState};
 
-use super::{parse_source, parse_time, source_name, state_name, Catalog};
+use super::{Catalog, parse_source, parse_time, source_name, state_name};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChunkDiagnostics {
     pub integrity_state: ChunkIntegrityState,
     pub error_code: Option<AsrErrorCode>,
     pub error_at: Option<DateTime<Utc>>,
+}
+
+pub(crate) enum ImportedChunkInsertError<E> {
+    Catalog(rusqlite::Error),
+    Ensure(E),
 }
 
 impl Catalog {
@@ -28,26 +33,38 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn insert_imported_chunk(
+    pub(crate) fn insert_imported_chunk<E>(
         &self,
         session: &CaptureSession,
         chunk: &AudioChunk,
-    ) -> rusqlite::Result<()> {
+        ensure_current: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), ImportedChunkInsertError<E>> {
         let mut connection = self.connection.lock().unwrap();
-        let transaction = connection.transaction()?;
-        transaction.execute(
+        let transaction = connection
+            .transaction()
+            .map_err(ImportedChunkInsertError::Catalog)?;
+        transaction
+            .execute(
             "INSERT OR IGNORE INTO sessions(id, title, state, started_at, ended_at) VALUES(?1, ?2, ?3, ?4, ?5)",
             params![session.id, session.title, state_name(session.state), session.started_at.to_rfc3339(), session.ended_at.map(|value| value.to_rfc3339())],
-        )?;
+        )
+            .map_err(ImportedChunkInsertError::Catalog)?;
         #[cfg(test)]
         if self.fail_next_chunk_insert.swap(false, Ordering::SeqCst) {
-            return Err(rusqlite::Error::ExecuteReturnedResults);
+            return Err(ImportedChunkInsertError::Catalog(
+                rusqlite::Error::ExecuteReturnedResults,
+            ));
         }
-        transaction.execute(
+        transaction
+            .execute(
             "INSERT INTO chunks(id, session_id, source, path, sha256, byte_length) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
             params![chunk.id, chunk.session_id, source_name(chunk.source), chunk.path, chunk.sha256, chunk.byte_length],
-        )?;
-        transaction.commit()
+        )
+            .map_err(ImportedChunkInsertError::Catalog)?;
+        ensure_current().map_err(ImportedChunkInsertError::Ensure)?;
+        transaction
+            .commit()
+            .map_err(ImportedChunkInsertError::Catalog)
     }
 
     pub fn chunk(&self, id: &str) -> rusqlite::Result<Option<AudioChunk>> {

@@ -28,6 +28,7 @@ const DISK_SAFETY_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
+mod anchored_reconcile;
 mod archive;
 mod delete;
 mod download;

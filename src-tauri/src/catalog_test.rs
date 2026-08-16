@@ -11,14 +11,24 @@ fn revisions_are_append_only_and_searchable() {
         .append_revision(
             &session.id,
             "demo-local",
-            vec![TranscriptSegment::new(0, 4200, AudioSource::Microphone, "证据链必须保留原始转写")],
+            vec![TranscriptSegment::new(
+                0,
+                4200,
+                AudioSource::Microphone,
+                "证据链必须保留原始转写",
+            )],
         )
         .unwrap();
     let correction = catalog
         .append_revision(
             &session.id,
             "manual",
-            vec![TranscriptSegment::new(0, 4200, AudioSource::Microphone, "证据链必须保留原始转写和修订")],
+            vec![TranscriptSegment::new(
+                0,
+                4200,
+                AudioSource::Microphone,
+                "证据链必须保留原始转写和修订",
+            )],
         )
         .unwrap();
 
@@ -42,7 +52,9 @@ fn unknown_persisted_chunk_integrity_is_rejected() {
         byte_length: 0,
     };
     catalog.insert_chunk(&chunk).unwrap();
-    catalog.force_chunk_integrity(&chunk.id, "future_state").unwrap();
+    catalog
+        .force_chunk_integrity(&chunk.id, "future_state")
+        .unwrap();
 
     assert!(catalog.chunk_integrity(&chunk.id).is_err());
     assert!(catalog.chunk_diagnostics(&chunk.id).is_err());

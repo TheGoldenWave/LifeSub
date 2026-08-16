@@ -10,8 +10,8 @@ use crate::domain::{
     AsrErrorCode, AudioChunk, AudioSource, CaptureSession, ChunkIntegrityState, TranscriptSegment,
 };
 use crate::service::{
-    parse_evidence_uri, CoreRuntime, CoreRuntimeError, EvidenceService, EvidenceTarget, ImportFault,
-    RuntimeOwnershipError, RuntimeOwnershipGuard, ServiceError,
+    CoreRuntime, CoreRuntimeError, EvidenceService, EvidenceTarget, ImportFault,
+    RuntimeOwnershipError, RuntimeOwnershipGuard, ServiceError, parse_evidence_uri,
 };
 
 const SOURCE_BYTES: &[u8] = b"lifesub audio fixture";
@@ -59,9 +59,7 @@ fn empty_source_extension_is_normalized_to_audio() {
 fn non_utf8_source_extension_is_normalized_to_audio() {
     use std::os::unix::ffi::OsStringExt;
 
-    let source = std::path::PathBuf::from(std::ffi::OsString::from_vec(
-        b"sample.\xff".to_vec(),
-    ));
+    let source = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"sample.\xff".to_vec()));
 
     assert_eq!(crate::service::normalized_audio_extension(&source), "audio");
 }
@@ -110,11 +108,7 @@ fn hostile_extension_lookalike_is_not_deleted() {
     let data_dir = tempdir().unwrap();
     let audio_dir = data_dir.path().join("audio");
     fs::create_dir_all(&audio_dir).unwrap();
-    let lookalike = audio_dir.join(format!(
-        "{}-chk_{}.a-b",
-        "b".repeat(64),
-        "c".repeat(32)
-    ));
+    let lookalike = audio_dir.join(format!("{}-chk_{}.a-b", "b".repeat(64), "c".repeat(32)));
     fs::write(&lookalike, b"user lookalike").unwrap();
     let service = EvidenceService::new(Catalog::in_memory().unwrap(), data_dir.path());
 
@@ -152,9 +146,11 @@ fn concurrent_first_imports_share_directory_creation() {
     let chunks = [first.join().unwrap(), second.join().unwrap()];
 
     assert_eq!(service.catalog().list_chunks().unwrap().len(), 2);
-    assert!(chunks
-        .iter()
-        .all(|chunk| data_dir.path().join(&chunk.path).is_file()));
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| data_dir.path().join(&chunk.path).is_file())
+    );
 }
 
 #[test]
@@ -177,11 +173,13 @@ fn imported_audio_crash_after_temp_sync_leaves_only_reconcilable_temp() {
 
     let audio_files = audio_files(data_dir.path());
     assert_eq!(audio_files.len(), 1);
-    assert!(audio_files[0]
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .ends_with(".tmp"));
+    assert!(
+        audio_files[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    );
     assert_no_import_metadata(&service, &session);
     assert_eq!(fs::read(&source).unwrap(), SOURCE_BYTES);
 }
@@ -206,11 +204,13 @@ fn imported_audio_crash_after_final_rename_leaves_only_final_orphan() {
 
     let audio_files = audio_files(data_dir.path());
     assert_eq!(audio_files.len(), 1);
-    assert!(!audio_files[0]
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .ends_with(".tmp"));
+    assert!(
+        !audio_files[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    );
     assert_no_import_metadata(&service, &session);
 }
 
@@ -274,6 +274,48 @@ fn injected_rename_failure_removes_temp_and_preserves_source() {
 }
 
 #[test]
+fn rename_failure_cleanup_does_not_delete_same_name_temp_replacement() {
+    let source_dir = tempdir().unwrap();
+    let data_dir = tempdir().unwrap();
+    let source = source_dir.path().join("sample.wav");
+    fs::write(&source, SOURCE_BYTES).unwrap();
+    let service = EvidenceService::with_import_fault(
+        Catalog::in_memory().unwrap(),
+        data_dir.path(),
+        ImportFault::RenameIo,
+    );
+    let session = CaptureSession::new("temp cleanup identity race");
+    let ready = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let import_ready = Arc::clone(&ready);
+    let import_resume = Arc::clone(&resume);
+    let import_session = session.clone();
+    let import = std::thread::spawn(move || {
+        let result = service.import_audio_with_fault_barriers(
+            &import_session,
+            &source,
+            ImportFault::AfterTempSync,
+            &import_ready,
+            &import_resume,
+        );
+        (service, result)
+    });
+
+    ready.wait();
+    let temp_path = audio_files(data_dir.path()).pop().unwrap();
+    let original_path = temp_path.with_extension("original");
+    fs::rename(&temp_path, &original_path).unwrap();
+    fs::write(&temp_path, b"replacement temp").unwrap();
+    resume.wait();
+
+    let (service, result) = import.join().unwrap();
+    assert!(matches!(result, Err(ServiceError::Io(_))));
+    assert_no_import_metadata(&service, &session);
+    assert_eq!(fs::read(&temp_path).unwrap(), b"replacement temp");
+    assert_eq!(fs::read(&original_path).unwrap(), SOURCE_BYTES);
+}
+
+#[test]
 fn injected_parent_sync_failure_removes_final_and_preserves_source() {
     let source_dir = tempdir().unwrap();
     let data_dir = tempdir().unwrap();
@@ -296,7 +338,86 @@ fn injected_parent_sync_failure_removes_final_and_preserves_source() {
 }
 
 #[test]
-fn catalog_failure_after_rename_preserves_source_and_is_reconciled_without_sleep() {
+fn parent_sync_failure_cleanup_does_not_delete_same_name_final_replacement() {
+    let source_dir = tempdir().unwrap();
+    let data_dir = tempdir().unwrap();
+    let source = source_dir.path().join("sample.wav");
+    fs::write(&source, SOURCE_BYTES).unwrap();
+    let service = EvidenceService::with_import_fault(
+        Catalog::in_memory().unwrap(),
+        data_dir.path(),
+        ImportFault::ParentSyncIo,
+    );
+    let session = CaptureSession::new("sync cleanup identity race");
+    let ready = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let import_ready = Arc::clone(&ready);
+    let import_resume = Arc::clone(&resume);
+    let import_session = session.clone();
+    let import = std::thread::spawn(move || {
+        let result = service.import_audio_with_fault_barriers(
+            &import_session,
+            &source,
+            ImportFault::AfterFinalRename,
+            &import_ready,
+            &import_resume,
+        );
+        (service, result)
+    });
+
+    ready.wait();
+    let final_path = audio_files(data_dir.path()).pop().unwrap();
+    let original_path = final_path.with_extension("original");
+    fs::rename(&final_path, &original_path).unwrap();
+    fs::write(&final_path, b"replacement final").unwrap();
+    resume.wait();
+
+    let (service, result) = import.join().unwrap();
+    assert!(matches!(result, Err(ServiceError::Io(_))));
+    assert_no_import_metadata(&service, &session);
+    assert_eq!(fs::read(&final_path).unwrap(), b"replacement final");
+    assert_eq!(fs::read(&original_path).unwrap(), SOURCE_BYTES);
+}
+
+#[test]
+fn precommit_check_rejects_same_name_final_replacement() {
+    let source_dir = tempdir().unwrap();
+    let data_dir = tempdir().unwrap();
+    let source = source_dir.path().join("sample.wav");
+    fs::write(&source, SOURCE_BYTES).unwrap();
+    let service = EvidenceService::new(Catalog::in_memory().unwrap(), data_dir.path());
+    let session = CaptureSession::new("precommit final identity race");
+    let ready = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let import_ready = Arc::clone(&ready);
+    let import_resume = Arc::clone(&resume);
+    let import_session = session.clone();
+    let import = std::thread::spawn(move || {
+        let result = service.import_audio_with_stored_check_barriers(
+            &import_session,
+            &source,
+            &import_ready,
+            &import_resume,
+        );
+        (service, result)
+    });
+
+    ready.wait();
+    let final_path = audio_files(data_dir.path()).pop().unwrap();
+    let original_path = final_path.with_extension("original");
+    fs::rename(&final_path, &original_path).unwrap();
+    fs::write(&final_path, b"replacement before commit").unwrap();
+    resume.wait();
+
+    let (service, result) = import.join().unwrap();
+    assert!(matches!(result, Err(ServiceError::Io(_))));
+    assert_no_import_metadata(&service, &session);
+    assert_eq!(fs::read(&final_path).unwrap(), b"replacement before commit");
+    assert_eq!(fs::read(&original_path).unwrap(), SOURCE_BYTES);
+}
+
+#[test]
+fn catalog_failure_after_rename_preserves_source_and_removes_anchored_audio() {
     let source_dir = tempdir().unwrap();
     let data_dir = tempdir().unwrap();
     let source = source_dir.path().join("sample.wav");
@@ -312,12 +433,124 @@ fn catalog_failure_after_rename_preserves_source_and_is_reconciled_without_sleep
     ));
     assert_no_import_metadata(&service, &session);
     assert_eq!(fs::read(&source).unwrap(), SOURCE_BYTES);
-    assert_eq!(audio_files(data_dir.path()).len(), 1);
-
-    service
-        .reconcile_audio_before(SystemTime::now() + Duration::from_secs(1))
-        .unwrap();
     assert!(audio_files(data_dir.path()).is_empty());
+}
+
+#[test]
+fn catalog_failure_cleanup_does_not_delete_same_name_replacement() {
+    let source_dir = tempdir().unwrap();
+    let data_dir = tempdir().unwrap();
+    let source = source_dir.path().join("sample.wav");
+    fs::write(&source, SOURCE_BYTES).unwrap();
+    let catalog = Catalog::in_memory().unwrap();
+    catalog.fail_next_chunk_insert();
+    let service = EvidenceService::new(catalog, data_dir.path());
+    let session = CaptureSession::new("cleanup identity race");
+    let cleanup_ready = Arc::new(Barrier::new(2));
+    let cleanup_resume = Arc::new(Barrier::new(2));
+    let import_ready = Arc::clone(&cleanup_ready);
+    let import_resume = Arc::clone(&cleanup_resume);
+    let import_session = session.clone();
+    let import = std::thread::spawn(move || {
+        let result = service.import_audio_with_cleanup_barriers(
+            &import_session,
+            &source,
+            &import_ready,
+            &import_resume,
+        );
+        (service, result)
+    });
+
+    cleanup_ready.wait();
+    let final_path = audio_files(data_dir.path()).pop().unwrap();
+    let original_path = final_path.with_extension("original");
+    fs::rename(&final_path, &original_path).unwrap();
+    fs::write(&final_path, b"replacement audio").unwrap();
+    cleanup_resume.wait();
+
+    let (service, result) = import.join().unwrap();
+    assert!(matches!(result, Err(ServiceError::Catalog(_))));
+    assert_no_import_metadata(&service, &session);
+    assert_eq!(fs::read(&final_path).unwrap(), b"replacement audio");
+    assert_eq!(fs::read(&original_path).unwrap(), SOURCE_BYTES);
+}
+
+#[test]
+fn cleanup_tombstone_restores_replacement_swapped_after_identity_read() {
+    let source_dir = tempdir().unwrap();
+    let data_dir = tempdir().unwrap();
+    let source = source_dir.path().join("sample.wav");
+    fs::write(&source, SOURCE_BYTES).unwrap();
+    let catalog = Catalog::in_memory().unwrap();
+    catalog.fail_next_chunk_insert();
+    let service = EvidenceService::new(catalog, data_dir.path());
+    let session = CaptureSession::new("cleanup tombstone race");
+    let ready = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let import_ready = Arc::clone(&ready);
+    let import_resume = Arc::clone(&resume);
+    let import_session = session.clone();
+    let import = std::thread::spawn(move || {
+        let result = service.import_audio_with_cleanup_identity_barriers(
+            &import_session,
+            &source,
+            import_ready,
+            import_resume,
+        );
+        (service, result)
+    });
+
+    ready.wait();
+    let final_path = audio_files(data_dir.path()).pop().unwrap();
+    let original_path = final_path.with_extension("original");
+    fs::rename(&final_path, &original_path).unwrap();
+    fs::write(&final_path, b"replacement after identity read").unwrap();
+    resume.wait();
+
+    let (service, result) = import.join().unwrap();
+    assert!(matches!(result, Err(ServiceError::Io(_))));
+    assert_no_import_metadata(&service, &session);
+    assert_eq!(
+        fs::read(&final_path).unwrap(),
+        b"replacement after identity read"
+    );
+    assert_eq!(fs::read(&original_path).unwrap(), SOURCE_BYTES);
+    assert_eq!(audio_files(data_dir.path()).len(), 2);
+}
+
+#[test]
+fn orphan_tombstone_restores_replacement_swapped_after_identity_read() {
+    let data_dir = tempdir().unwrap();
+    let audio_dir = data_dir.path().join("audio");
+    fs::create_dir_all(&audio_dir).unwrap();
+    let orphan = import_final_path(&audio_dir);
+    fs::write(&orphan, b"original orphan").unwrap();
+    let service = EvidenceService::new(Catalog::in_memory().unwrap(), data_dir.path());
+    let ready = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let reconcile_ready = Arc::clone(&ready);
+    let reconcile_resume = Arc::clone(&resume);
+    let stale_before = SystemTime::now() + Duration::from_secs(1);
+    let reconcile = std::thread::spawn(move || {
+        let result = service.reconcile_audio_before_with_cleanup_identity_barriers(
+            stale_before,
+            reconcile_ready,
+            reconcile_resume,
+        );
+        (service, result)
+    });
+
+    ready.wait();
+    let original_path = orphan.with_extension("original");
+    fs::rename(&orphan, &original_path).unwrap();
+    fs::write(&orphan, b"replacement orphan").unwrap();
+    resume.wait();
+
+    let (_service, result) = reconcile.join().unwrap();
+    assert!(matches!(result, Err(ServiceError::Io(_))));
+    assert_eq!(fs::read(&orphan).unwrap(), b"replacement orphan");
+    assert_eq!(fs::read(&original_path).unwrap(), b"original orphan");
+    assert_eq!(audio_files(data_dir.path()).len(), 2);
 }
 
 #[test]
@@ -425,11 +658,7 @@ fn reconciliation_rejects_uppercase_importer_lookalike_without_deleting_it() {
     let data_dir = tempdir().unwrap();
     let audio_dir = data_dir.path().join("audio");
     fs::create_dir_all(&audio_dir).unwrap();
-    let lookalike = audio_dir.join(format!(
-        "{}-chk_{}.wav",
-        "B".repeat(64),
-        "C".repeat(32)
-    ));
+    let lookalike = audio_dir.join(format!("{}-chk_{}.wav", "B".repeat(64), "C".repeat(32)));
     fs::write(&lookalike, b"not generated by the importer").unwrap();
     let service = EvidenceService::new(Catalog::in_memory().unwrap(), data_dir.path());
 
@@ -529,11 +758,8 @@ fn verification_does_not_read_from_audio_directory_replaced_after_open() {
         SOURCE_BYTES.len() as u64,
     );
     catalog.insert_chunk(&swapped).unwrap();
-    let service = EvidenceService::with_audio_directory_swap(
-        catalog,
-        data_dir.path(),
-        external_dir.path(),
-    );
+    let service =
+        EvidenceService::with_audio_directory_swap(catalog, data_dir.path(), external_dir.path());
 
     assert_eq!(
         service.verify_chunk(&swapped.id),
@@ -557,7 +783,12 @@ fn symlinked_chunk_is_corrupted_and_never_verified() {
     let service = EvidenceService::new(Catalog::in_memory().unwrap(), data_dir.path());
     let session = CaptureSession::new("symlink chunk");
     service.catalog().insert_session(&session).unwrap();
-    let linked = chunk(&session, "linked.wav", sha256(SOURCE_BYTES), SOURCE_BYTES.len() as u64);
+    let linked = chunk(
+        &session,
+        "linked.wav",
+        sha256(SOURCE_BYTES),
+        SOURCE_BYTES.len() as u64,
+    );
     service.catalog().insert_chunk(&linked).unwrap();
 
     service.reconcile_audio().unwrap();
@@ -583,11 +814,22 @@ fn second_runtime_instance_fails_before_catalog_or_reconciliation() {
 
     assert!(matches!(
         CoreRuntime::initialize(&data_dir),
-        Err(CoreRuntimeError::Ownership(RuntimeOwnershipError::AlreadyOwned))
+        Err(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::AlreadyOwned
+        ))
     ));
     assert!(orphan.exists());
     drop(first);
     drop(parent);
+}
+
+#[test]
+fn core_catalog_forces_memory_temp_store() {
+    let (_parent, data_dir) = runtime_data_dir();
+    let runtime = CoreRuntime::initialize(&data_dir).unwrap();
+    let (catalog, _ownership) = runtime.into_parts();
+
+    assert_eq!(catalog.test_temp_store().unwrap(), 2);
 }
 
 #[test]
@@ -620,7 +862,9 @@ fn runtime_lock_child_observes_existing_owner() {
     };
     assert!(matches!(
         CoreRuntime::initialize(data_dir),
-        Err(CoreRuntimeError::Ownership(RuntimeOwnershipError::AlreadyOwned))
+        Err(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::AlreadyOwned
+        ))
     ));
 }
 
@@ -708,9 +952,109 @@ fn runtime_data_directory_swap_is_rejected_before_catalog_creation() {
 
     assert!(matches!(
         result,
-        Err(CoreRuntimeError::Ownership(RuntimeOwnershipError::UnsafePath))
+        Err(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::UnsafePath
+        ))
     ));
     assert!(!data_dir.join("lifesub.sqlite3").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn parent_swap_after_anchor_creates_nothing_in_replacement_parent() {
+    let grandparent = tempdir().unwrap();
+    let parent = grandparent.path().join("parent");
+    let held_parent = grandparent.path().join("held-parent");
+    let data_dir = parent.join("data");
+    fs::create_dir(&parent).unwrap();
+
+    let result = CoreRuntime::initialize_with_parent_swap(&data_dir, || {
+        fs::rename(&parent, &held_parent)?;
+        fs::create_dir(&parent)
+    });
+
+    assert!(matches!(
+        result,
+        Err(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::UnsafePath
+        ))
+    ));
+    assert!(fs::read_dir(&parent).unwrap().next().is_none());
+    assert!(!held_parent.join("data").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn catalog_open_after_final_ownership_check_never_targets_replacement_data_directory() {
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let held_data_dir = parent.path().join("held-data");
+    fs::create_dir(&data_dir).unwrap();
+
+    let result = CoreRuntime::initialize_with_catalog_open_swap(&data_dir, || {
+        fs::rename(&data_dir, &held_data_dir)?;
+        fs::create_dir(&data_dir)
+    });
+
+    assert!(matches!(
+        result,
+        Err(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::UnsafePath
+        ))
+    ));
+    assert!(!data_dir.join("lifesub.sqlite3").exists());
+    assert!(!held_data_dir.join("lifesub.sqlite3").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn catalog_open_after_anchored_path_resolution_never_targets_second_replacement() {
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let first_replacement = parent.path().join("first-replacement");
+    fs::create_dir(&data_dir).unwrap();
+
+    let result = CoreRuntime::initialize_with_resolved_catalog_open_swap(&data_dir, || {
+        fs::rename(&data_dir, &first_replacement)?;
+        fs::create_dir(&data_dir)
+    });
+
+    assert!(!data_dir.join("lifesub.sqlite3").exists());
+    assert!(!first_replacement.join("lifesub.sqlite3").exists());
+    assert!(result.is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_swap_after_catalog_open_is_rejected_before_reconciliation() {
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let held_data_dir = parent.path().join("held-data");
+    fs::create_dir(&data_dir).unwrap();
+
+    let result = CoreRuntime::initialize_with_post_catalog_open_swap(&data_dir, || {
+        fs::rename(&data_dir, &held_data_dir)?;
+        fs::create_dir(&data_dir)?;
+        fs::create_dir(data_dir.join("audio"))?;
+        fs::write(
+            import_final_path(&data_dir.join("audio")),
+            b"replacement orphan",
+        )
+    });
+
+    assert!(matches!(
+        result,
+        Err(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::UnsafePath
+        ))
+    ));
+    assert!(!data_dir.join("lifesub.sqlite3").exists());
+    assert_eq!(
+        fs::read(import_final_path(&data_dir.join("audio"))).unwrap(),
+        b"replacement orphan"
+    );
+    assert!(held_data_dir.join("lifesub.sqlite3").exists());
+    assert!(!held_data_dir.join("audio").exists());
 }
 
 #[cfg(unix)]
@@ -730,7 +1074,9 @@ fn external_owner_lock_survives_whole_data_directory_replacement() {
 
     assert!(matches!(
         CoreRuntime::initialize(&data_dir),
-        Err(CoreRuntimeError::Ownership(RuntimeOwnershipError::AlreadyOwned))
+        Err(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::AlreadyOwned
+        ))
     ));
     assert!(!data_dir.join("lifesub.sqlite3").exists());
     assert!(ownership.ensure_current().is_err());
@@ -740,6 +1086,48 @@ fn external_owner_lock_survives_whole_data_directory_replacement() {
         .and_then(|_| service.import_audio(&session, &source).map_err(|_| ()));
     assert!(import.is_err());
     assert_no_import_metadata(&service, &session);
+}
+
+#[cfg(unix)]
+#[test]
+fn opened_catalog_remains_writable_in_held_directory_after_entry_replacement() {
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let held_data_dir = parent.path().join("held-data");
+    let runtime = CoreRuntime::initialize(&data_dir).unwrap();
+    let (catalog, ownership) = runtime.into_parts();
+    fs::rename(&data_dir, &held_data_dir).unwrap();
+    fs::create_dir(&data_dir).unwrap();
+    let session = CaptureSession::new("anchored catalog write");
+
+    catalog.insert_session(&session).unwrap();
+
+    assert!(!data_dir.join("lifesub.sqlite3").exists());
+    let held_catalog = Catalog::open(held_data_dir.join("lifesub.sqlite3")).unwrap();
+    assert!(held_catalog.session_exists(&session.id).unwrap());
+    assert!(ownership.ensure_current().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn wal_state_remains_anchored_after_data_directory_replacement() {
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let held_data_dir = parent.path().join("held-data");
+    let runtime = CoreRuntime::initialize(&data_dir).unwrap();
+    let (catalog, _ownership) = runtime.into_parts();
+    catalog
+        .execute_test_sql("PRAGMA journal_mode = WAL")
+        .unwrap();
+    fs::rename(&data_dir, &held_data_dir).unwrap();
+    fs::create_dir(&data_dir).unwrap();
+
+    catalog
+        .insert_session(&CaptureSession::new("anchored WAL write"))
+        .unwrap();
+
+    assert!(fs::read_dir(&data_dir).unwrap().next().is_none());
+    assert!(held_data_dir.join("lifesub.sqlite3-wal").exists());
 }
 
 #[cfg(unix)]
@@ -771,15 +1159,19 @@ fn parent_lock_survives_combined_anchor_and_data_directory_replacement() {
 
     assert!(matches!(
         CoreRuntime::initialize(&data_dir),
-        Err(CoreRuntimeError::Ownership(RuntimeOwnershipError::AlreadyOwned))
+        Err(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::AlreadyOwned
+        ))
     ));
     assert!(!data_dir.join("lifesub.sqlite3").exists());
     assert!(ownership.ensure_current().is_err());
-    assert!(ownership
-        .ensure_current()
-        .map_err(|_| ())
-        .and_then(|_| service.import_audio(&session, &source).map_err(|_| ()))
-        .is_err());
+    assert!(
+        ownership
+            .ensure_current()
+            .map_err(|_| ())
+            .and_then(|_| service.import_audio(&session, &source).map_err(|_| ()))
+            .is_err()
+    );
     assert_no_import_metadata(&service, &session);
 }
 
@@ -792,7 +1184,9 @@ fn canonical_parent_allows_only_one_lifesub_core() {
 
     assert!(matches!(
         second,
-        Err(CoreRuntimeError::Ownership(RuntimeOwnershipError::AlreadyOwned))
+        Err(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::AlreadyOwned
+        ))
     ));
     assert!(!parent.path().join("second/lifesub.sqlite3").exists());
     drop(first);

@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 #[cfg(test)]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -10,19 +10,32 @@ use crate::domain::{
     AudioSource, CaptureSession, CaptureState, TranscriptRevision, TranscriptSegment,
 };
 
+mod anchored_vfs;
 mod chunks;
 pub(crate) mod jobs;
 pub(crate) mod migrations;
 mod models;
+mod publication;
 
 pub use chunks::ChunkDiagnostics;
+pub(crate) use chunks::ImportedChunkInsertError;
 pub(crate) use models::ModelInstallationRecord;
+pub use publication::PublicationError;
+#[cfg(test)]
+pub(crate) use publication::PublicationFailurePoint;
 
 pub struct Catalog {
     instance_id: uuid::Uuid,
     connection: Mutex<Connection>,
+    _anchored_vfs: Option<anchored_vfs::AnchoredVfs>,
     #[cfg(test)]
     fail_next_chunk_insert: AtomicBool,
+    #[cfg(test)]
+    fail_publication_at: AtomicU8,
+}
+
+pub(crate) struct AnchoredCatalogOpen {
+    anchored_vfs: anchored_vfs::AnchoredVfs,
 }
 
 impl Catalog {
@@ -30,8 +43,11 @@ impl Catalog {
         let catalog = Self {
             instance_id: uuid::Uuid::new_v4(),
             connection: Mutex::new(Connection::open_in_memory()?),
+            _anchored_vfs: None,
             #[cfg(test)]
             fail_next_chunk_insert: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_publication_at: AtomicU8::new(0),
         };
         migrations::migrate(&mut catalog.connection.lock().unwrap())?;
         Ok(catalog)
@@ -41,15 +57,66 @@ impl Catalog {
         let catalog = Self {
             instance_id: uuid::Uuid::new_v4(),
             connection: Mutex::new(Connection::open(path)?),
+            _anchored_vfs: None,
             #[cfg(test)]
             fail_next_chunk_insert: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_publication_at: AtomicU8::new(0),
         };
         migrations::migrate(&mut catalog.connection.lock().unwrap())?;
         Ok(catalog)
     }
 
+    pub(crate) fn prepare_anchored(
+        directory: &std::fs::File,
+        database_name: &str,
+    ) -> rusqlite::Result<AnchoredCatalogOpen> {
+        let anchored_vfs = anchored_vfs::AnchoredVfs::register(directory, database_name)?;
+        Ok(AnchoredCatalogOpen { anchored_vfs })
+    }
+
     pub(crate) const fn instance_id(&self) -> uuid::Uuid {
         self.instance_id
+    }
+}
+
+impl AnchoredCatalogOpen {
+    pub(crate) fn open(self) -> rusqlite::Result<Catalog> {
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = Connection::open_with_flags_and_vfs(
+            self.anchored_vfs.database_path(),
+            flags,
+            self.anchored_vfs.name(),
+        )?;
+        connection.pragma_update(None, "temp_store", "MEMORY")?;
+        let catalog = Catalog {
+            instance_id: uuid::Uuid::new_v4(),
+            connection: Mutex::new(connection),
+            _anchored_vfs: Some(self.anchored_vfs),
+            #[cfg(test)]
+            fail_next_chunk_insert: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_publication_at: AtomicU8::new(0),
+        };
+        migrations::migrate(&mut catalog.connection.lock().unwrap())?;
+        Ok(catalog)
+    }
+}
+
+impl Catalog {
+    #[cfg(test)]
+    pub(crate) fn execute_test_sql(&self, sql: &str) -> rusqlite::Result<()> {
+        self.connection.lock().unwrap().execute_batch(sql)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_temp_store(&self) -> rusqlite::Result<i64> {
+        self.connection
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA temp_store", [], |row| row.get(0))
     }
 
     pub fn insert_session(&self, session: &CaptureSession) -> rusqlite::Result<()> {

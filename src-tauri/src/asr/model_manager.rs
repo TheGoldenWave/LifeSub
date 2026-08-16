@@ -59,6 +59,38 @@ pub(crate) struct ExecutionInstallationRecord {
     pub runtime_identity_json: Option<String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ModelRuntimeOwnership {
+    keepalive: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    ensure_current: std::sync::Arc<dyn Fn() -> Result<(), ManagerError> + Send + Sync>,
+}
+
+impl std::fmt::Debug for ModelRuntimeOwnership {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelRuntimeOwnership")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ModelRuntimeOwnership {
+    pub(crate) fn new<K, F>(keepalive: std::sync::Arc<K>, ensure_current: F) -> Self
+    where
+        K: Send + Sync + 'static,
+        F: Fn() -> Result<(), ManagerError> + Send + Sync + 'static,
+    {
+        Self {
+            keepalive,
+            ensure_current: std::sync::Arc::new(ensure_current),
+        }
+    }
+
+    fn ensure_current(&self) -> Result<(), ManagerError> {
+        let _ = &self.keepalive;
+        (self.ensure_current)()
+    }
+}
+
 #[derive(Debug)]
 pub struct ExecutableInstallationLease {
     plan: ModelInstallPlan,
@@ -102,6 +134,7 @@ pub(super) fn take_delete_reservation_barriers_for_test(
 struct ExecutionLeaseGuard {
     model_id: String,
     registry: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    _runtime_ownership: Option<ModelRuntimeOwnership>,
 }
 
 impl Drop for ExecutionLeaseGuard {
@@ -219,6 +252,7 @@ impl ExecutableInstallationLease {
             _guard: ExecutionLeaseGuard {
                 model_id: model_id.to_owned(),
                 registry,
+                _runtime_ownership: None,
             },
             validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
@@ -230,6 +264,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
         &self,
         model_id: &str,
     ) -> Result<ExecutableInstallationLease, ManagerError> {
+        self.ensure_runtime_current()?;
         let guard = self.acquire_execution_lease(model_id)?;
         let device = DeviceProfile::current();
         let record = self
@@ -329,6 +364,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
 
 impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
     fn acquire_execution_lease(&self, model_id: &str) -> Result<ExecutionLeaseGuard, ManagerError> {
+        self.ensure_runtime_current()?;
         fs_support::validate_component("model_id", model_id)?;
         let mut registry = self.execution_leases.lock().unwrap();
         match registry.entry(model_id.to_owned()) {
@@ -351,6 +387,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         Ok(ExecutionLeaseGuard {
             model_id: model_id.to_owned(),
             registry: self.execution_leases.clone(),
+            _runtime_ownership: self.runtime_ownership.clone(),
         })
     }
 
@@ -386,6 +423,15 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             .lock()
             .unwrap()
             .insert(install_dir.as_ref().to_path_buf(), barriers);
+    }
+}
+
+impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
+    fn ensure_runtime_current(&self) -> Result<(), ManagerError> {
+        match &self.runtime_ownership {
+            Some(ownership) => ownership.ensure_current(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -488,6 +534,9 @@ where
         crate::asr::runtime_qualifier::QualifiedRuntimeIdentity,
         crate::asr::runtime_qualifier::QualifierError,
     > {
+        self.ensure_runtime_current().map_err(|error| {
+            crate::asr::runtime_qualifier::QualifierError::new(error.code(), error.to_string())
+        })?;
         const MODEL_ID: &str = "qwen3-asr-1.7b";
         let manifest = model_registry().model(MODEL_ID).ok_or_else(|| {
             crate::asr::runtime_qualifier::QualifierError::new(
@@ -519,6 +568,9 @@ where
         &self,
         install_dir: impl AsRef<Path>,
     ) -> Result<(), crate::asr::runtime_qualifier::QualifierError> {
+        self.ensure_runtime_current().map_err(|error| {
+            crate::asr::runtime_qualifier::QualifierError::new(error.code(), error.to_string())
+        })?;
         const MODEL_ID: &str = "qwen3-asr-1.7b";
         let manifest = model_registry().model(MODEL_ID).ok_or_else(|| {
             crate::asr::runtime_qualifier::QualifierError::new(

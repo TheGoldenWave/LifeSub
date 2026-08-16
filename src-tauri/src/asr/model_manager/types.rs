@@ -437,11 +437,14 @@ impl ManagerError {
     pub fn code(&self) -> &'static str {
         self.code
     }
-    pub(super) fn new(code: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             code,
             detail: detail.into(),
         }
+    }
+    pub(crate) fn ownership_lost(detail: impl Into<String>) -> Self {
+        Self::new("runtime_ownership_lost", detail)
     }
     pub(super) fn network(detail: impl Into<String>) -> Self {
         Self::new("model_download_failed", detail)
@@ -502,6 +505,7 @@ pub struct ModelManager<T, C> {
     pub(super) observed_sherpa_runtime: Option<FullSherpaRuntimeIdentity>,
     pub(super) execution_leases:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    pub(super) runtime_ownership: Option<super::ModelRuntimeOwnership>,
     #[cfg(test)]
     pub(super) available_space_override: Option<u64>,
     #[cfg(test)]

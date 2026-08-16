@@ -15,9 +15,15 @@ use crate::asr::job::{
     SystemClock,
 };
 use crate::asr::model_lookup::ModelLookup;
+#[cfg(test)]
+use crate::asr::model_manager::ExecutableInstallationLease;
 #[cfg(feature = "asr-runtime")]
 use crate::asr::model_manager::FullSherpaRuntimeIdentity;
-use crate::asr::model_manager::{ManagerError, ModelManager, ReqwestTransport};
+use crate::asr::model_manager::{
+    DeviceProfile, ManagerError, ModelManager, ModelRuntimeOwnership, ReqwestTransport,
+    StoredInstallation,
+};
+use crate::asr::provider::{ProductionProviderFactory, Provider, ProviderError, ProviderSelection};
 use crate::asr::service::{AsrService, EnqueueProviderFactory, EnqueueReservations};
 use crate::catalog::Catalog;
 
@@ -62,8 +68,8 @@ impl DataDirectoryCapability {
 }
 
 pub struct CoreRuntime {
-    catalog: Catalog,
-    ownership: RuntimeOwnershipGuard,
+    model_manager: ModelManager<ReqwestTransport, Catalog>,
+    ownership: std::sync::Arc<RuntimeOwnershipGuard>,
     boot_id: String,
     coordinator_reserved: AtomicBool,
     enqueue_reservations: EnqueueReservations,
@@ -376,15 +382,22 @@ impl CoreRuntime {
         ownership
             .ensure_current()
             .map_err(CoreRuntimeError::Ownership)?;
+        let ownership = std::sync::Arc::new(ownership);
         let model_root = ownership
             .data_dir
             .try_clone()
             .map_err(CoreRuntimeError::Io)?;
-        let manager = ModelManager::new_anchored(
+        let ownership_for_models = ownership.clone();
+        let manager = ModelManager::new_anchored_owned(
             data_dir,
             model_root,
             ReqwestTransport::new().map_err(CoreRuntimeError::ModelManager)?,
             catalog,
+            ModelRuntimeOwnership::new(ownership.clone(), move || {
+                ownership_for_models
+                    .ensure_current()
+                    .map_err(|error| ManagerError::ownership_lost(format!("{error:?}")))
+            }),
         );
         #[cfg(feature = "asr-runtime")]
         let manager = {
@@ -406,9 +419,8 @@ impl CoreRuntime {
         ownership
             .ensure_current()
             .map_err(CoreRuntimeError::Ownership)?;
-        let catalog = manager.into_catalog();
         Ok(Self {
-            catalog,
+            model_manager: manager,
             ownership,
             boot_id,
             coordinator_reserved: AtomicBool::new(false),
@@ -514,12 +526,85 @@ impl CoreRuntime {
 
     #[cfg(test)]
     pub fn into_parts(self) -> (Catalog, RuntimeOwnershipGuard) {
-        (self.catalog, self.ownership)
+        let catalog = self.model_manager.into_catalog();
+        let ownership = std::sync::Arc::try_unwrap(self.ownership)
+            .unwrap_or_else(|_| panic!("test runtime ownership unexpectedly shared"));
+        (catalog, ownership)
     }
 
-    #[cfg(feature = "desktop")]
-    pub(crate) fn catalog(&self) -> &Catalog {
-        &self.catalog
+    #[cfg(test)]
+    pub(crate) fn model_manager(&self) -> &ModelManager<ReqwestTransport, Catalog> {
+        &self.model_manager
+    }
+
+    pub(crate) fn catalog_ref(&self) -> &Catalog {
+        self.model_manager.catalog_ref()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn delete_model(&self, model_id: &str) -> Result<(), ManagerError> {
+        self.ensure_model_current()?;
+        self.model_manager.delete_model(model_id)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn reconcile_models(&self) -> Result<(), ManagerError> {
+        self.ensure_model_current()?;
+        self.model_manager.reconcile_all_anchored()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_model_execution_lease_for_test(
+        &self,
+        model_id: &str,
+        install_dir: impl AsRef<Path>,
+    ) -> Result<ExecutableInstallationLease, ManagerError> {
+        self.ensure_model_current()?;
+        self.model_manager
+            .hold_execution_lease_for_test(model_id, install_dir)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn download_and_install_model<F: Fn() -> bool>(
+        &self,
+        model_id: &str,
+        device: &DeviceProfile,
+        cancelled: F,
+    ) -> Result<StoredInstallation, ManagerError> {
+        self.ensure_model_current()?;
+        self.model_manager
+            .download_and_install_model(model_id, device, cancelled)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn create_provider(
+        &self,
+        model_id: &str,
+        selection: ProviderSelection,
+    ) -> Result<Provider, ProviderError> {
+        self.ensure_model_current().map_err(|error| {
+            ProviderError::new(
+                crate::domain::AsrErrorCode::ModelCapabilityUnavailable,
+                error.to_string(),
+            )
+        })?;
+        let installation = self
+            .model_manager
+            .executable_installation(model_id)
+            .map_err(|error| {
+                ProviderError::new(
+                    crate::domain::AsrErrorCode::ModelCapabilityUnavailable,
+                    error.to_string(),
+                )
+            })?;
+        ProductionProviderFactory::new().create(installation, selection)
+    }
+
+    #[allow(dead_code)]
+    fn ensure_model_current(&self) -> Result<(), ManagerError> {
+        self.ownership
+            .ensure_current()
+            .map_err(|error| ManagerError::ownership_lost(format!("{error:?}")))
     }
 
     #[cfg(feature = "desktop")]
@@ -535,7 +620,7 @@ impl CoreRuntime {
     }
 
     fn job_repository(&self) -> JobRepository<'_> {
-        self.build_job_repository(&self.catalog, SystemClock)
+        self.build_job_repository(self.catalog_ref(), SystemClock)
     }
 
     pub fn job_coordinator(
@@ -573,7 +658,7 @@ impl CoreRuntime {
 
     #[cfg(test)]
     pub(crate) fn job_repository_with_clock<C: Clock>(&self, clock: C) -> JobRepository<'_, C> {
-        self.build_job_repository(&self.catalog, clock)
+        self.build_job_repository(self.catalog_ref(), clock)
     }
 
     #[cfg(test)]
@@ -621,7 +706,7 @@ impl CoreRuntime {
         foreign: &'a CoreRuntime,
         clock: C,
     ) -> JobRepository<'a, C> {
-        self.build_job_repository(&foreign.catalog, clock)
+        self.build_job_repository(foreign.catalog_ref(), clock)
     }
 
     fn build_job_repository<'a, C: Clock>(
@@ -632,7 +717,7 @@ impl CoreRuntime {
         JobRepository::from_core(
             catalog,
             JobOwnershipCapability {
-                catalog_instance_id: self.catalog.instance_id(),
+                catalog_instance_id: self.catalog_ref().instance_id(),
                 ownership: &self.ownership,
             },
             self.boot_id.clone(),

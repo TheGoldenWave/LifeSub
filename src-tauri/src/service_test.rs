@@ -5,6 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use tempfile::tempdir;
 
+use crate::asr::manifest::model_registry;
+use crate::asr::model_manager::{ModelCatalog, ModelInstallPlan, StoredInstallation};
 use crate::catalog::Catalog;
 use crate::domain::{
     AsrErrorCode, AudioChunk, AudioSource, CaptureSession, ChunkIntegrityState, TranscriptSegment,
@@ -15,6 +17,196 @@ use crate::service::{
 };
 
 const SOURCE_BYTES: &[u8] = b"lifesub audio fixture";
+
+#[test]
+fn core_runtime_keeps_one_model_execution_registry_across_job_apis() {
+    use crate::asr::provider::{
+        AudioSlice, NativeBackend, NativeBackendFactory, NativeRequest, ProviderError,
+        ProviderFactory, ProviderSelection,
+    };
+
+    #[derive(Clone)]
+    struct BackendFactory;
+    struct Backend;
+
+    impl NativeBackendFactory for BackendFactory {
+        fn create(
+            &self,
+            _request: &NativeRequest,
+        ) -> Result<Box<dyn NativeBackend>, ProviderError> {
+            Ok(Box::new(Backend))
+        }
+    }
+
+    impl NativeBackend for Backend {
+        fn transcribe(&mut self, _audio: AudioSlice<'_>) -> Result<String, ProviderError> {
+            Ok("runtime lease".to_owned())
+        }
+    }
+
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let runtime = CoreRuntime::initialize_with_boot_id(&data_dir, "boot-model-manager").unwrap();
+    let model_id = "sense-voice-small-int8-2024-07-17";
+    let manifest = model_registry().model(model_id).unwrap();
+    let plan = ModelInstallPlan::from_manifest(manifest);
+    let install_dir = data_dir
+        .join("models/asr")
+        .join(&plan.provider)
+        .join(&plan.model_id)
+        .join(format!(
+            "{}-{}",
+            plan.manifest_version, plan.bundle_identity
+        ));
+    fs::create_dir_all(&install_dir).unwrap();
+    runtime
+        .model_manager()
+        .catalog_ref()
+        .publish_installation(&StoredInstallation {
+            model_id: plan.model_id.clone(),
+            provider: plan.provider.clone(),
+            manifest_version: plan.manifest_version.clone(),
+            bundle_identity: plan.bundle_identity.clone(),
+            install_dir: install_dir.clone(),
+            state: "runtime_qualified".to_owned(),
+            runtime_identity_json: Some("{}".to_owned()),
+        })
+        .unwrap();
+    let execution = runtime
+        .hold_model_execution_lease_for_test(model_id, &install_dir)
+        .unwrap();
+    let provider = ProviderFactory::new(BackendFactory)
+        .create_verified(execution, ProviderSelection::for_test(model_id))
+        .unwrap();
+
+    let _control = runtime.job_control();
+    assert_eq!(
+        runtime.delete_model(model_id).unwrap_err().code(),
+        "model_in_use"
+    );
+    assert!(install_dir.is_dir());
+
+    drop(provider);
+    runtime.delete_model(model_id).unwrap();
+    assert!(!install_dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn invalidated_core_rejects_model_delete_and_reconcile_without_side_effects() {
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let runtime = CoreRuntime::initialize(&data_dir).unwrap();
+    let staging = data_dir.join("staging/keep");
+    fs::create_dir_all(&staging).unwrap();
+    let sentinel = staging.join("sentinel");
+    fs::write(&sentinel, b"unchanged").unwrap();
+    let before_installations = runtime.catalog_ref().model_installation_records().unwrap();
+    let lock = data_dir.join("asr-worker.lock");
+    fs::rename(&lock, data_dir.join("old-lock")).unwrap();
+    fs::write(&lock, b"replacement").unwrap();
+
+    assert_eq!(
+        runtime.reconcile_models().unwrap_err().code(),
+        "runtime_ownership_lost"
+    );
+    assert_eq!(
+        runtime.delete_model("whisper-base").unwrap_err().code(),
+        "runtime_ownership_lost"
+    );
+    assert_eq!(
+        runtime
+            .download_and_install_model(
+                "whisper-base",
+                &crate::asr::model_manager::DeviceProfile::current(),
+                || false,
+            )
+            .unwrap_err()
+            .code(),
+        "runtime_ownership_lost"
+    );
+    assert_eq!(fs::read(&sentinel).unwrap(), b"unchanged");
+    assert_eq!(
+        runtime.catalog_ref().model_installation_records().unwrap(),
+        before_installations
+    );
+}
+
+#[test]
+fn provider_execution_lease_keeps_full_core_owned_until_provider_drop() {
+    use crate::asr::provider::{
+        AudioSlice, NativeBackend, NativeBackendFactory, NativeRequest, ProviderError,
+        ProviderFactory, ProviderSelection,
+    };
+
+    #[derive(Clone)]
+    struct BackendFactory;
+    struct Backend;
+
+    impl NativeBackendFactory for BackendFactory {
+        fn create(
+            &self,
+            _request: &NativeRequest,
+        ) -> Result<Box<dyn NativeBackend>, ProviderError> {
+            Ok(Box::new(Backend))
+        }
+    }
+
+    impl NativeBackend for Backend {
+        fn transcribe(&mut self, _audio: AudioSlice<'_>) -> Result<String, ProviderError> {
+            Ok("runtime lease".to_owned())
+        }
+    }
+
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let runtime = CoreRuntime::initialize(&data_dir).unwrap();
+    let model_id = "sense-voice-small-int8-2024-07-17";
+    let install_dir = data_dir.join("provider-lifetime-install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let lease = runtime
+        .hold_model_execution_lease_for_test(model_id, &install_dir)
+        .unwrap();
+    let provider = ProviderFactory::new(BackendFactory)
+        .create_verified(lease, ProviderSelection::for_test(model_id))
+        .unwrap();
+
+    drop(runtime);
+    assert!(matches!(
+        CoreRuntime::initialize(&data_dir),
+        Err(CoreRuntimeError::Ownership(
+            RuntimeOwnershipError::AlreadyOwned
+        ))
+    ));
+
+    drop(provider);
+    let replacement = CoreRuntime::initialize(&data_dir).unwrap();
+    drop(replacement);
+}
+
+#[cfg(unix)]
+#[test]
+fn production_provider_wiring_checks_core_ownership_before_installation_state() {
+    use crate::asr::provider::ProviderSelection;
+
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let runtime = CoreRuntime::initialize(&data_dir).unwrap();
+    let model_id = "sense-voice-small-int8-2024-07-17";
+    let selection = ProviderSelection::for_test(model_id);
+
+    let missing = runtime
+        .create_provider(model_id, selection.clone())
+        .unwrap_err();
+    assert!(missing.detail().contains("model_not_installed"));
+
+    let lock = data_dir.join("asr-worker.lock");
+    fs::rename(&lock, data_dir.join("old-lock")).unwrap();
+    fs::write(&lock, b"replacement").unwrap();
+    let invalidated = runtime.create_provider(model_id, selection).unwrap_err();
+    assert!(invalidated.detail().contains("runtime_ownership_lost"));
+    assert!(!invalidated.detail().contains("model_not_installed"));
+}
 
 #[test]
 fn imported_audio_is_copied_and_hashed_without_touching_the_source() {

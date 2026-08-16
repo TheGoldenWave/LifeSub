@@ -256,6 +256,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
 
 impl<T: HttpTransport> ModelManager<T, Catalog> {
     pub fn reconcile_all_anchored(&self) -> Result<(), ManagerError> {
+        self.ensure_runtime_current()?;
         let fs = self.anchored_fs()?;
         self.reconcile_trash_anchored(&fs)?;
         self.reconcile_downloads_anchored(&fs)?;

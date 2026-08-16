@@ -20,6 +20,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         &self,
         p: &ModelInstallPlan,
     ) -> Result<ReconcileOutcome, ManagerError> {
+        self.ensure_runtime_current()?;
         let dir = self.install_dir(p);
         if !real_dir(&dir)? {
             self.catalog
@@ -89,10 +90,12 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
 }
 
 impl<T: HttpTransport> ModelManager<T, Catalog> {
-    pub fn into_catalog(self) -> Catalog {
+    #[cfg(test)]
+    pub(crate) fn into_catalog(self) -> Catalog {
         self.catalog
     }
     pub fn reconcile_all(&self) -> Result<(), ManagerError> {
+        self.ensure_runtime_current()?;
         self.reconcile_trash()?;
         self.reconcile_downloads()?;
         self.reconcile_staging()?;

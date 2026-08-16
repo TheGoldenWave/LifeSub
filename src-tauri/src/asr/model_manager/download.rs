@@ -90,6 +90,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             execution_leases: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            runtime_ownership: None,
             #[cfg(test)]
             available_space_override: None,
             #[cfg(test)]
@@ -100,7 +101,13 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             available_space_sequence: None,
         }
     }
-    pub fn new_anchored(root: impl AsRef<Path>, root_dir: File, transport: T, catalog: C) -> Self {
+    pub(crate) fn new_anchored_owned(
+        root: impl AsRef<Path>,
+        root_dir: File,
+        transport: T,
+        catalog: C,
+        runtime_ownership: ModelRuntimeOwnership,
+    ) -> Self {
         Self {
             storage: storage::ModelStorage::anchored(root.as_ref().to_path_buf(), root_dir),
             transport,
@@ -109,6 +116,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             execution_leases: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            runtime_ownership: Some(runtime_ownership),
             #[cfg(test)]
             available_space_override: None,
             #[cfg(test)]
@@ -116,6 +124,28 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             #[cfg(test)]
             install_fault: None,
             #[cfg(test)]
+            available_space_sequence: None,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn new_anchored(
+        root: impl AsRef<Path>,
+        root_dir: File,
+        transport: T,
+        catalog: C,
+    ) -> Self {
+        Self {
+            storage: storage::ModelStorage::anchored(root.as_ref().to_path_buf(), root_dir),
+            transport,
+            catalog,
+            observed_sherpa_runtime: None,
+            execution_leases: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            runtime_ownership: None,
+            available_space_override: None,
+            delete_marker_fault: None,
+            install_fault: None,
             available_space_sequence: None,
         }
     }
@@ -169,6 +199,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         d: &DeviceProfile,
         c: F,
     ) -> Result<String, ManagerError> {
+        self.ensure_runtime_current()?;
         validate_component("model_id", id)?;
         let p = resolve_current_plan(id)?;
         self.download_only(&p, d, c)
@@ -179,6 +210,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         d: &DeviceProfile,
         c: F,
     ) -> Result<StoredInstallation, ManagerError> {
+        self.ensure_runtime_current()?;
         validate_component("model_id", id)?;
         let p = resolve_current_plan(id)?;
         self.download_and_install(&p, d, c)
@@ -189,6 +221,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         d: &DeviceProfile,
         c: F,
     ) -> Result<String, ManagerError> {
+        self.ensure_runtime_current()?;
         validate_device(&p.device, d)?;
         validate_plan(p)?;
         self.preflight_disk(p, None)?;
@@ -203,6 +236,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         d: &DeviceProfile,
         c: F,
     ) -> Result<(), ManagerError> {
+        self.ensure_runtime_current()?;
         validate_component("download_id", id)?;
         validate_device(&p.device, d)?;
         validate_plan(p)?;
@@ -216,6 +250,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         d: &DeviceProfile,
         c: F,
     ) -> Result<(), ManagerError> {
+        self.ensure_runtime_current()?;
         validate_component("model_id", m)?;
         self.retry_download(&resolve_current_plan(m)?, id, d, c)
     }

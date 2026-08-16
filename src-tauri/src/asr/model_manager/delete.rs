@@ -3,11 +3,13 @@ use super::*;
 
 impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
     pub fn delete_model(&self, id: &str) -> Result<(), ManagerError> {
+        self.ensure_runtime_current()?;
         validate_component("model_id", id)?;
         let p = resolve_current_plan(id)?;
         self.delete(id, &self.install_dir(&p))
     }
     pub(crate) fn delete(&self, id: &str, install: &Path) -> Result<(), ManagerError> {
+        self.ensure_runtime_current()?;
         validate_component("model_id", id)?;
         let mut registry = self.execution_leases.lock().unwrap();
         if registry.get(id).copied().unwrap_or(0) != 0 {

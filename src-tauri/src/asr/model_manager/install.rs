@@ -105,6 +105,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         d: &DeviceProfile,
         c: F,
     ) -> Result<StoredInstallation, ManagerError> {
+        self.ensure_runtime_current()?;
         let id = self.download_only(p, d, &c)?;
         if c() {
             self.catalog
@@ -121,6 +122,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         p: &ModelInstallPlan,
         id: &str,
     ) -> Result<StoredInstallation, ManagerError> {
+        self.ensure_runtime_current()?;
         validate_component("download_id", id)?;
         validate_plan(p)?;
         self.complete_install(p, id)
@@ -130,6 +132,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         m: &str,
         id: &str,
     ) -> Result<StoredInstallation, ManagerError> {
+        self.ensure_runtime_current()?;
         validate_component("model_id", m)?;
         self.retry_install(&resolve_current_plan(m)?, id)
     }

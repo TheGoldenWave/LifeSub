@@ -44,7 +44,7 @@ impl AppState {
         self.runtime
             .ensure_current()
             .map_err(|error| format!("{error:?}"))?;
-        mutation(self.runtime.catalog())
+        mutation(self.runtime.catalog_ref())
     }
 
     fn create_capture_session(&self, title: String) -> Result<CaptureSession, String> {
@@ -83,7 +83,7 @@ impl AppState {
             .try_clone_data_directory()
             .map_err(|error| format!("{error:?}"))?;
         EvidenceService::import_audio_with_existing_catalog(
-            self.runtime.catalog(),
+            self.runtime.catalog_ref(),
             data_dir,
             &session,
             path,
@@ -113,7 +113,7 @@ impl AppState {
         checked.wait();
         resume.wait();
         EvidenceService::import_audio_with_existing_catalog(
-            self.runtime.catalog(),
+            self.runtime.catalog_ref(),
             data_dir,
             &session,
             path,
@@ -135,7 +135,7 @@ impl AppState {
             .try_clone_data_directory()
             .map_err(|error| format!("{error:?}"))?;
         EvidenceService::import_audio_with_existing_catalog_and_commit_barriers(
-            self.runtime.catalog(),
+            self.runtime.catalog_ref(),
             data_dir,
             &session,
             path,
@@ -203,7 +203,7 @@ pub fn search_transcripts(
 ) -> Result<Vec<TranscriptSegment>, String> {
     state
         .runtime
-        .catalog()
+        .catalog_ref()
         .search_segments(&query)
         .map_err(|error| error.to_string())
 }
@@ -260,7 +260,7 @@ mod tests {
             .unwrap();
         let source = parent.path().join("sample.wav");
         fs::write(&source, b"audio").unwrap();
-        let baseline_sessions = state.runtime.catalog().session_count().unwrap();
+        let baseline_sessions = state.runtime.catalog_ref().session_count().unwrap();
         let lock = data_dir.join("asr-worker.lock");
         fs::rename(&lock, data_dir.join("old-lock")).unwrap();
         fs::write(&lock, b"replacement").unwrap();
@@ -296,13 +296,13 @@ mod tests {
         );
 
         assert_eq!(
-            state.runtime.catalog().session_count().unwrap(),
+            state.runtime.catalog_ref().session_count().unwrap(),
             baseline_sessions
         );
         assert_eq!(
             state
                 .runtime
-                .catalog()
+                .catalog_ref()
                 .persisted_session_state(&session.id)
                 .unwrap(),
             "idle"
@@ -310,13 +310,26 @@ mod tests {
         assert!(
             state
                 .runtime
-                .catalog()
+                .catalog_ref()
                 .list_revisions(&session.id)
                 .unwrap()
                 .is_empty()
         );
-        assert!(state.runtime.catalog().list_chunks().unwrap().is_empty());
-        assert!(state.runtime.catalog().search_segments("blocked").is_ok());
+        assert!(
+            state
+                .runtime
+                .catalog_ref()
+                .list_chunks()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            state
+                .runtime
+                .catalog_ref()
+                .search_segments("blocked")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -335,7 +348,10 @@ mod tests {
             .import_audio_file(session, source.to_string_lossy().into_owned())
             .unwrap();
 
-        assert_eq!(state.runtime.catalog().list_chunks().unwrap(), vec![chunk]);
+        assert_eq!(
+            state.runtime.catalog_ref().list_chunks().unwrap(),
+            vec![chunk]
+        );
     }
 
     #[test]
@@ -368,8 +384,15 @@ mod tests {
 
         let (state, result) = import.join().unwrap();
         assert!(result.is_err());
-        assert_eq!(state.runtime.catalog().session_count().unwrap(), 0);
-        assert!(state.runtime.catalog().list_chunks().unwrap().is_empty());
+        assert_eq!(state.runtime.catalog_ref().session_count().unwrap(), 0);
+        assert!(
+            state
+                .runtime
+                .catalog_ref()
+                .list_chunks()
+                .unwrap()
+                .is_empty()
+        );
         assert!(audio_files(&data_dir).is_empty());
         assert!(audio_files(&anchored_data_dir).is_empty());
     }
@@ -404,8 +427,15 @@ mod tests {
 
         let (state, result) = import.join().unwrap();
         assert!(result.is_err());
-        assert_eq!(state.runtime.catalog().session_count().unwrap(), 0);
-        assert!(state.runtime.catalog().list_chunks().unwrap().is_empty());
+        assert_eq!(state.runtime.catalog_ref().session_count().unwrap(), 0);
+        assert!(
+            state
+                .runtime
+                .catalog_ref()
+                .list_chunks()
+                .unwrap()
+                .is_empty()
+        );
         assert!(audio_files(&data_dir).is_empty());
         assert!(audio_files(&anchored_data_dir).is_empty());
     }

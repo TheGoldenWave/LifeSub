@@ -2,7 +2,7 @@ use chrono::DateTime;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
 
-use crate::asr::job::ClaimToken;
+use crate::asr::job::{ClaimToken, EnqueueJob, EnqueueOutcome, InputValidation};
 use crate::catalog::PublicationError;
 #[cfg(test)]
 use crate::catalog::PublicationFailurePoint;
@@ -15,6 +15,11 @@ use super::Catalog;
 pub(crate) enum JobCatalogError {
     Ownership(RuntimeOwnershipError),
     Catalog(rusqlite::Error),
+}
+
+pub(crate) enum EnqueueCommitError {
+    Job(JobCatalogError),
+    Input(InputValidation),
 }
 
 pub(crate) struct JobCatalog<'a> {
@@ -39,6 +44,36 @@ impl<'a> JobCatalog<'a> {
         self.ensure()?;
         self.catalog
             .claim_asr_job(claimed_by, now, lease_expires_at)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn active_job_for_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<String>, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .active_asr_job_for_fingerprint(fingerprint)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn commit_enqueue(
+        &self,
+        job: &EnqueueJob,
+    ) -> Result<EnqueueOutcome, EnqueueCommitError> {
+        self.ensure().map_err(EnqueueCommitError::Job)?;
+        self.catalog.enqueue_asr_job(job)
+    }
+
+    pub(crate) fn validate_input(
+        &self,
+        session_id: &str,
+        chunk_id: &str,
+        input_sha256: &str,
+    ) -> Result<InputValidation, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .validate_asr_input(session_id, chunk_id, input_sha256)
             .map_err(JobCatalogError::Catalog)
     }
 
@@ -248,6 +283,153 @@ pub(crate) struct ReadyModel<'a> {
 }
 
 impl Catalog {
+    fn validate_asr_input(
+        &self,
+        session_id: &str,
+        chunk_id: &str,
+        input_sha256: &str,
+    ) -> rusqlite::Result<InputValidation> {
+        let row = self
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT session_id, sha256, integrity_state FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((stored_session_id, stored_sha256, integrity_state)) = row else {
+            return Ok(InputValidation::Missing);
+        };
+        if stored_session_id != session_id || stored_sha256 != input_sha256 {
+            return Ok(InputValidation::IdentityMismatch);
+        }
+        if integrity_state != "available" {
+            return Ok(InputValidation::Unavailable);
+        }
+        Ok(InputValidation::Available)
+    }
+
+    fn active_asr_job_for_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> rusqlite::Result<Option<String>> {
+        self.connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM asr_jobs
+                 WHERE fingerprint = ?1
+                   AND state IN ('queued', 'blocked_model', 'preparing', 'transcribing')",
+                [fingerprint],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    fn enqueue_asr_job(&self, job: &EnqueueJob) -> Result<EnqueueOutcome, EnqueueCommitError> {
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| EnqueueCommitError::Job(JobCatalogError::Catalog(error)))?;
+        let input = transaction
+            .query_row(
+                "SELECT session_id, sha256, integrity_state FROM chunks WHERE id = ?1",
+                [&job.chunk_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| EnqueueCommitError::Job(JobCatalogError::Catalog(error)))?;
+        let input = match input {
+            None => InputValidation::Missing,
+            Some((session_id, sha256, _))
+                if session_id != job.session_id || sha256 != job.input_sha256 =>
+            {
+                InputValidation::IdentityMismatch
+            }
+            Some((_, _, integrity_state)) if integrity_state != "available" => {
+                InputValidation::Unavailable
+            }
+            Some(_) => InputValidation::Available,
+        };
+        if input != InputValidation::Available {
+            return Err(EnqueueCommitError::Input(input));
+        }
+        let existing = transaction
+            .query_row(
+                "SELECT id FROM asr_jobs
+                 WHERE fingerprint = ?1
+                   AND state IN ('queued', 'blocked_model', 'preparing', 'transcribing')",
+                [&job.fingerprint],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| EnqueueCommitError::Job(JobCatalogError::Catalog(error)))?;
+        if let Some(job_id) = existing {
+            transaction
+                .commit()
+                .map_err(|error| EnqueueCommitError::Job(JobCatalogError::Catalog(error)))?;
+            return Ok(EnqueueOutcome {
+                job_id,
+                inserted: false,
+            });
+        }
+        transaction
+            .execute(
+                "INSERT INTO asr_jobs(
+               id, session_id, chunk_id, provider, model_id, manifest_version, archive_sha256,
+               required_file_hashes_json, model_source_json, vad_model_id, vad_manifest_version,
+               vad_archive_sha256, vad_required_file_hashes_json, parameters_json, input_sha256,
+               fingerprint, state, attempt_count, claim_generation, max_attempts, available_at,
+               created_at, updated_at
+             ) VALUES(
+               ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+               'queued', 0, 0, 3, ?17, ?18, ?18
+             )",
+                params![
+                    job.id,
+                    job.session_id,
+                    job.chunk_id,
+                    job.provider,
+                    job.model_id,
+                    job.manifest_version,
+                    job.archive_sha256,
+                    job.required_file_hashes_json,
+                    job.model_source_json,
+                    job.vad_model_id,
+                    job.vad_manifest_version,
+                    job.vad_archive_sha256,
+                    job.vad_required_file_hashes_json,
+                    job.parameters_json,
+                    job.input_sha256,
+                    job.fingerprint,
+                    job.available_at,
+                    job.created_at,
+                ],
+            )
+            .map_err(|error| EnqueueCommitError::Job(JobCatalogError::Catalog(error)))?;
+        transaction
+            .commit()
+            .map_err(|error| EnqueueCommitError::Job(JobCatalogError::Catalog(error)))?;
+        Ok(EnqueueOutcome {
+            job_id: job.id.clone(),
+            inserted: true,
+        })
+    }
+
     fn claim_asr_job(
         &self,
         claimed_by: &str,

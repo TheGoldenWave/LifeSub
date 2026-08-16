@@ -8,6 +8,7 @@ pub mod qwen3_asr;
 pub mod receipt;
 pub mod runtime_qualifier;
 pub mod sense_voice;
+pub mod service;
 pub mod settings;
 pub mod vad;
 pub mod whisper;

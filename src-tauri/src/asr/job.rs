@@ -7,7 +7,9 @@ use crate::catalog::PublicationError;
 #[cfg(test)]
 use crate::catalog::PublicationFailurePoint;
 use crate::catalog::jobs::OwnedMutationResult;
-use crate::catalog::jobs::{CancelResult, JobCatalog, JobCatalogError, ReadyModel, RetryResult};
+use crate::catalog::jobs::{
+    CancelResult, EnqueueCommitError, JobCatalog, JobCatalogError, ReadyModel, RetryResult,
+};
 use crate::domain::AsrErrorCode;
 use crate::domain::{ProviderReceipt, TranscriptRevision, TranscriptSegmentPublication};
 use crate::service::{JobOwnershipCapability, RuntimeOwnershipError};
@@ -53,6 +55,42 @@ pub struct ModelReadiness {
     pub runtime_identity_json: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EnqueueJob {
+    pub id: String,
+    pub session_id: String,
+    pub chunk_id: String,
+    pub provider: String,
+    pub model_id: String,
+    pub manifest_version: String,
+    pub archive_sha256: String,
+    pub required_file_hashes_json: String,
+    pub model_source_json: String,
+    pub vad_model_id: Option<String>,
+    pub vad_manifest_version: Option<String>,
+    pub vad_archive_sha256: Option<String>,
+    pub vad_required_file_hashes_json: Option<String>,
+    pub parameters_json: String,
+    pub input_sha256: String,
+    pub fingerprint: String,
+    pub available_at: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EnqueueOutcome {
+    pub job_id: String,
+    pub inserted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InputValidation {
+    Available,
+    Missing,
+    Unavailable,
+    IdentityMismatch,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CancellationOutcome {
     Cancelled,
@@ -76,9 +114,11 @@ pub enum JobError {
     CoordinatorAlreadyActive,
     InvalidTransition,
     ModelNotReady,
+    Input(AsrErrorCode),
 }
 
-pub(crate) struct JobRepository<'a, C = SystemClock> {
+#[doc(hidden)]
+pub struct JobRepository<'a, C = SystemClock> {
     jobs: JobCatalog<'a>,
     boot_id: String,
     clock: C,
@@ -161,6 +201,45 @@ impl<'a, C: Clock> JobRepository<'a, C> {
                     },
                 })
             })
+            .map_err(map_catalog_error)
+    }
+
+    pub(crate) fn now(&self) -> String {
+        canonical_time(self.clock.now())
+    }
+
+    pub(crate) fn active_job_for_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<String>, JobError> {
+        self.jobs
+            .active_job_for_fingerprint(fingerprint)
+            .map_err(map_catalog_error)
+    }
+
+    pub(crate) fn commit_enqueue(&self, job: EnqueueJob) -> Result<EnqueueOutcome, JobError> {
+        self.jobs.commit_enqueue(&job).map_err(|error| match error {
+            EnqueueCommitError::Job(error) => map_catalog_error(error),
+            EnqueueCommitError::Input(InputValidation::IdentityMismatch) => {
+                JobError::Input(AsrErrorCode::InputIntegrityFailed)
+            }
+            EnqueueCommitError::Input(InputValidation::Missing | InputValidation::Unavailable) => {
+                JobError::Input(AsrErrorCode::InputUnavailable)
+            }
+            EnqueueCommitError::Input(InputValidation::Available) => {
+                JobError::Input(AsrErrorCode::RecoveryRequired)
+            }
+        })
+    }
+
+    pub(crate) fn validate_input(
+        &self,
+        session_id: &str,
+        chunk_id: &str,
+        input_sha256: &str,
+    ) -> Result<InputValidation, JobError> {
+        self.jobs
+            .validate_input(session_id, chunk_id, input_sha256)
             .map_err(map_catalog_error)
     }
 

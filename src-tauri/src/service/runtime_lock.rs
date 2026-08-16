@@ -14,9 +14,11 @@ use crate::asr::job::{
     Clock, JobControl, JobCoordinator, JobCoordinatorReservation, JobError, JobRepository,
     SystemClock,
 };
+use crate::asr::model_lookup::ModelLookup;
 #[cfg(feature = "asr-runtime")]
 use crate::asr::model_manager::FullSherpaRuntimeIdentity;
 use crate::asr::model_manager::{ManagerError, ModelManager, ReqwestTransport};
+use crate::asr::service::{AsrService, EnqueueProviderFactory, EnqueueReservations};
 use crate::catalog::Catalog;
 
 use super::{EvidenceService, ServiceError};
@@ -64,6 +66,7 @@ pub struct CoreRuntime {
     ownership: RuntimeOwnershipGuard,
     boot_id: String,
     coordinator_reserved: AtomicBool,
+    enqueue_reservations: EnqueueReservations,
 }
 
 pub(crate) struct JobOwnershipCapability<'a> {
@@ -409,6 +412,7 @@ impl CoreRuntime {
             ownership,
             boot_id,
             coordinator_reserved: AtomicBool::new(false),
+            enqueue_reservations: EnqueueReservations::default(),
         })
     }
 
@@ -550,9 +554,46 @@ impl CoreRuntime {
         JobControl::from_core(self.job_repository())
     }
 
+    pub fn asr_service<'a, M, F>(
+        &'a self,
+        models: &'a M,
+        providers: &'a F,
+    ) -> AsrService<'a, M, F, SystemClock>
+    where
+        M: ModelLookup,
+        F: EnqueueProviderFactory,
+    {
+        AsrService::new(
+            self.job_repository(),
+            &self.enqueue_reservations,
+            models,
+            providers,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn job_repository_with_clock<C: Clock>(&self, clock: C) -> JobRepository<'_, C> {
         self.build_job_repository(&self.catalog, clock)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn asr_service_with_clock<'a, M, F, C>(
+        &'a self,
+        clock: C,
+        models: &'a M,
+        providers: &'a F,
+    ) -> AsrService<'a, M, F, C>
+    where
+        M: ModelLookup,
+        F: EnqueueProviderFactory,
+        C: Clock,
+    {
+        AsrService::new(
+            self.job_repository_with_clock(clock),
+            &self.enqueue_reservations,
+            models,
+            providers,
+        )
     }
 
     #[cfg(test)]

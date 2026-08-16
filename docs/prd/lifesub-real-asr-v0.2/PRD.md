@@ -130,7 +130,7 @@ ui --> user: 展示真实转写和来源
 1. 用户选择自动语言检测或 Provider 支持的具体语言。
 2. 用户调整线程数。
 3. 用户开启或关闭 VAD。
-4. SenseVoice 用户设置 ITN；Whisper 用户选择 transcribe 或 translate；Qwen3-ASR 用户可选择自动语言检测或固定支持语言。
+4. SenseVoice 用户设置 ITN；Whisper 用户选择 transcribe 或 translate；Qwen3-ASR 0.6B 固定使用自动语言检测，Qwen3-ASR 1.7B 可选择自动检测或 manifest 明确支持的固定语言。
 5. 用户保存设置。
 
 **预期结果**:
@@ -146,11 +146,15 @@ ui --> user: 展示真实转写和来源
 | 线程数超出范围 | UI 限制输入，Core 再次校验并拒绝非法值 |
 | 指定语言不受模型支持 | 阻止保存并提示可选语言 |
 | Whisper translate 与非 Whisper Provider 组合 | Core 返回 invalid_provider_parameter |
+| Qwen3-ASR 0.6B 提交显式语言 | Settings 与 Core 均返回 invalid_provider_parameter；不得把 language 改写成 hotwords 或运行时 metadata |
 
 **业务规则与数据约束**:
 
 - 线程数为整数，范围 `1..=max(1, logical_cpu_count)`，默认不超过 4。
-- SenseVoice 支持 auto、zh、en、ja、ko、yue；Whisper 与 Qwen3-ASR 语言目录由模型 manifest 声明。
+- SenseVoice 支持 auto、zh、en、ja、ko、yue。
+- Whisper runtime 语言值只能是 `auto` 或 manifest 声明且 sherpa Whisper 接受的具体语言代码；`multilingual` 仅描述模型能力，不是可提交的 runtime language，必须从可选值、Job 参数和 Receipt 中删除。
+- Qwen3-ASR 0.6B 的 sherpa `OfflineQwen3ASRModelConfig` 没有 language 字段，因此 V0.2 只允许 `auto`；显式语言必须在 Settings/Core 边界返回 `invalid_provider_parameter`，也不得写入 `hotwords`。
+- Qwen3-ASR 1.7B 的 Candle adapter 可把 `auto` 映射为 `TranscribeOptions.language = None`，并把 manifest 支持的具体语言映射为 crate 接受的规范英文语言名；未知代码或模型不支持的语言返回 `invalid_provider_parameter`。
 - VAD 默认开启；V0.2 将 sherpa-onnx `1.13.5`（commit `3dc7c569f31ca2cd4a20ed6f7db780327e6714c5`）源码默认值冻结为版本化 manifest：`threshold = 0.5`、`min_silence_duration = 0.5 s`、`min_speech_duration = 0.25 s`、`max_speech_duration = 20 s`、`window_size = 512` samples、`sample_rate = 16000 Hz`、`num_threads = 1`、`provider = "cpu"`。来源为 `sherpa-onnx/csrc/silero-vad-model-config.h` 与 `sherpa-onnx/csrc/vad-model-config.h`；高级参数不在首版开放。
 - LifeSub 的 `200 ms` speech padding 与最长 `25 s` 窗口/硬切策略属于音频分段编排，不属于 Silero VAD model config，也不得写入 VAD manifest 冒充上游默认值。
 - SenseVoice ITN 默认开启；Whisper task 默认 `transcribe`。
@@ -193,6 +197,7 @@ ui --> user: 展示真实转写和来源
 
 - 首发模型：SenseVoiceSmall INT8；Whisper Tiny、Base、Small；Qwen3-ASR 0.6B INT8；Qwen3-ASR 1.7B。
 - Qwen3-ASR Provider 支持两个独立运行时身份：0.6B 使用 sherpa-onnx 1.13.5，1.7B 使用固定 Git commit 的 `qwen3-asr` 0.2.2 + Candle + Metal；选择 1.7B 时不得回退到 0.6B、sherpa 或 CPU 替代路径。
+- Qwen3-ASR 1.7B 必须由 LifeSub 直接调用 `candle_core::Device::new_metal(0)` 并验证实际 backend/device 为 Metal；禁止调用 crate 的 `best_device()`，因为该 helper 在 Metal 初始化失败时会回退 CPU。
 - Qwen3-ASR 1.7B 是当前 M4/24GB、macOS 14+、arm64、Metal 设备上的正式可安装模型。16 GB 设备尚无 LifeSub 实测证据，本版本仅展示模型与“需要 24 GB”原因，`selectable = true`、`installable = false`、`executable = false`；不得引用上游基准扩展正式支持范围。
 - 模型保存在应用数据目录 `models/asr/<provider>/<model-id>/<manifest-version>-<bundle-identity>/`，已安装版本不可原地替换。
 - `model_downloads` 持久化 bundle 级下载状态，`model_download_artifacts` 持久化每个文件的 source identity、bytes、ETag/Last-Modified、临时路径、checkpoint、hash 与状态；`model_installations` 保存 `installed_unqualified | runtime_qualified | deleting`，结构失败使用稳定错误码而不发布安装，runtime qualification 失败保持 `installed_unqualified` 而不误标 corrupt。
@@ -227,7 +232,7 @@ ui --> user: 展示真实转写和来源
 
 | 异常场景 | 系统响应 |
 |---|---|
-| 模型未就绪 | Job 进入 blocked_model，可在模型安装后重试 |
+| 模型未就绪 | Job 进入 blocked_model；模型变为可执行后只显示“可重试”，必须由用户通过 Application retry 明确入队 |
 | 音频无法解码 | Job 进入 failed，错误码 unsupported_or_corrupt_audio |
 | 用户取消 | Job 进入 cancelled，不创建空 revision |
 | 单段转写失败 | 整个 Job 失败并保留已计算诊断，不发布部分 revision |
@@ -237,10 +242,15 @@ ui --> user: 展示真实转写和来源
 
 - Job 状态枚举：`queued | blocked_model | preparing | transcribing | succeeded | failed | cancelled`。
 - Job 使用 CAS claim、可续租 lease、最多 3 次总 claim（最多 2 次自动恢复）和固定退避；不存在 `failed_recoverable` 状态。
-- 唯一 ASR Worker 必须持有进程级 `asr-worker.lock`；未取得锁的并行实例不得恢复或 claim 任务。
+- 唯一 ASR Worker 只能由 Task 4 full-Core lifetime guard 的持有者启动；不得再创建独立 `asr-worker.lock`。未持有该 guard 的实例不得恢复或 claim 任务。
+- Task 4 已建立 `service/runtime_lock.rs` 的 full-Core ownership 基线：任何 writable Catalog open/migration/reconciliation、导入与受保护 mutation 都必须先取得同一 lifetime guard。Task 9 复用该既有 guard 驱动 Job Coordinator，不创建第二套锁或 owner；Task 11 只把既有 owner 迁移/扩展为 primary CoreRuntime + socket，并使 secondary 通过 IPC 工作。
 - 每次 claim 递增 `claim_generation`；续租、状态转换和成功事务必须校验 claimed_by 与 generation，过期 Worker 不得发布结果。
+- claim 还必须要求关联 Chunk 的 `integrity_state = available`，并由持有 Core ownership guard 的 Job Coordinator 发起；原始 Catalog/Repository 句柄不能绕过进程锁直接 claim 或 recovery。
+- `available_at`、lease 与更新时间统一使用 UTC RFC 3339 毫秒格式 `YYYY-MM-DDTHH:MM:SS.sssZ`，写入前规范化，比较和测试不得混用本地时间或不同精度字符串。
+- 模型从不可执行变为可执行时，`blocked_model` Job 保持原状态并呈现 ready-to-retry，不自动转 `queued`。Application `retry_asr_job` 经用户确认后复用同一 Job ID，原子开启新的手动 execution generation：递增 `claim_generation`、重置本轮 `attempt_count = 0`、清空旧 ownership/lease/cancel marker 后转 `queued`；仅允许 `blocked_model` 或 `failed`，`cancelled` 需重新 enqueue/retranscribe。Task 11 的 operation/replay 记录保存该 generation 的审计信息，active fingerprint 唯一约束继续成立。
+- 自动恢复第 3 次 claim 耗尽后进入 `failed/recovery_retry_exhausted`；该值是稳定 `AsrErrorCode`，不是仅供内部日志使用的字符串。
 - Audio Chunk 必须先持久化，ASR 失败不得删除或修改原始音频。
-- Provider Receipt 和 Revision 仅在完整结果可提交时使用同一事务写入。
+- Task 9 只负责 claim、renew、`preparing -> transcribing`、fail、cancel 和 recovery token，不提供独立 complete/succeeded 转换。Provider Receipt、Revision、Segment、FTS 与 `succeeded` 仅由 Task 10 在完整结果可提交时使用同一事务写入。
 - 空文本或只有模型标签的结果不创建成功 revision。
 
 #### 5.3.2 使用当前设置重新转写
@@ -314,7 +324,7 @@ ui --> user: 展示真实转写和来源
 | 交互链路 | 数据流转 | 影响 |
 |---|---|---|
 | 设置选择 -> 创建 Job -> Provider 执行 | 设置以不可变快照写入 Job | 后续设置变化不影响运行中任务 |
-| 模型下载 -> 就绪 -> 重试 blocked_model Job | Model Manager 发布就绪事件 | 用户确认后重试，不自动消耗资源 |
+| 模型下载 -> 就绪 -> 重试 blocked_model Job | Model Manager 只发布 ready-to-retry 提示；Application retry 经用户确认后开启同 Job 的新 generation | 不自动入队或消耗资源 |
 | ASR 成功 -> Revision -> FTS5 | 同一事务保存 Receipt、Revision、Segment | 搜索只看到完整成功结果 |
 | 重转写 -> 新 Revision -> Revision 切换 | 复用 Audio Chunk，不复制原音频 | 历史结果持续可审计 |
 
@@ -347,7 +357,7 @@ ui --> user: 展示真实转写和来源
 - **安全**: 本版本模型和音频均在本机处理；下载只允许 manifest 固定的 HTTPS 地址并强制 SHA-256 校验。
 - **数据一致性**: Audio Chunk 先提交；Receipt、Revision、Segment 和任务成功状态使用同一事务提交。
 - **来源完整性**: Chunk 使用 `available | corrupted | missing` 状态；非 available Chunk 不执行新 ASR，既有文本仍可读但标记音频来源不可重新验证。
-- **恢复**: 应用启动 5 秒内处理过期 lease；最多自动恢复 3 次，之后进入 failed 并保留诊断。
+- **恢复**: 应用启动 5 秒内处理过期 lease；每个手动 execution generation 最多 3 次总 claim，之后进入 `failed/recovery_retry_exhausted` 并保留诊断。
 - **兼容性**: 首发验证 macOS 14+ Apple Silicon；Qwen3-ASR 1.7B 本版本正式支持 24 GB unified memory、Metal 可用，并固定 `qwen3-asr` crate 0.2.2 Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`；16 GB 与 Intel 不作为 V0.2 支持或发布 Gate。
 - **许可**: sherpa-onnx 与 Qwen 模型资产遵循各自上游许可；`qwen3-asr` Rust crate 0.2.2 为 MIT；SenseVoice 与 Whisper 上游声明 MIT。发布前逐个冻结 crate、传递依赖、模型文件 notice、来源、revision、转换/兼容链和 hash，应用内展示。
 
@@ -373,7 +383,7 @@ ui --> user: 展示真实转写和来源
 - [ ] 固定普通话 fixture 的 SenseVoice CER <= 20%；固定英语 fixture 的 Whisper WER <= 20%；中英混合关键短语召回率为 100%。
 - [ ] Segment 时间中位误差 <= 500 ms、最大误差 <= 1.5 s；所有时间范围单调、不重叠且位于音频时长内。
 - [ ] CER/WER、关键短语与时间误差按技术设计固定的 NFKC、tokenization 和 Segment 配对协议计算。
-- [ ] ASR 运行中 UI heartbeat P95 漂移 <= 250 ms；取消请求 500 ms 内可见，基线任务 30 秒内停止。
+- [ ] ASR 运行中 UI heartbeat P95 漂移 <= 250 ms；取消请求 500 ms 内可见。同步 native call 只能在调用前后与 Task 7 的最多 25 秒窗口之间检查 token，因此最坏取消完成延迟为当前单个 25 秒窗口加边界开销，不宣称窗口内抢占，也不得使用 30 秒作为另一个合同。
 - [ ] 前端单测、Rust 单测、真实模型集成测试、Playwright 验收、生产构建和 Tauri desktop 编译全部通过。
 - [ ] 发布 bundle 同时包含可执行的静态 sherpa-onnx 与 Qwen3-ASR 1.7B Candle/Metal 路径；`otool -L`、Metal/Candle symbols、运行时版本、模型资产解析、签名、packaged smoke 和 DMG 验证通过。
 - [ ] 仓库、Git 历史和发布源码包均不包含模型权重；权重只由固定 manifest 下载到用户模型目录。

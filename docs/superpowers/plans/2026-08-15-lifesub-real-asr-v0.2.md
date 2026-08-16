@@ -38,13 +38,13 @@
 - Create `src-tauri/src/asr/sense_voice.rs`: sherpa-onnx SenseVoice adapter.
 - Create `src-tauri/src/asr/whisper.rs`: sherpa-onnx Whisper adapter.
 - Create `src-tauri/src/asr/qwen3_asr.rs`: Qwen 0.6B sherpa and Qwen 1.7B Candle/Metal adapters with exact dispatch and compatibility Gate.
-- Create `src-tauri/src/asr/job.rs`: job state machine, singleton lock, claims, leases, fencing, cancellation.
+- Create `src-tauri/src/asr/job.rs`: job state machine consuming the Task 4 ownership guard, claims, leases, fencing, cancellation.
 - Create `src-tauri/src/asr/service.rs`: job execution and atomic Receipt/Revision publication.
-- Create `src-tauri/src/core_runtime.rs`: single owner of Catalog, capture state, reconciliation, model manager, and ASR worker.
+- Create `src-tauri/src/core_runtime.rs`: primary host extracted around Task 4's existing guarded owner for Catalog, capture state, reconciliation, model manager, sockets, and ASR worker.
 - Create `src-tauri/src/tool_api.rs`: versioned transport-independent Local Tool API contract and handlers.
 - Create `src-tauri/src/host_control.rs`: non-public Host Event subscription and open-intent claim/finish service.
 - Create `src-tauri/src/local_ipc.rs`: current-user Unix socket adapter over `tool_api`.
-- Create `src-tauri/src/runtime_lock.rs`: anchored full-Core ownership lock and socket lifecycle primitives.
+- Modify `src-tauri/src/service/runtime_lock.rs`: preserve the Task 4 anchored full-Core ownership guard and extend its primary-host/socket lifecycle integration.
 - Create `src-tauri/src/asr/model_lookup.rs`: minimal model lookup interface used by settings and the static manifest.
 - Create `src-tauri/src/acceptance.rs`: hidden desktop acceptance scenarios using the production event loop.
 - Create `src-tauri/src/bin/lifesub-asr-gate.rs`: single real-model quality Gate runner.
@@ -305,11 +305,22 @@ git commit -m "feat: define validated ASR settings"
 
 **Files:**
 
+- Modify: `src-tauri/Cargo.toml`
+- Modify: `src-tauri/Cargo.lock`
 - Modify: `src-tauri/src/service.rs`
+- Create/Modify: `src-tauri/src/service/audio_store.rs`
+- Create: `src-tauri/src/service/error.rs`
+- Create: `src-tauri/src/service/evidence_uri.rs`
+- Create: `src-tauri/src/service/runtime_lock.rs`
 - Modify: `src-tauri/src/catalog.rs`
+- Create/Modify: `src-tauri/src/catalog/chunks.rs`
+- Modify: `src-tauri/src/catalog_test.rs`
+- Modify: `src-tauri/src/commands.rs`
 - Modify: `src-tauri/src/service_test.rs`
 
-- [ ] **Step 1: Add failing crash-window and integrity tests**
+**Completed baseline:** commits `d355f5c`, `3bae68d` and `2a587c9` completed crash-safe import plus full-Core ownership. `service/runtime_lock.rs` now acquires the canonical-parent lifetime guard before any writable Catalog open/migration/reconciliation; guarded service/command entry points own import and mutation access, second instances fail closed, and reconciliation cannot run through an unguarded AppState path. Tasks 9-15 must extend this baseline rather than recreate ownership.
+
+- [x] **Step 1: Add failing crash-window, integrity and ownership tests**
 
 Test temporary write, final rename, orphan cleanup, missing final file, changed bytes, and re-hash before ASR.
 
@@ -318,15 +329,15 @@ assert_eq!(catalog.chunk_integrity(&chunk.id)?, ChunkIntegrityState::Missing);
 assert_eq!(service.verify_chunk(&chunk.id), Err(ServiceError::InputUnavailable));
 ```
 
-- [ ] **Step 2: Run focused tests and observe direct-final-write failures**
+- [x] **Step 2: Run focused tests and observe direct-final-write/unguarded-owner failures**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features imported_audio`
 
-- [ ] **Step 3: Implement durable import**
+- [x] **Step 3: Implement durable import and full-Core ownership**
 
-Write and hash a same-directory temp file, `sync_all`, atomic rename, fsync the parent, then insert metadata. Add startup reconciliation and `available/corrupted/missing` behavior. Re-hash immediately before ASR.
+Write and hash a same-directory temp file, `sync_all`, atomic rename, fsync the parent, then insert metadata. Add startup reconciliation and `available/corrupted/missing` behavior. Re-hash immediately before ASR. Acquire and retain the canonical-parent full-Core ownership guard before writable Catalog open/migration/reconciliation; route commands and service mutations through the guarded facade.
 
-- [ ] **Step 4: Verify old source preservation and new failure behavior**
+- [x] **Step 4: Verify old source preservation, ownership and new failure behavior**
 
 Run:
 
@@ -335,14 +346,17 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features service_te
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features catalog_test
 ```
 
-Expected: PASS.
+Expected completed baseline: source preservation, crash windows, symlink/directory replacement, orphan grace, unknown integrity, guarded writable open/reconciliation and second-instance fail-closed tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
-git add src-tauri/src/service.rs src-tauri/src/service_test.rs src-tauri/src/catalog.rs
-git commit -m "feat: harden immutable audio imports"
+git show --stat d355f5c
+git show --stat 3bae68d
+git show --stat 2a587c9
 ```
+
+The completed Task 4 baseline spans the files listed above. Do not create another ownership implementation in Task 9 or Task 11.
 
 ### Chunk 1 Checkpoint
 
@@ -621,14 +635,27 @@ git commit -m "feat: prepare timestamped ASR audio"
 - Create: `src-tauri/src/asr/runtime_qualifier.rs`
 - Create: `src-tauri/src/asr_provider_test.rs`
 - Create: `src-tauri/src/asr_runtime_qualifier_test.rs`
+- Modify: `src-tauri/src/asr/manifest.rs`
 - Modify: `src-tauri/src/asr/model_manager.rs`
 - Modify: `src-tauri/src/catalog.rs`
+- Modify: `src-tauri/src/asr_manifest_test.rs`
+- Modify: `src-tauri/src/asr_settings_test.rs`
 - Modify: `src-tauri/src/asr_model_manager_test.rs`
 - Modify: `src-tauri/src/lib.rs`
+- Modify: `src-tauri/Cargo.toml`
+- Modify: `src-tauri/Cargo.lock`
 
 - [ ] **Step 1: Write fake-provider contract tests**
 
-Test provider/model/runtime identity, language mapping, SenseVoice ITN, Whisper task, Qwen3-ASR parameters, exact 0.6B sherpa dispatch, exact 1.7B Candle/Metal dispatch, empty-output rejection, cancellation between windows, and error mapping without loading native models. Assert 1.7B never constructs the sherpa adapter and 0.6B never constructs the Candle adapter; no failure path substitutes either model, runtime family, backend or device.
+Test provider/model/runtime identity, language mapping, SenseVoice ITN, Whisper task, Qwen3-ASR parameters, exact 0.6B sherpa dispatch, exact 1.7B Candle/Metal dispatch, empty-output rejection, cancellation between windows, and error mapping without loading native models.
+
+Freeze the language matrix against the actual runtime APIs:
+
+- Whisper accepts `auto` or a concrete manifest-supported runtime language code. Remove the `multilingual` pseudo-value from `LANG_WHISPER`; it describes model capability but is not passed to `OfflineWhisperModelConfig.language`, Job parameters or Receipt metadata.
+- sherpa 1.13.5 `OfflineQwen3ASRModelConfig` has no language field. Change the 0.6B manifest capability to `auto` only; explicit language must fail in Settings and provider construction with `invalid_provider_parameter`, and tests must prove it is not copied into `hotwords` or inert runtime metadata.
+- Qwen 1.7B maps `auto` to `TranscribeOptions.language = None` and each manifest code to the frozen crate prompt names from the design; unknown or unsupported codes fail before native inference.
+
+Assert 1.7B never constructs the sherpa adapter and 0.6B never constructs the Candle adapter; no failure path substitutes either model, runtime family, backend or device. Add a regression test that rejects `qwen3_asr::best_device()` semantics: simulated Metal construction failure must return an error and must not construct/load with `Device::Cpu`.
 
 Add RuntimeQualifier orchestration tests for 1.7B: start from `installed_unqualified`; ModelManager invokes a pure adapter smoke, fsyncs a temp marker, atomically publishes the marker, then uses Catalog CAS `installed_unqualified -> runtime_qualified`. Assert Provider never receives Catalog/DB handles and cannot write state. Cover smoke failure, marker-write/fsync/rename failure, crash before marker, crash after durable marker before CAS, DB qualified but marker missing/mismatched, concurrent qualifiers, idempotent same-identity retry and conflicting identity. Failure/recovery keeps or restores `installed_unqualified`, records stable qualification errors and never marks valid files corrupt.
 
@@ -651,13 +678,13 @@ pub trait AsrProvider: Send {
 }
 ```
 
-Providers receive validated PCM and do not read settings, select fallback, write SQLite, or assign revision numbers. The token is checked before and after the synchronous native call; window orchestration remains responsible for the documented maximum cancellation latency.
+Providers receive validated PCM and do not read settings, select fallback, write SQLite, or assign revision numbers. The token is checked before and after each synchronous native call and between Task 7 windows; there is no native-call preemption. Because every orchestration window is at most 25 seconds, the maximum cancellation contract is the current single window plus boundary overhead, not a separate 30-second promise.
 
 - [ ] **Step 4: Implement exact adapters behind their separate runtime features**
 
-Map SenseVoice, Whisper and Qwen 0.6B manifest files into `OfflineSenseVoiceModelConfig`, `OfflineWhisperModelConfig`, and `OfflineQwen3ASRModelConfig`. Enable the approved language/task/ITN values and capture sherpa runtime version/build identity.
+Map SenseVoice, Whisper and Qwen 0.6B manifest files into `OfflineSenseVoiceModelConfig`, `OfflineWhisperModelConfig`, and `OfflineQwen3ASRModelConfig`. Enable only the runtime-supported language/task/ITN values and capture sherpa runtime version/build identity. Do not invent a Qwen 0.6B language field or treat language as hotwords/metadata.
 
-For Qwen 1.7B, the adapter loads only the structurally installed five-file bundle through the Task 5-inspected `qwen3-asr` crate 0.2.2 at Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`, binds to M4/24GB Metal, runs a fixed short smoke and returns crate/git/Candle/backend/target/device identity. `RuntimeQualifier`, not the adapter, owns marker durability, Catalog CAS and reconciliation through ModelManager. Provider Factory only consumes a matching `runtime_qualified` installation/marker and never performs qualification. Neither adapter may fallback to the other.
+For Qwen 1.7B, add a direct target-specific optional dependency `candle-core = "=0.9.2"` with `default-features = false` and `features = ["metal"]`; `asr-qwen17-runtime` must own both `dep:qwen3-asr` and `dep:candle-core`. The adapter loads only the structurally installed five-file bundle through the Task 5-inspected `qwen3-asr` crate 0.2.2 at Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`, calls `candle_core::Device::new_metal(0)` directly, verifies `device.is_metal()` plus the actual backend/device identity, binds to the qualified M4/24GB Metal device, runs a fixed short smoke and returns crate/git/Candle/backend/target/device identity. It must not call `qwen3_asr::best_device()`, whose upstream contract falls back to CPU. `RuntimeQualifier`, not the adapter, owns marker durability, Catalog CAS and reconciliation through ModelManager. Provider Factory only consumes a matching `runtime_qualified` installation/marker and never performs qualification. Neither adapter may fallback to the other.
 
 - [ ] **Step 5: Run provider tests and compile both feature sets**
 
@@ -665,20 +692,23 @@ Run:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_provider
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_manifest
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_settings
 scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime asr_provider
 scripts/with-sherpa-runtime.sh cargo test --manifest-path src-tauri/Cargo.toml --features asr-qwen17-runtime asr_runtime_qualifier
 scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml --features 'asr-runtime,asr-qwen17-runtime'
 scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml --features desktop
 cargo metadata --manifest-path src-tauri/Cargo.toml --locked --format-version 1
 cargo tree --manifest-path src-tauri/Cargo.toml --locked -e features
+cargo tree --manifest-path src-tauri/Cargo.toml --locked -e features --features asr-qwen17-runtime -i candle-core@0.9.2
 ```
 
-The feature graph contract is: `asr-runtime` enables sherpa only; `asr-qwen17-runtime` enables the pinned qwen/Candle/Metal path only; production `desktop` must include both (or depend on a named `desktop-full` that includes both). The metadata/tree assertion must prove the selected production feature contains `qwen3-asr` and Metal; a desktop build containing only sherpa fails Task 8 and Task 15.
+The feature graph contract is: `asr-runtime` enables sherpa only; `asr-qwen17-runtime` enables the pinned qwen crate plus LifeSub's direct optional `candle-core 0.9.2/metal` dependency; production `desktop` must include both (or depend on a named `desktop-full` that includes both). The metadata/tree assertion must prove the selected production feature contains exactly the intended qwen/Candle Metal path, no CUDA/hub feature, and a LifeSub-owned direct candle-core edge; a desktop build containing only sherpa or only an indirect Candle dependency fails Task 8 and Task 15.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src-tauri/src/asr/provider.rs src-tauri/src/asr/sense_voice.rs src-tauri/src/asr/whisper.rs src-tauri/src/asr/qwen3_asr.rs src-tauri/src/asr/runtime_qualifier.rs src-tauri/src/asr_provider_test.rs src-tauri/src/asr_runtime_qualifier_test.rs src-tauri/src/asr/model_manager.rs src-tauri/src/asr_model_manager_test.rs src-tauri/src/catalog.rs src-tauri/src/lib.rs src-tauri/Cargo.toml src-tauri/Cargo.lock
+git add src-tauri/src/asr/provider.rs src-tauri/src/asr/sense_voice.rs src-tauri/src/asr/whisper.rs src-tauri/src/asr/qwen3_asr.rs src-tauri/src/asr/runtime_qualifier.rs src-tauri/src/asr/manifest.rs src-tauri/src/asr_provider_test.rs src-tauri/src/asr_runtime_qualifier_test.rs src-tauri/src/asr_manifest_test.rs src-tauri/src/asr_settings_test.rs src-tauri/src/asr/model_manager.rs src-tauri/src/asr_model_manager_test.rs src-tauri/src/catalog.rs src-tauri/src/lib.rs src-tauri/Cargo.toml src-tauri/Cargo.lock
 git commit -m "feat: add local ASR providers"
 ```
 
@@ -697,13 +727,17 @@ git commit -m "feat: add local ASR providers"
 - Create: `src-tauri/src/asr/job.rs`
 - Create: `src-tauri/src/asr_job_test.rs`
 - Modify: `src-tauri/src/catalog.rs`
+- Modify: `src-tauri/src/catalog_migration_test.rs`
+- Modify: `src-tauri/src/catalog_migration_test/*`
+- Modify: `src-tauri/src/domain.rs`
+- Modify: `src-tauri/src/asr_settings_test.rs`
 - Modify: `src-tauri/src/lib.rs`
 
 - [ ] **Step 1: Write failing claim and recovery tests**
 
 Cover:
 
-- exclusive `asr-worker.lock`
+- exclusive worker authority comes from the existing Task 4 full-Core lifetime guard; no separate `asr-worker.lock`
 - claim CAS changes `queued -> preparing`
 - `attempt_count` and `claim_generation` increment together
 - lease 30 seconds and renewal every 5 seconds/stage
@@ -711,7 +745,16 @@ Cover:
 - 5-second and 30-second retry backoff
 - maximum 3 total claims
 - queued/blocked cancellation
-- model-ready transition excludes cancelled jobs
+- claim excludes `missing/corrupted` chunks even if a queued row already exists
+- all Job timestamps use canonical UTC RFC 3339 milliseconds
+- model-ready leaves `blocked_model` unchanged and only projects ready-to-retry
+- explicit Application retry opens a new manual execution generation on the same Job ID
+- retry generation resets `attempt_count` to zero, increments `claim_generation`, preserves the immutable settings/fingerprint and cannot violate active uniqueness
+- retry accepts only ready `blocked_model` or `failed`; `cancelled` requires enqueue/retranscribe
+- third-claim recovery exhaustion writes stable `AsrErrorCode::RecoveryRetryExhausted`
+- Task 9 has no path that writes `succeeded`
+
+Add schema-ownership assertions in `catalog_migration_test.rs` and its contract/concurrency submodules: Job fields already exist in v2; Task 9 leaves DDL, `user_version` and migration fingerprints unchanged, Task 6 remains the sole v3 owner, and Task 11 remains the sole v4 owner. These are no-drift/ownership assertions only; Task 9 must not edit migration DDL or fixtures.
 
 - [ ] **Step 2: Add the stale-worker fencing test**
 
@@ -719,24 +762,40 @@ Cover:
 let first = jobs.claim("boot-a", "worker-1")?.unwrap();
 jobs.expire_and_requeue(&first.id)?;
 let second = jobs.claim("boot-a", "worker-2")?.unwrap();
-assert!(jobs.complete(&first.claim).is_err());
-assert!(jobs.complete(&second.claim).is_ok());
+assert!(jobs.mark_transcribing(&first.claim).is_err());
+assert!(jobs.mark_transcribing(&second.claim).is_ok());
 ```
 
-- [ ] **Step 3: Run tests and verify current Catalog cannot express them**
+Also prove that claim/recovery consumes the existing Task 4 full-Core lifetime guard from `service/runtime_lock.rs`; repository construction without that guard is impossible or returns an ownership error. Task 9 must not create a new runtime lock, owner type or lock file. A stale generation cannot renew, mark transcribing, fail, cancel or participate in Task 10 publication.
+
+- [ ] **Step 3: Run tests and verify the Job API is missing**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_job`
+
+Expected: FAIL because the Job repository/state-transition API does not yet consume the existing Task 4 ownership guard. The guard and v2 Job schema already exist; do not create a new ownership implementation, Task 9 migration or v3/v4 schema change.
 
 - [ ] **Step 4: Implement ownership-fenced transitions**
 
-Every renewal and state transition uses `id + claimed_by + claim_generation`. A zero-row update means ownership is lost and in-memory results must be discarded.
+Every renewal and running-state transition uses `id + claimed_by + claim_generation`; claim additionally joins/checks `chunks.integrity_state = 'available'`. A zero-row update means ownership is lost and in-memory results must be discarded. Normalize every stored timestamp to UTC RFC 3339 milliseconds and inject a deterministic clock in tests.
+
+Model-ready is read-side capability information only. `retry_asr_job` is an explicit user/Application mutation: for a ready `blocked_model` or `failed` row, one CAS reuses the same Job ID, increments `claim_generation` immediately to fence old workers, resets the per-generation `attempt_count`, clears owner/lease/cancel and active error fields, and queues the immutable snapshot. Task 11 later stores the exact old state/new generation in its operation/replay row. Do not retry `cancelled`, auto-queue model-ready jobs or insert a duplicate active fingerprint.
+
+Task 9 exposes claim, renew, mark-transcribing, fail, cancel, recovery and manual-retry-generation operations only. Add `RecoveryRetryExhausted` to the stable `AsrErrorCode` serde set. Do not expose `complete()` or update `succeeded`; Task 10 exclusively owns the fenced atomic Receipt/Revision/Segment/FTS/succeeded transaction.
 
 - [ ] **Step 5: Run tests and commit**
 
-Run: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_job`
+Run:
 
 ```bash
-git add src-tauri/src/asr/job.rs src-tauri/src/asr_job_test.rs src-tauri/src/catalog.rs src-tauri/src/lib.rs
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_job
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_settings
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features catalog_migration_test
+```
+
+Expected: Job and error-code contracts PASS, and migration tests prove Task 9 did not change v2/v3/v4 ownership or schema fingerprints.
+
+```bash
+git add src-tauri/src/asr/job.rs src-tauri/src/asr_job_test.rs src-tauri/src/catalog.rs src-tauri/src/catalog_migration_test.rs src-tauri/src/catalog_migration_test src-tauri/src/domain.rs src-tauri/src/asr_settings_test.rs src-tauri/src/lib.rs
 git commit -m "feat: add fenced ASR jobs"
 ```
 
@@ -797,13 +856,13 @@ git commit -m "feat: publish traceable ASR revisions"
 - Modify: `src-tauri/src/lib.rs`
 - Create: `src-tauri/src/commands_test.rs`
 - Create: `src-tauri/src/desktop_api.rs`
-- Create: `src-tauri/src/core_runtime.rs`
+- Create: `src-tauri/src/core_runtime.rs`: extract/migrate the Task 4 guarded owner into the primary runtime host; do not create a second ownership mechanism.
 - Create: `src-tauri/src/tool_api.rs`
 - Create: `src-tauri/src/host_control.rs`
 - Create: `src-tauri/src/host_control_test.rs`
 - Create: `src-tauri/src/local_ipc.rs`
 - Create: `src-tauri/src/local_ipc_test.rs`
-- Create: `src-tauri/src/runtime_lock.rs`
+- Modify: `src-tauri/src/service/runtime_lock.rs` to integrate the existing full-Core guard with the final CoreRuntime/socket host; do not introduce `src-tauri/src/runtime_lock.rs` as a second owner.
 - Create: `src-tauri/src/bin/lifesub-ipc-test-client.rs`
 - Create: `src-tauri/src/bin/lifesub-ipc-test-host.rs`
 - Create: `src-tauri/src/bin/lifesub-two-tauri-harness.rs`
@@ -848,9 +907,9 @@ Test `open_evidence` as intent issuance only: `confirmation_required` is a succe
 
 Freeze/test `pending -> executing -> consumed | uncertain` plus pending -> expired CAS transactions. Ledger separately stores immutable requesting principal/evidence binding and authorized Tauri claim principal; they need not match. Claim verifies the event/requester/evidence were not altered and the caller owns Core-held subscription/in-process delivery capability, not a bearer token. Cover auditable consent timestamp, exact idempotent retries, conflicting outcome errors, concurrent claim single winner, host offline/event loss followed by internal pending replay on subscription resume, expiry removal, and crash after executing claim before finish -> uncertain without opening UI. A new public `open_evidence` intent plus fresh confirmation is then required. There is no second public Agent confirm tool or Application confirm method.
 
-- [ ] **Step 3: Implement full ownership and secure IPC**
+- [ ] **Step 3: Extend existing ownership into secure IPC**
 
-Construct one `CoreRuntime`. `runtime_lock.rs` acquires the full Core ownership lock before any writable Catalog open/migration, socket bind, reconciliation, import, model mutation, capture mutation or worker. Move Task 4's temporary AppState reconciliation call behind this boundary. Run native inference on a blocking thread, never the UI thread.
+Extract/migrate Task 4's existing guarded owner into one primary `CoreRuntime`; do not reacquire, duplicate or redefine ownership. Preserve the `service/runtime_lock.rs` contract that the lifetime guard precedes any writable Catalog open/migration/reconciliation, then extend the same owner to socket bind, model/capture mutation and workers. Primary hosts the guard and sockets; secondary never opens writable Catalog or creates an owner and must route through authorized `ui.sock`/`agent.sock`. Run native inference on a blocking thread, never the UI thread.
 
 Create the runtime directory relative to an anchored parent fd with `openat(O_DIRECTORY|O_NOFOLLOW)`, `fstat`/`fstatat`/`lstat` owner/type/mode checks, `0700` directory and `0600` sockets. Ordinary `agent.sock` uses mandatory `getpeereid` and minimal authority. Controlled `ui.sock` obtains `audit_token_t` with `LOCAL_PEERTOKEN`, resolves peer code via Security.framework and checks the primary-pinned designated requirement, Team ID and bundle ID. Document the Rust FFI/framework wrapper boundary in `local_ipc.rs`; production has no unsigned/debug bypass. Authentication failure refuses Application/opener authority; the client may separately reconnect to `agent.sock` for minimal Agent reads.
 
@@ -880,7 +939,7 @@ scripts/with-sherpa-runtime.sh cargo check --manifest-path src-tauri/Cargo.toml 
 ```
 
 ```bash
-git add src-tauri/Cargo.toml src-tauri/src/commands.rs src-tauri/src/commands_test.rs src-tauri/src/desktop_api.rs src-tauri/src/core_runtime.rs src-tauri/src/tool_api.rs src-tauri/src/tool_api_test.rs src-tauri/src/host_control.rs src-tauri/src/host_control_test.rs src-tauri/src/local_ipc.rs src-tauri/src/local_ipc_test.rs src-tauri/src/runtime_lock.rs src-tauri/src/bin/lifesub-ipc-test-host.rs src-tauri/src/bin/lifesub-ipc-test-client.rs src-tauri/src/bin/lifesub-two-tauri-harness.rs src-tauri/src/catalog.rs src-tauri/src/catalog src-tauri/src/catalog_migration_test src-tauri/src/lib.rs src-tauri/src/service.rs scripts/verify-local-ipc.sh tests/fixtures/catalog/lifesub-v0.3.sqlite3 tests/fixtures/catalog/lifesub-v0.4.sqlite3 tests/fixtures/tool-api tests/fixtures/code-signing docs/superpowers/specs/2026-08-16-lifesub-local-tool-api-design.md
+git add src-tauri/Cargo.toml src-tauri/src/commands.rs src-tauri/src/commands_test.rs src-tauri/src/desktop_api.rs src-tauri/src/core_runtime.rs src-tauri/src/tool_api.rs src-tauri/src/tool_api_test.rs src-tauri/src/host_control.rs src-tauri/src/host_control_test.rs src-tauri/src/local_ipc.rs src-tauri/src/local_ipc_test.rs src-tauri/src/service/runtime_lock.rs src-tauri/src/bin/lifesub-ipc-test-host.rs src-tauri/src/bin/lifesub-ipc-test-client.rs src-tauri/src/bin/lifesub-two-tauri-harness.rs src-tauri/src/catalog.rs src-tauri/src/catalog src-tauri/src/catalog_migration_test.rs src-tauri/src/catalog_migration_test src-tauri/src/lib.rs src-tauri/src/service.rs scripts/verify-local-ipc.sh tests/fixtures/catalog/lifesub-v0.3.sqlite3 tests/fixtures/catalog/lifesub-v0.4.sqlite3 tests/fixtures/tool-api tests/fixtures/code-signing docs/superpowers/specs/2026-08-16-lifesub-local-tool-api-design.md
 git commit -m "feat: expose versioned local tool API"
 ```
 
@@ -1082,7 +1141,7 @@ Add a hidden command-line option `--acceptance-scenario <name>` handled by the p
 Required scenarios:
 
 - `real-asr-heartbeat`: real fixture inference, P95 drift <= 250 ms.
-- `cancel-real-asr`: `cancelling` acknowledged <= 500 ms and final cancelled <= 30 seconds.
+- `cancel-real-asr`: `cancelling` acknowledged <= 500 ms; final cancellation occurs after at most the current Task 7 25-second native window plus boundary overhead. The harness must record the active window duration and must not claim native-call preemption or use an independent 30-second contract.
 - `claim-and-abort`: claim a Job, persist the Job ID/generation, then terminate without cleanup.
 - `verify-recovery`: new boot ID recovers the stale claim <= 5 seconds.
 - `packaged-smoke`: run SenseVoice, Whisper, Qwen3-ASR 0.6B and Qwen3-ASR 1.7B fixtures from the packaged executable; verify every Receipt identity, canonical bundle identity, 1.7B structural plus runtime qualification markers, Candle/Metal device and no fallback.

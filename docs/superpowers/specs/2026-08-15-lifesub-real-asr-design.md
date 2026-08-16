@@ -74,7 +74,7 @@ Rust Core
 └── asr/service.rs           事务编排与 revision 发布
 ```
 
-每个模块只有一个责任。UI 不拼装模型文件路径，Tauri Commands 与 Local Tool API 不实现识别逻辑，Provider 不写数据库，Model Manager 不创建 Transcript Revision。`CoreRuntime` 是 Catalog、reconciliation、录音状态与 ASR Worker 的唯一运行时所有者。ModelManager 持有受控 Catalog gateway；RuntimeQualifier 由 ModelManager 调用，编排 provider adapter smoke、qualification marker fsync 与 Catalog CAS。Provider adapter 只初始化/执行 smoke 并返回 runtime identity/result，绝不写 marker、Catalog 或 installation state；适配器不得自行打开 SQLite。
+每个模块只有一个责任。UI 不拼装模型文件路径，Tauri Commands 与 Local Tool API 不实现识别逻辑，Provider 不写数据库，Model Manager 不创建 Transcript Revision。Task 4 已在 `service/runtime_lock.rs` 和 guarded service/command facade 中实现 full-Core ownership：任何 writable Catalog open/migration/reconciliation、导入或受保护 mutation 都先取得同一 lifetime guard。Task 9 的 Job Coordinator 必须消费该既有 guard，不得创建独立 `asr-worker.lock` owner 或旁路 repository。Task 11 将这一既有 owner 抽取/迁移为 primary `CoreRuntime` 并扩展 socket lifecycle；secondary 仅通过 IPC 访问，永不取得 guard 或直接打开 writable Catalog。ModelManager 持有受控 Catalog gateway；RuntimeQualifier 由 ModelManager 调用，编排 provider adapter smoke、qualification marker fsync 与 Catalog CAS。Provider adapter 只初始化/执行 smoke 并返回 runtime identity/result，绝不写 marker、Catalog 或 installation state；适配器不得自行打开 SQLite。
 
 Agent/IPC 边界遵循 `docs/superpowers/specs/2026-08-16-lifesub-local-tool-api-design.md`。当前 V0.2 采用 contract-first 的 C 阶段，未来 `lifesubd` 只替换进程宿主，不改变 Core 或工具语义。
 
@@ -542,6 +542,15 @@ Provider 只接收已经解码的音频切片和验证后的请求。它不读�
 
 Provider Factory 根据 Job 的设置快照和已安装 manifest 构建实例。Qwen 0.6B 只能分派到 sherpa `OfflineQwen3ASRModelConfig`，Qwen 1.7B 只能分派到固定 `qwen3-asr` crate 的 Candle/Metal adapter；Factory 不重复承担 Task 6 structural install 或 Task 8 qualification，而是在加载权重前验证 model ID、runtime family、bundle identity、`runtime_qualified` state、不可变 qualification marker、当前 M4/24GB Metal device 与 marker identity 一致。未知 Provider、模型不属于 Provider、qualification/runtime identity 不匹配或模型文件后来损坏时 fail closed，且 Receipt 记录实际分派结果以证明没有 fallback。
 
+语言参数是 Provider request contract，不是通用 metadata：
+
+- SenseVoice 将 `auto | zh | en | ja | ko | yue` 映射到 `OfflineSenseVoiceModelConfig.language`。
+- Whisper 将 `auto` 映射为 runtime 自动检测，将 manifest 声明的具体语言代码映射到 `OfflineWhisperModelConfig.language`；`multilingual` 只能描述模型能力，不是 runtime language，禁止出现在设置、Job snapshot 或 Receipt parameters 中。
+- sherpa 1.13.5 的 `OfflineQwen3ASRModelConfig` 没有 language 字段。Qwen 0.6B 因此只接受 `auto`；任何显式语言都必须在 Settings/Core 边界返回 `invalid_provider_parameter`，不能塞入该 config 的 `hotwords`，也不能作为未生效的 runtime metadata 写入 Receipt。
+- Qwen 1.7B 的 `auto` 映射为 `TranscribeOptions.language = None`；显式代码按 manifest 固定映射为 crate prompt 名称：`zh=Chinese`、`en=English`、`yue=Cantonese`、`ar=Arabic`、`de=German`、`fr=French`、`es=Spanish`、`pt=Portuguese`、`id=Indonesian`、`it=Italian`、`ko=Korean`、`ru=Russian`、`th=Thai`、`vi=Vietnamese`、`ja=Japanese`、`tr=Turkish`、`hi=Hindi`、`ms=Malay`、`nl=Dutch`、`sv=Swedish`、`da=Danish`、`fi=Finnish`、`pl=Polish`、`cs=Czech`、`fil=Filipino`、`fa=Persian`、`el=Greek`、`hu=Hungarian`、`mk=Macedonian`、`ro=Romanian`。未知值 fail closed 为 `invalid_provider_parameter`。
+
+Qwen 1.7B adapter 禁止调用 `qwen3_asr::best_device()`，因为该 helper 的合同是在 Metal 初始化失败后返回 CPU。LifeSub 必须持有直接 optional dependency `candle-core = "=0.9.2"`（Metal feature），显式调用 `candle_core::Device::new_metal(0)`，随后以 `Device::is_metal()` 和 runtime identity/qualification marker 验证 backend/device；构造失败或实际设备不是 Metal 时返回 capability/initialization error，不加载模型且绝不 fallback。
+
 ## 13. Job、租约与事务
 
 ```text
@@ -552,7 +561,7 @@ Audio Chunk committed
   -> VAD
   -> transcribe slices
   -> assemble non-empty segments
-  -> transaction:
+  -> Task 10 transaction:
        insert provider_receipt
        insert transcript_revision
        insert transcript_segments
@@ -560,17 +569,21 @@ Audio Chunk committed
        mark job succeeded
 ```
 
-ASR Worker 在恢复或 claim 之前，必须取得应用数据目录中的进程级 OS advisory file lock `asr-worker.lock`，并持有到进程退出。未取得锁的第二个应用实例可以读取状态，但不得执行 recovery、claim、模型安装或 reconciliation。只有持锁实例可以把其他 boot ID 视为 stale，从而避免并行实例互相接管。
+ASR Worker 在恢复或 claim 之前，必须由 Task 4 已取得 canonical parent full-Core lifetime guard 的 primary owner 启动并持有该 guard 到有序关闭。Task 9 不创建独立 `asr-worker.lock`。未持有 full-Core guard 的实例不得执行 recovery、claim、模型安装或 reconciliation；Task 11 的 secondary 只能经 primary socket 读取/请求操作。只有 primary guard owner 可以把其他 boot ID 视为 stale，从而避免并行实例互相接管。
 
-Worker 使用 compare-and-swap claim：仅当 Job 为 `queued`、`cancel_requested_at IS NULL`、`available_at <= now` 且 lease 为空或已过期时，单条 `UPDATE ... WHERE ...` 同时设置 `state = 'preparing'`、`claimed_by`、`lease_expires_at`，并增加 `attempt_count` 与 `claim_generation`；受影响行数必须为 1。不存在“已 claim 但仍为 queued”的中间状态。Worker 保存本次返回的 `claim_generation` 作为 fencing token。`claimed_by` 包含每次进程启动生成的 `boot_id` 与 worker ID，lease 时长 30 秒，worker 每 5 秒或每个阶段边界续租。
+Task 9 不新增或迁移 Job schema：`asr_jobs` 所需状态、attempt、generation、available/lease/cancel 字段已经由 Catalog v2 表达；Task 6 的 v3 只拥有 model artifact/install DDL，Task 11 的 v4 才拥有 Local Tool/operation DDL。Task 9 的缺口是 Job repository/API 与状态转换，不是“Catalog 无法表达”或新的 `user_version`。
+
+Worker 使用 compare-and-swap claim：仅当 Job 为 `queued`、`cancel_requested_at IS NULL`、`available_at <= now`、lease 为空或已过期，且关联 Chunk 当前 `integrity_state = 'available'` 时，单条 ownership-fenced transaction/update 同时设置 `state = 'preparing'`、`claimed_by`、`lease_expires_at`，并增加 `attempt_count` 与 `claim_generation`；受影响行数必须为 1。不存在“已 claim 但仍为 queued”的中间状态。Worker 保存本次返回的 `claim_generation` 作为 fencing token。`claimed_by` 包含每次进程启动生成的 `boot_id` 与 worker ID，lease 时长 30 秒，worker 每 5 秒或每个阶段边界续租。Job Coordinator 必须持有 Task 4 已实现的 full-Core lifetime ownership guard；Task 9 只消费并向下传递该 guard，不能新建锁文件、第二 owner 或无 guard 的 public claim/recovery 入口。Task 11 后续只迁移 guard 的宿主与 socket/secondary 路由，不改变该前置条件。
+
+`available_at`、`lease_expires_at`、`created_at`、`updated_at` 与取消时间统一序列化为 UTC RFC 3339 毫秒格式 `YYYY-MM-DDTHH:MM:SS.sssZ`。所有写入先规范化，测试使用受控 UTC clock；不得依赖本地时区、SQLite 隐式日期转换或不同精度字符串的偶然词法顺序。
 
 所有续租、`preparing -> transcribing`、失败、取消和恢复转换都必须使用 `WHERE id = ? AND claimed_by = ? AND claim_generation = ?`；影响行数不是 1 时，当前 Worker 已失去所有权，必须停止并丢弃内存结果。续租还要求当前 lease 未过期，禁止旧 Worker 在被接管后复活。
 
-启动时，任何 `claimed_by.boot_id` 不等于当前 boot ID 的 `preparing/transcribing` Job 立即视为 stale，不等待旧 lease 到期；同一进程内只在 lease 过期后接管。若收到取消请求则转 `cancelled`；否则当 `attempt_count < max_attempts` 时回到 `queued`。`max_attempts = 3` 表示总共最多 3 次 claim：第 1 次失败后退避 5 秒，第 2 次失败后退避 30 秒，第 3 次失败后直接转 `failed/recovery_retry_exhausted`。
+启动时，任何 `claimed_by.boot_id` 不等于当前 boot ID 的 `preparing/transcribing` Job 立即视为 stale，不等待旧 lease 到期；同一进程内只在 lease 过期后接管。若收到取消请求则转 `cancelled`；否则当 `attempt_count < max_attempts` 时回到 `queued`。`max_attempts = 3` 表示每个手动 execution generation 总共最多 3 次 claim：第 1 次失败后退避 5 秒，第 2 次失败后退避 30 秒，第 3 次失败后直接转 `failed/recovery_retry_exhausted`。`recovery_retry_exhausted` 必须加入稳定 `AsrErrorCode` serde contract，不能只存在于内部 error_summary。
 
-取消 sweeper 将尚未 claim 的 `queued/blocked_model` Job 直接转 `cancelled`。模型安装完成时，只有 `cancel_requested_at IS NULL` 的 `blocked_model` Job 才转 `queued`。不存在 `failed_recoverable` 状态。
+取消 sweeper 将尚未 claim 的 `queued/blocked_model` Job 直接转 `cancelled`。模型安装或 runtime qualification 完成时，`blocked_model` Job 保持 `blocked_model`，只在 read model/API projection 中呈现 ready-to-retry；系统不得自动转 `queued`。用户确认后的 Application `retry_asr_job` 才能对 `blocked_model` 或 `failed` 执行 CAS：复用同一 Job ID 与不可变参数快照，递增 `claim_generation` 形成新的手动 execution generation，重置 `attempt_count = 0`，清空 ownership/lease/cancel marker 与 active error 后转 `queued`。`cancelled` 不允许 retry，需显式 enqueue/retranscribe。该设计不创建第二 active fingerprint；Task 11 的 operation/replay row 持久记录旧终态、新 generation 与同一 Job ID，保证幂等和审计。不存在 `failed_recoverable` 状态。
 
-取消请求先写 `cancel_requested_at` 并立即反馈 UI。成功发布使用 `BEGIN IMMEDIATE`：先以 `id + claimed_by + claim_generation + state = transcribing + cancel_requested_at IS NULL` 条件确认 fencing token，再插入 Receipt、Revision、Segment 和 FTS，最后以相同 token 将 Job 更新为 `succeeded`；任一条件更新影响行数不是 1 时整体回滚并丢弃结果。事务提交前已存在取消请求则转 `cancelled` 且不发布 revision；成功事务提交后到达的取消请求不回滚 Evidence，Job 保持 `succeeded`。任何事务前错误只更新 Job 失败状态。事务内错误整体回滚，不发布部分 revision。
+Task 9 只拥有 claim、renew、`preparing -> transcribing`、fail、cancel、manual-retry generation 与 recovery token；不提供 `complete()` 或任何可独立写 `succeeded` 的 repository API。取消请求先写 `cancel_requested_at` 并立即反馈 UI。Task 10 的成功发布使用 `BEGIN IMMEDIATE`：先以 `id + claimed_by + claim_generation + state = transcribing + cancel_requested_at IS NULL` 条件确认 fencing token，再插入 Receipt、Revision、Segment 和 FTS，最后以相同 token 将 Job 更新为 `succeeded`；任一条件更新影响行数不是 1 时整体回滚并丢弃结果。事务提交前已存在取消请求则转 `cancelled` 且不发布 revision；成功事务提交后到达的取消请求不回滚 Evidence，Job 保持 `succeeded`。任何事务前错误只更新 Job 失败状态。事务内错误整体回滚，不发布部分 revision。
 
 默认只有一个 ASR Worker，避免同时驻留多个大模型。后续性能数据证明有收益后再增加并发。
 
@@ -613,6 +626,7 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 - `transcription_failed`
 - `cancelled`
 - `recovery_required`
+- `recovery_retry_exhausted`
 
 用户文案与错误码分离。日志允许保存诊断上下文，但不保存音频内容，不在 UI 展示完整用户路径。
 
@@ -668,7 +682,7 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 - Segment 起止相对人工标注的中位误差不高于 500 ms，最大误差不高于 1.5 秒。
 - enqueue 命令在 Audio Chunk 提交后 500 ms 内返回 Job；ASR 在独立 blocking worker 执行。
 - Playwright 运行 ASR 时 100 ms UI heartbeat 的 P95 漂移不高于 250 ms。
-- 取消请求 500 ms 内显示 `cancelling`，基线模型任务在 30 秒内进入 `cancelled`。
+- 取消请求 500 ms 内显示 `cancelling`。同步 native inference 只在调用前后和 Task 7 最多 25 秒窗口之间观察 token，故最大合同为当前单个 25 秒窗口加边界开销；不宣称窗口内抢占，也不得另写 30 秒终态阈值。
 - 进程终止后重新启动，基于新 boot ID 在 5 秒内完成 stale claim 的确定性恢复。
 
 ### 构建与打包

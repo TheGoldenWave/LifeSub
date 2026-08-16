@@ -9,6 +9,13 @@ use crate::asr::provider::{
 use crate::asr::settings::WhisperTask;
 use crate::domain::{AsrErrorCode, AsrProviderKind};
 
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+use crate::asr::provider::{Qwen17RuntimeBoundary, create_qwen17_backend_with_runtime};
+
 const SENSE: &str = "sense-voice-small-int8-2024-07-17";
 const TINY: &str = "whisper-tiny";
 const BASE: &str = "whisper-base";
@@ -21,16 +28,23 @@ type RequestMutation = Box<dyn Fn(&mut ProviderRequest)>;
 struct FakeBackendFactory {
     constructed: Arc<Mutex<Vec<NativeRequest>>>,
     calls: Arc<Mutex<usize>>,
-    fail: bool,
+    create_failure: Option<AsrErrorCode>,
+    transcribe_failure: Option<AsrErrorCode>,
     cancel_during_call: Option<CancellationToken>,
 }
 
 impl NativeBackendFactory for FakeBackendFactory {
     fn create(&self, request: &NativeRequest) -> Result<Box<dyn NativeBackend>, ProviderError> {
         self.constructed.lock().unwrap().push(request.clone());
+        if let Some(code) = self.create_failure {
+            return Err(ProviderError::new(
+                code,
+                "fake native initialization failure",
+            ));
+        }
         Ok(Box::new(FakeBackend {
             calls: self.calls.clone(),
-            fail: self.fail,
+            transcribe_failure: self.transcribe_failure,
             cancel_during_call: self.cancel_during_call.clone(),
         }))
     }
@@ -38,7 +52,7 @@ impl NativeBackendFactory for FakeBackendFactory {
 
 struct FakeBackend {
     calls: Arc<Mutex<usize>>,
-    fail: bool,
+    transcribe_failure: Option<AsrErrorCode>,
     cancel_during_call: Option<CancellationToken>,
 }
 
@@ -48,11 +62,8 @@ impl NativeBackend for FakeBackend {
         if let Some(token) = &self.cancel_during_call {
             token.cancel();
         }
-        if self.fail {
-            Err(ProviderError::new(
-                AsrErrorCode::TranscriptionFailed,
-                "fake native failure",
-            ))
+        if let Some(code) = self.transcribe_failure {
+            Err(ProviderError::new(code, "fake native inference failure"))
         } else {
             Ok("transcript".to_owned())
         }
@@ -146,9 +157,168 @@ fn invalid_identity_or_qualification_never_constructs_a_backend() {
 }
 
 #[test]
+fn backend_initialization_failure_preserves_code_without_fallback() {
+    let backend = FakeBackendFactory {
+        create_failure: Some(AsrErrorCode::ProviderInitializationFailed),
+        ..Default::default()
+    };
+
+    let error = ProviderFactory::new(backend.clone())
+        .create(request(QWEN17))
+        .unwrap_err();
+
+    assert_eq!(error.code(), AsrErrorCode::ProviderInitializationFailed);
+    let constructed = backend.constructed.lock().unwrap();
+    assert_eq!(constructed.len(), 1);
+    assert_eq!(constructed[0].runtime, RuntimeFamily::QwenCandleMetal);
+    assert_eq!(*backend.calls.lock().unwrap(), 0);
+}
+
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+#[test]
+fn production_qwen17_metal_construction_failure_never_loads_or_falls_back_to_cpu() {
+    #[derive(Clone, Default)]
+    struct FailingMetalRuntime {
+        device_indices: Arc<Mutex<Vec<usize>>>,
+        loads: Arc<Mutex<usize>>,
+    }
+
+    impl Qwen17RuntimeBoundary for FailingMetalRuntime {
+        type Device = ();
+
+        fn create_metal_device(&self, device_index: usize) -> Result<Self::Device, String> {
+            self.device_indices.lock().unwrap().push(device_index);
+            Err("simulated Metal construction failure".to_owned())
+        }
+
+        fn load(
+            &self,
+            _request: &NativeRequest,
+            _device: Self::Device,
+        ) -> Result<Box<dyn NativeBackend>, String> {
+            *self.loads.lock().unwrap() += 1;
+            unreachable!("model load must not run after Metal construction fails")
+        }
+    }
+
+    let runtime = FailingMetalRuntime::default();
+    let native = crate::asr::qwen3_asr::native_request(
+        &request(QWEN17),
+        crate::asr::manifest::model_registry()
+            .model(QWEN17)
+            .unwrap(),
+    )
+    .unwrap();
+
+    let Err(error) = create_qwen17_backend_with_runtime(&native, &runtime) else {
+        panic!("Metal construction failure must fail provider initialization");
+    };
+
+    assert_eq!(error.code(), AsrErrorCode::ProviderInitializationFailed);
+    assert_eq!(*runtime.device_indices.lock().unwrap(), vec![0]);
+    assert_eq!(*runtime.loads.lock().unwrap(), 0);
+}
+
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+#[test]
+fn production_qwen17_inference_failure_does_not_reload_or_reconstruct_backend() {
+    #[derive(Clone, Default)]
+    struct FailingInferenceRuntime {
+        device_indices: Arc<Mutex<Vec<usize>>>,
+        loads: Arc<Mutex<usize>>,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    struct FailingInferenceBackend {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl NativeBackend for FailingInferenceBackend {
+        fn transcribe(&mut self, _audio: AudioSlice<'_>) -> Result<String, ProviderError> {
+            *self.calls.lock().unwrap() += 1;
+            Err(ProviderError::new(
+                AsrErrorCode::TranscriptionFailed,
+                "simulated inference failure",
+            ))
+        }
+    }
+
+    impl Qwen17RuntimeBoundary for FailingInferenceRuntime {
+        type Device = ();
+
+        fn create_metal_device(&self, device_index: usize) -> Result<Self::Device, String> {
+            self.device_indices.lock().unwrap().push(device_index);
+            Ok(())
+        }
+
+        fn load(
+            &self,
+            _request: &NativeRequest,
+            _device: Self::Device,
+        ) -> Result<Box<dyn NativeBackend>, String> {
+            *self.loads.lock().unwrap() += 1;
+            Ok(Box::new(FailingInferenceBackend {
+                calls: self.calls.clone(),
+            }))
+        }
+    }
+
+    let runtime = FailingInferenceRuntime::default();
+    let native = crate::asr::qwen3_asr::native_request(
+        &request(QWEN17),
+        crate::asr::manifest::model_registry()
+            .model(QWEN17)
+            .unwrap(),
+    )
+    .unwrap();
+    let mut backend = create_qwen17_backend_with_runtime(&native, &runtime).unwrap();
+
+    let error = backend
+        .transcribe(AudioSlice::new(&[0.1; 16_000], 16_000).unwrap())
+        .unwrap_err();
+
+    assert_eq!(error.code(), AsrErrorCode::TranscriptionFailed);
+    assert_eq!(*runtime.device_indices.lock().unwrap(), vec![0]);
+    assert_eq!(*runtime.loads.lock().unwrap(), 1);
+    assert_eq!(*runtime.calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn backend_inference_failure_preserves_code_without_fallback() {
+    let backend = FakeBackendFactory {
+        transcribe_failure: Some(AsrErrorCode::TranscriptionFailed),
+        ..Default::default()
+    };
+    let mut provider = ProviderFactory::new(backend.clone())
+        .create(request(QWEN06))
+        .unwrap();
+
+    let error = provider
+        .transcribe(
+            AudioSlice::new(&[0.1; 16_000], 16_000).unwrap(),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), AsrErrorCode::TranscriptionFailed);
+    let constructed = backend.constructed.lock().unwrap();
+    assert_eq!(constructed.len(), 1);
+    assert_eq!(constructed[0].runtime, RuntimeFamily::SherpaOnnx);
+    assert_eq!(*backend.calls.lock().unwrap(), 1);
+}
+
+#[test]
 fn qwen_models_never_fallback_across_runtime_families() {
     let qwen06 = FakeBackendFactory {
-        fail: true,
+        transcribe_failure: Some(AsrErrorCode::TranscriptionFailed),
         ..Default::default()
     };
     let mut provider = ProviderFactory::new(qwen06.clone())
@@ -169,7 +339,7 @@ fn qwen_models_never_fallback_across_runtime_families() {
     assert_eq!(qwen06.constructed.lock().unwrap().len(), 1);
 
     let qwen17 = FakeBackendFactory {
-        fail: true,
+        transcribe_failure: Some(AsrErrorCode::TranscriptionFailed),
         ..Default::default()
     };
     let mut provider = ProviderFactory::new(qwen17.clone())

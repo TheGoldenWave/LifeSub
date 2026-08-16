@@ -68,6 +68,31 @@ pub struct ExecutableInstallationLease {
     validation_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
+const DELETE_RESERVED: usize = usize::MAX;
+
+#[cfg(test)]
+type DeleteReservationBarriers =
+    std::sync::Arc<(std::sync::Barrier, std::sync::Barrier, std::sync::Barrier)>;
+
+#[cfg(test)]
+fn delete_reservation_hooks()
+-> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, DeleteReservationBarriers>> {
+    static HOOKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, DeleteReservationBarriers>>,
+    > = std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+pub(super) fn take_delete_reservation_barriers_for_test(
+    install_dir: &Path,
+) -> Option<DeleteReservationBarriers> {
+    delete_reservation_hooks()
+        .lock()
+        .unwrap()
+        .remove(install_dir)
+}
+
 #[derive(Debug)]
 struct ExecutionLeaseGuard {
     model_id: String,
@@ -78,7 +103,8 @@ impl Drop for ExecutionLeaseGuard {
     fn drop(&mut self) {
         let mut registry = self.registry.lock().unwrap();
         if let Some(count) = registry.get_mut(&self.model_id) {
-            *count -= 1;
+            debug_assert_ne!(*count, DELETE_RESERVED);
+            *count = count.checked_sub(1).expect("execution lease underflow");
             if *count == 0 {
                 registry.remove(&self.model_id);
             }
@@ -226,23 +252,27 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
     fn acquire_execution_lease(&self, model_id: &str) -> Result<ExecutionLeaseGuard, ManagerError> {
         fs_support::validate_component("model_id", model_id)?;
         let mut registry = self.execution_leases.lock().unwrap();
-        let count = registry.entry(model_id.to_owned()).or_insert(0);
-        *count = count
-            .checked_add(1)
-            .ok_or_else(|| ManagerError::new("model_in_use", "execution lease overflow"))?;
+        match registry.entry(model_id.to_owned()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if *entry.get() == DELETE_RESERVED {
+                    return Err(ManagerError::new(
+                        "model_in_use",
+                        "model deletion is reserved",
+                    ));
+                }
+                let count = entry.get_mut();
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| ManagerError::new("model_in_use", "execution lease overflow"))?;
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(1);
+            }
+        }
         Ok(ExecutionLeaseGuard {
             model_id: model_id.to_owned(),
             registry: self.execution_leases.clone(),
         })
-    }
-
-    pub(crate) fn execution_lease_count(&self, model_id: &str) -> usize {
-        self.execution_leases
-            .lock()
-            .unwrap()
-            .get(model_id)
-            .copied()
-            .unwrap_or(0)
     }
 
     #[cfg(test)]
@@ -264,6 +294,18 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             _guard: self.acquire_execution_lease(model_id)?,
             validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_delete_reservation_barriers_for_test(
+        &self,
+        install_dir: impl AsRef<Path>,
+        barriers: DeleteReservationBarriers,
+    ) {
+        delete_reservation_hooks()
+            .lock()
+            .unwrap()
+            .insert(install_dir.as_ref().to_path_buf(), barriers);
     }
 }
 

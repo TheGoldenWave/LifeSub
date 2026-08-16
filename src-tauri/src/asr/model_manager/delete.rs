@@ -9,11 +9,19 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
     }
     pub(crate) fn delete(&self, id: &str, install: &Path) -> Result<(), ManagerError> {
         validate_component("model_id", id)?;
-        if self.execution_lease_count(id) != 0 {
+        let mut registry = self.execution_leases.lock().unwrap();
+        if registry.get(id).copied().unwrap_or(0) != 0 {
             return Err(ManagerError::new(
                 "model_in_use",
                 "active provider execution lease prevents deletion",
             ));
+        }
+        #[cfg(test)]
+        let barriers = take_delete_reservation_barriers_for_test(install);
+        #[cfg(test)]
+        if let Some(barriers) = &barriers {
+            barriers.0.wait();
+            barriers.1.wait();
         }
         let Some(lease) = self.catalog.begin_delete(id)? else {
             return Err(ManagerError::new(
@@ -21,6 +29,16 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                 "active ASR lease prevents deletion",
             ));
         };
+        registry.insert(id.to_owned(), DELETE_RESERVED);
+        drop(registry);
+        let _reservation = DeletionReservationGuard {
+            model_id: id.to_owned(),
+            registry: self.execution_leases.clone(),
+        };
+        #[cfg(test)]
+        if let Some(barriers) = &barriers {
+            barriers.2.wait();
+        }
         if lease.install_dir != install {
             self.catalog.abort_delete(&lease)?;
             return Err(ManagerError::integrity("installation path mismatch"));
@@ -57,6 +75,20 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             sync_dir(&trash_root)?;
         }
         Ok(())
+    }
+}
+
+struct DeletionReservationGuard {
+    model_id: String,
+    registry: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+}
+
+impl Drop for DeletionReservationGuard {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock().unwrap();
+        if registry.get(&self.model_id) == Some(&DELETE_RESERVED) {
+            registry.remove(&self.model_id);
+        }
     }
 }
 

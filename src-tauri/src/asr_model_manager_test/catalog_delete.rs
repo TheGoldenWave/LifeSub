@@ -141,6 +141,75 @@ fn provider_execution_lease_blocks_delete_until_provider_drop() {
 }
 
 #[test]
+fn provider_acquire_and_delete_reservation_are_atomic() {
+    let root = TempDir::new().unwrap();
+    let model_id = "sense-voice-small-int8-2024-07-17";
+    let manifest = model_registry().model(model_id).unwrap();
+    let install_dir = root.path().join("atomic-delete-install");
+    fs::create_dir_all(&install_dir).unwrap();
+    fs::write(install_dir.join("model.bin"), b"model").unwrap();
+    let catalog = Arc::new(Catalog::in_memory().unwrap());
+    catalog
+        .publish_installation(&StoredInstallation {
+            model_id: model_id.to_owned(),
+            provider: "sense_voice".to_owned(),
+            manifest_version: manifest.manifest_version.to_owned(),
+            bundle_identity: manifest.bundle.identity_sha256.to_owned(),
+            install_dir: install_dir.clone(),
+            state: "runtime_qualified".to_owned(),
+            runtime_identity_json: Some("{}".to_owned()),
+        })
+        .unwrap();
+    let barriers = Arc::new((
+        std::sync::Barrier::new(2),
+        std::sync::Barrier::new(2),
+        std::sync::Barrier::new(2),
+    ));
+    let manager = ModelManager::new(root.path(), ScriptedTransport::default(), catalog);
+    manager.with_delete_reservation_barriers_for_test(&install_dir, barriers.clone());
+    let delete_manager = manager.clone();
+    let delete_model_id = model_id.to_owned();
+    let delete_install_dir = install_dir.clone();
+    let delete =
+        std::thread::spawn(move || delete_manager.delete(&delete_model_id, &delete_install_dir));
+    barriers.0.wait();
+
+    let provider_manager = manager.clone();
+    let provider_model_id = model_id.to_owned();
+    let provider_install_dir = install_dir.clone();
+    let (provider_tx, provider_rx) = std::sync::mpsc::channel();
+    let provider = std::thread::spawn(move || {
+        let result = provider_manager
+            .hold_execution_lease_for_test(&provider_model_id, &provider_install_dir);
+        provider_tx.send(result).unwrap();
+    });
+    let provider_before_reservation = provider_rx.recv_timeout(Duration::from_millis(200)).ok();
+    barriers.1.wait();
+    let provider_result = match provider_before_reservation {
+        Some(result) => result,
+        None => provider_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+    };
+    barriers.2.wait();
+    let delete_result = delete.join().unwrap();
+    provider.join().unwrap();
+
+    match (provider_result, delete_result) {
+        (Ok(_lease), Err(error)) => {
+            assert_eq!(error.code(), "model_in_use");
+            assert!(install_dir.is_dir());
+        }
+        (Err(error), Ok(())) => {
+            assert_eq!(error.code(), "model_in_use");
+            assert!(!install_dir.exists());
+        }
+        (provider, delete) => panic!(
+            "provider acquisition and deletion both crossed the reservation boundary: provider={:?}, delete={delete:?}",
+            provider.as_ref().map(|_| ())
+        ),
+    }
+}
+
+#[test]
 fn qualified_delete_db_failure_restores_directory_and_exact_prior_state() {
     let root = TempDir::new().unwrap();
     let install_dir = root.path().join("models/asr/whisper/qualified/1-bundle");

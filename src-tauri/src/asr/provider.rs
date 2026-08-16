@@ -392,6 +392,59 @@ struct Qwen17Backend {
     target_os = "macos",
     target_arch = "aarch64"
 ))]
+pub(crate) trait Qwen17RuntimeBoundary {
+    type Device;
+
+    fn create_metal_device(&self, device_index: usize) -> Result<Self::Device, String>;
+    fn load(
+        &self,
+        request: &NativeRequest,
+        device: Self::Device,
+    ) -> Result<Box<dyn NativeBackend>, String>;
+}
+
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+#[derive(Clone, Copy, Debug, Default)]
+struct ProductionQwen17Runtime;
+
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+impl Qwen17RuntimeBoundary for ProductionQwen17Runtime {
+    type Device = candle_core::Device;
+
+    fn create_metal_device(&self, device_index: usize) -> Result<Self::Device, String> {
+        if device_index != 0 {
+            return Err("Qwen 1.7B requires Metal device 0".to_owned());
+        }
+        crate::asr::qwen3_asr::create_metal_device().map_err(|error| error.to_string())
+    }
+
+    fn load(
+        &self,
+        request: &NativeRequest,
+        device: Self::Device,
+    ) -> Result<Box<dyn NativeBackend>, String> {
+        let inference = qwen3_asr::AsrInference::load(&request.install_dir, device)
+            .map_err(|error| error.to_string())?;
+        Ok(Box::new(Qwen17Backend {
+            inference,
+            language: request.language.clone(),
+        }))
+    }
+}
+
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
 impl NativeBackend for Qwen17Backend {
     fn transcribe(&mut self, audio: AudioSlice<'_>) -> Result<String, ProviderError> {
         let mut options = qwen3_asr::TranscribeOptions::default();
@@ -411,18 +464,24 @@ impl NativeBackend for Qwen17Backend {
     target_arch = "aarch64"
 ))]
 fn create_qwen17_backend(request: &NativeRequest) -> Result<Box<dyn NativeBackend>, ProviderError> {
-    let device = crate::asr::qwen3_asr::create_metal_device()?;
-    let inference =
-        qwen3_asr::AsrInference::load(&request.install_dir, device).map_err(|error| {
-            ProviderError::new(
-                AsrErrorCode::ProviderInitializationFailed,
-                error.to_string(),
-            )
-        })?;
-    Ok(Box::new(Qwen17Backend {
-        inference,
-        language: request.language.clone(),
-    }))
+    create_qwen17_backend_with_runtime(request, &ProductionQwen17Runtime)
+}
+
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+pub(crate) fn create_qwen17_backend_with_runtime<R: Qwen17RuntimeBoundary>(
+    request: &NativeRequest,
+    runtime: &R,
+) -> Result<Box<dyn NativeBackend>, ProviderError> {
+    let device = runtime
+        .create_metal_device(0)
+        .map_err(|error| ProviderError::new(AsrErrorCode::ProviderInitializationFailed, error))?;
+    runtime
+        .load(request, device)
+        .map_err(|error| ProviderError::new(AsrErrorCode::ProviderInitializationFailed, error))
 }
 
 #[cfg(not(all(

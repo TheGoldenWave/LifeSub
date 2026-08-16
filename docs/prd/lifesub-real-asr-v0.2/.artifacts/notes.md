@@ -44,3 +44,9 @@
 - 2026-08-16：安装已经 publish 后，最终 `model_downloads.state = succeeded` 写入失败同样属于 post-commit ambiguity；必须再次 reconcile 安装并重试状态转换，若仍失败则尽力写入 `failed + recovery_required`，不能留下 active `installing`。对应 one-shot state transition fault 已加入回归测试。
 - 2026-08-16：文件尺寸剩余 Minor：`model_manager/download.rs` 为 531 行，略高于约 500 行目标但已从原 2570 行单文件隔离；按新 review 规则不再为零 Minor 做第三轮结构调整，后续下载协议变更时再拆 transport/checkpoint 两层。
 - 2026-08-16：stalled-response 测试的 server 不能永久阻塞在 `accept()`。并行测试中 cancellation 可能在 request 前触发，导致 client 不连接而测试线程永远 join accept。fixture 改为 nonblocking accept + shutdown channel + 2 秒 server deadline，并只在 accept 确认后启动 cancellation；production response timeout 同步收紧为 2 秒。exact 与 focused 均在外部 10 秒 alarm 内退出。
+- 2026-08-16：Task 8 qualification smoke 不能把可注入泛型 adapter 暴露为 production API，否则测试 fake 可成为生产资格来源。production 只允许 ModelManager 绑定当前设备、重验 bundle 并构造真实 Qwen Candle/Metal smoke；generic RuntimeQualifier 仅供 crate 内测试与该固定入口使用。
+- 2026-08-16：Job 的零行 fenced UPDATE 不能统一解释为 ownership lost。renew、阶段转换与 fail 都必须在同一事务内区分 `CancelRequested` / `OwnershipLost`；Coordinator 只有在 fenced acknowledge 将数据库写成 `cancelled` 后才能清 active 并领取下一任务。
+- 2026-08-16：模型删除不能只依赖 Catalog job lease。Provider 必须持有共享 registry 的 RAII execution lease，Manager clone 共享同一计数；Provider 构造消费已重验 installation，不能重复执行 inventory hash pass。
+- 2026-08-16：资格音频 hash 本身不足以冻结 smoke 语义。phrases、匹配阈值、normalization、expected text、source/PCM hashes、archive path/hash、license 与 provenance 必须形成 canonical digest，并写入 runtime identity，防止 fixture metadata 漂移后仍资格通过。
+- 2026-08-16：UUID qualification temp marker 的错误清理必须覆盖 create/write/sync/rename/publish 冲突，启动 reconcile 还需枚举并删除合法 UUID grammar 的 stale temp 后 fsync 目录；不可用固定 `.tmp` 假设。
+- 2026-08-16：ignored real-model gate 被显式选择时不能因缺环境静默 return。缺 `LIFESUB_RUN_QWEN17_SMOKE=1` 或 `LIFESUB_QWEN17_MODEL_DIR` 必须测试失败，使 CI/人工 gate 不会产生零工作假绿。

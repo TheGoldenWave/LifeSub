@@ -3,11 +3,57 @@ feature: lifesub-real-asr-v0.2
 handoff_date: 2026-08-16
 branch: codex/lifesub-real-asr-v0.2
 worktree: /Users/goldenwave/.config/superpowers/worktrees/LifeSub/lifesub-real-asr-v0.2
-head_at_handoff: 3972c28
-status: implementation-in-progress-dirty-worktree
+head_at_handoff: ce379ac
+status: tasks-8-9-approved-target-tasks-10-13
 ---
 
 # LifeSub V0.2 真实 ASR 开发 Handoff
+
+## 0. 2026-08-16 最新状态（优先于下方历史内容）
+
+Task 8、9 已完成最终验证和双审。下一阶段先连续完成 Tasks 10–13，再进入 Task 14 真实模型 Gate。
+
+### Task 8：已收尾并双审放行
+
+- 基线提交：`c0422b3 feat: add local ASR providers`。
+- 当前未提交修复已补齐 Provider 初始化/推理错误码映射、Qwen 1.7B production Metal 构造失败不得 CPU/sherpa/0.6B fallback、execution lease 与删除的原子 reservation。
+- 最终规格复审：Critical=0、Important=0。
+- 最终质量复审：Critical=0、Important=0；仅保留 provider/qualifier 大文件拆分 Minor，不阻塞。
+- 最近验证：no-default provider 12/12；asr-runtime provider 13/13；Qwen17 feature provider 14/14；model manager 72/72；lease/delete race 1/1；desktop check、fmt、Clippy、diff check 通过。
+- 真实 Qwen 1.7B weights Gate 未执行，仍是后续 Task 14/release Gate，不得写成已完成。
+
+### Task 9：已收尾并双审放行
+
+- 基线提交：`08beaa0 feat: add fenced ASR jobs`，后续修复 `84d2004`、`ce379ac`。
+- 最终实现：固定 Core boot ID；30 秒 lease 与 5 秒 renew；RAII 单 Coordinator；生产 raw claim API 收口；无 claim 的 `JobControl`；cancel/ownership 分型；recover 清理 stale active；全局禁止第二个 running Job。
+- 最后 cancel/fail 竞态通过 `fail_asr_job` 事务内 `OwnedMutationResult` 分型关闭；`CancelRequested` 使用原 fenced token acknowledge，数据库转为 `cancelled` 后才清 active。
+- 最终规格复审：Critical=0、Important=0。
+- 最终质量复审：Critical=0、Important=0、Minor=0。
+- Fresh 验证：目标竞态 1/1；Task 9 focused 21/21；全量 no-default 283 passed / 5 ignored；fmt、Clippy `-D warnings`、trusted desktop check、diff check、无 `console.log` 通过。
+
+### 下一步
+
+1. 按 ownership 精确暂存并提交 Task 8、9 修复及本次文档；不要使用 `git add .`。
+2. 连续完成 Task 10：原子发布 Receipt/Revision/Segments/FTS，并用 claim generation fencing 防止 stale worker 发布；每 5 秒续租，同步 Provider 窗口使用独立 heartbeat，ownership lost 立即丢弃结果。
+3. 完成 Task 11：把现有 guarded owner 收敛为唯一 CoreRuntime，完成 Catalog v4、Agent/Application V1、Host Control、安全 UDS 与真实双 Tauri harness；secondary 不得直接打开 writable SQLite 或启动 worker。
+4. 完成 Task 12：typed ASR client、设置/模型/下载/Operation UI；Tauri 一对一映射冻结合同，浏览器 demo 明确不可执行，不伪造模型或 Evidence。
+5. 完成 Task 13：Job 状态、取消/重试、Receipt 来源、revision 切换与重转写；删除 `demo-local` revision 路径，失败不得覆盖当前 revision。
+
+### 下一阶段退出条件
+
+- Tasks 10–13 每项均完成 TDD、规格复审、质量复审，Critical=0，Important=0。
+- Task 10 原子性、取消/commit 边界、stale generation、时间来源测试通过。
+- Task 11 Catalog v4 migration、Tool API golden fixtures、安全 IPC、Host Control、独立进程验证和双 Tauri harness 通过。
+- Task 12–13 focused 前端测试与 `npm run build` 通过，TypeScript 无 `any` 漂移、无 `console.log`、UI 只使用设计 Token。
+- 导入、任务轮询、Receipt/Revision 和重转写形成真实 Core 闭环；不执行 Task 14 的真实权重质量 Gate，也不把 V0.2/MVP 标记完成。
+
+### 工作树保护
+
+- 分支：`codex/lifesub-real-asr-v0.2`，HEAD `ce379ac`。
+- Task 8/9 修复均未提交，但已完成验证和双审。
+- 工作树同时保留此前 Task 4/Core audio 安全修改、`process.md`/`notes.md` 修改和后续 cloud-fallback 文档草稿。
+- 禁止 `git reset --hard`、`git checkout --`、清理 untracked 文件或整批 `git add .`。
+- 下方第 1-10 节是旧 handoff 历史背景；与本节冲突时以本节为准。
 
 ## 1. 新会话目标
 

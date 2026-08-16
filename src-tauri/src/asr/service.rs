@@ -258,14 +258,18 @@ fn model_source(manifest: &ModelManifest) -> Result<String, AsrErrorCode> {
         &canonical_bundle_payload(manifest).map_err(|_| AsrErrorCode::InvalidProviderParameter)?,
     )
     .map_err(|_| AsrErrorCode::InvalidProviderParameter)?;
-    serde_json::to_string(&serde_json::json!({
+    let mut source = serde_json::json!({
         "bundle": bundle,
         "repository_url": manifest.source.repository_url,
         "model_card_url": manifest.source.model_card_url,
         "license_spdx": manifest.source.license_spdx,
         "provenance": manifest.source.provenance,
-    }))
-    .map_err(|_| AsrErrorCode::InvalidProviderParameter)
+    });
+    let canonical = serde_json_canonicalizer::to_string(&source)
+        .map_err(|_| AsrErrorCode::InvalidProviderParameter)?;
+    source["source_contract_sha256"] =
+        serde_json::Value::String(hex::encode(Sha256::digest(canonical.as_bytes())));
+    serde_json::to_string(&source).map_err(|_| AsrErrorCode::InvalidProviderParameter)
 }
 
 fn fingerprint(

@@ -1,6 +1,7 @@
 use std::fs::File;
 #[cfg(test)]
 use std::io::Read;
+use std::io::{Seek, SeekFrom};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -50,6 +51,152 @@ impl ModelStorage {
             .map(Path::to_path_buf)
             .map_err(|_| ManagerError::integrity("installation path mismatch"))
     }
+
+    pub(super) fn open_download_part(
+        &self,
+        relative: PathBuf,
+    ) -> Result<DownloadPart, ManagerError> {
+        let nominal_path = self.nominal_root().join(&relative);
+        match self {
+            #[cfg(test)]
+            Self::TestPath(_) => {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(&nominal_path)?;
+                Ok(DownloadPart {
+                    nominal_path,
+                    file,
+                    anchored: None,
+                })
+            }
+            Self::Anchored(root) => {
+                root.ensure_dir(relative.parent().unwrap_or_else(|| Path::new("")))?;
+                let file = root.open_regular_create(&relative)?;
+                let identity = EntryStat::from_fd(file.as_raw_fd())?;
+                Ok(DownloadPart {
+                    nominal_path,
+                    file,
+                    anchored: Some(AnchoredPart {
+                        root: root.clone(),
+                        relative,
+                        identity,
+                    }),
+                })
+            }
+        }
+    }
+
+    pub(super) fn checkpoint_bytes(&self, nominal: &Path) -> Result<u64, ManagerError> {
+        match self {
+            #[cfg(test)]
+            Self::TestPath(_) => super::fs_support::checkpoint_bytes(nominal),
+            Self::Anchored(root) => {
+                let relative = nominal
+                    .strip_prefix(root.nominal_root())
+                    .map_err(|_| ManagerError::integrity("checkpoint path mismatch"))?;
+                root.file_len(relative).map(|length| length.unwrap_or(0))
+            }
+        }
+    }
+
+    pub(super) fn available_space(&self) -> Result<u64, ManagerError> {
+        match self {
+            #[cfg(test)]
+            Self::TestPath(path) => Ok(fs2::available_space(path)?),
+            Self::Anchored(root) => root.available_space(),
+        }
+    }
+
+    pub(super) fn ensure_assembly_roots(&self) -> Result<(), ManagerError> {
+        match self {
+            #[cfg(test)]
+            Self::TestPath(root) => {
+                let staging = root.join("staging");
+                let final_root = root.join("models/asr");
+                std::fs::create_dir_all(&staging)?;
+                std::fs::create_dir_all(&final_root)?;
+                super::fs_support::same_volume(&staging, &final_root)
+            }
+            Self::Anchored(root) => {
+                root.ensure_dir(Path::new("staging"))?;
+                root.ensure_dir(Path::new("models/asr"))?;
+                root.same_device(Path::new("staging"), Path::new("models/asr"))
+            }
+        }
+    }
+}
+
+pub(super) struct DownloadPart {
+    nominal_path: PathBuf,
+    file: File,
+    anchored: Option<AnchoredPart>,
+}
+
+struct AnchoredPart {
+    root: Arc<AnchoredFs>,
+    relative: PathBuf,
+    identity: EntryStat,
+}
+
+impl DownloadPart {
+    pub(super) fn nominal_path(&self) -> &Path {
+        &self.nominal_path
+    }
+
+    pub(super) fn len(&self) -> Result<u64, ManagerError> {
+        Ok(EntryStat::from_fd(self.file.as_raw_fd())?.len)
+    }
+
+    pub(super) fn truncate_and_sync(&mut self, len: u64) -> Result<(), ManagerError> {
+        self.file.set_len(len)?;
+        self.file.seek(SeekFrom::Start(len))?;
+        self.file.sync_all()?;
+        self.revalidate()
+    }
+
+    pub(super) fn prepare_write(&mut self, offset: u64) -> Result<(), ManagerError> {
+        self.file.set_len(offset)?;
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.revalidate()
+    }
+
+    pub(super) fn writer(&mut self) -> &mut File {
+        &mut self.file
+    }
+
+    pub(super) fn sha256(&self) -> Result<String, ManagerError> {
+        let mut digest = Sha256::new();
+        let mut offset = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = self.file.read_at(&mut buffer, offset)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            offset += read as u64;
+        }
+        Ok(hex::encode(digest.finalize()))
+    }
+
+    pub(super) fn revalidate(&self) -> Result<(), ManagerError> {
+        let Some(anchored) = &self.anchored else {
+            return Ok(());
+        };
+        if !EntryStat::from_fd(self.file.as_raw_fd())?.same_object(anchored.identity) {
+            return Err(ManagerError::integrity("download part identity changed"));
+        }
+        let current = anchored.root.open_regular(&anchored.relative, false)?;
+        if !EntryStat::from_fd(current.as_raw_fd())?.same_object(anchored.identity) {
+            return Err(ManagerError::integrity(
+                "download part path no longer names the held inode",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -60,6 +207,10 @@ pub(super) enum InstallationStorage {
 }
 
 impl InstallationStorage {
+    pub(super) fn is_anchored(&self) -> bool {
+        matches!(self, Self::Anchored(_))
+    }
+
     pub(super) fn revalidate(&self) -> Result<(), ManagerError> {
         match self {
             #[cfg(test)]
@@ -73,6 +224,14 @@ impl InstallationStorage {
             #[cfg(test)]
             Self::TestPath => Ok(None),
             Self::Anchored(installation) => installation.open_required(relative).map(Some),
+        }
+    }
+
+    pub(super) fn open_directory(&self, relative: &Path) -> Result<Option<File>, ManagerError> {
+        match self {
+            #[cfg(test)]
+            Self::TestPath => Ok(None),
+            Self::Anchored(installation) => installation.open_directory(relative).map(Some),
         }
     }
 }
@@ -137,7 +296,22 @@ impl AnchoredInstallation {
             .find(|file| file.relative == relative)
             .ok_or_else(|| ManagerError::structural("file is not part of the execution lease"))?;
         held.validate_contents()?;
-        held.open_current(self.root.as_ref())
+        held.file.try_clone().map_err(Into::into)
+    }
+
+    fn open_directory(&self, relative: &Path) -> Result<File, ManagerError> {
+        let contains_required_file = self
+            .files
+            .iter()
+            .any(|file| file.relative.starts_with(relative) && file.relative != relative);
+        if !contains_required_file {
+            return Err(ManagerError::structural(
+                "directory is not part of the execution lease",
+            ));
+        }
+        self.root
+            .open_dir(relative)?
+            .ok_or_else(|| ManagerError::integrity("leased directory is missing"))
     }
 
     #[cfg(test)]
@@ -271,6 +445,9 @@ mod tests {
             installation.revalidate().unwrap_err().code(),
             "model_integrity_failed"
         );
-        assert!(installation.read_required(Path::new("model.bin")).is_err());
+        assert_eq!(
+            installation.read_required(Path::new("model.bin")).unwrap(),
+            b"held-model"
+        );
     }
 }

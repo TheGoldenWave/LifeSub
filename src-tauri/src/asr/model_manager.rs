@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(all(test, unix))]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -171,6 +172,10 @@ impl ExecutableInstallationLease {
         &self.device
     }
 
+    pub(crate) fn is_fd_anchored(&self) -> bool {
+        self.installation_storage.is_anchored()
+    }
+
     #[cfg(test)]
     pub(crate) fn validation_count(&self) -> usize {
         self.validation_count
@@ -191,6 +196,13 @@ impl ExecutableInstallationLease {
             ),
             storage::InstallationStorage::Anchored(_) => self.installation_storage.revalidate(),
         }
+    }
+
+    pub(crate) fn revalidate_execution_boundary(&self) -> Result<(), ManagerError> {
+        #[cfg(test)]
+        self.validation_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.installation_storage.revalidate()
     }
 
     #[allow(dead_code)]
@@ -222,16 +234,43 @@ impl ExecutableInstallationLease {
         ))
     }
 
+    pub(crate) fn open_execution_path(
+        &self,
+        relative: &Path,
+    ) -> Result<(File, PathBuf), ManagerError> {
+        let file = if self
+            .plan
+            .install_contract
+            .required_files()
+            .iter()
+            .any(|required| Path::new(&required.path) == relative)
+        {
+            self.open_required_file(relative)?
+        } else if let Some(file) = self.installation_storage.open_directory(relative)? {
+            file
+        } else {
+            #[cfg(test)]
+            {
+                File::open(self.install_dir.join(relative))?
+            }
+            #[cfg(not(test))]
+            {
+                return Err(ManagerError::structural(
+                    "anchored execution storage is missing",
+                ));
+            }
+        };
+        let path = PathBuf::from("/dev/fd").join(file.as_raw_fd().to_string());
+        Ok((file, path))
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(
         model_id: &str,
         install_dir: impl AsRef<Path>,
         device: crate::asr::provider::DeviceIdentity,
     ) -> Result<Self, ManagerError> {
-        let manifest = model_registry()
-            .model(model_id)
-            .ok_or_else(|| ManagerError::structural("unknown model"))?;
-        let plan = ModelInstallPlan::from_manifest(manifest);
+        let plan = fs_support::resolve_current_plan(model_id)?;
         let registry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::from(
             [(model_id.to_owned(), 1)],
         )));
@@ -240,6 +279,55 @@ impl ExecutableInstallationLease {
             installation_storage: storage::InstallationStorage::TestPath,
             plan,
             install_dir: install_dir.as_ref().to_path_buf(),
+            runtime_identity_json: Some("{}".to_owned()),
+            device: DeviceProfile {
+                os: device.os,
+                arch: device.arch,
+                macos_major: device.macos_major,
+                memory_gib: device.memory_gib,
+                metal_available: device.backend == "metal",
+                chip: device.chip,
+            },
+            _guard: ExecutionLeaseGuard {
+                model_id: model_id.to_owned(),
+                registry,
+                _runtime_ownership: None,
+            },
+            validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_anchored_test(
+        model_id: &str,
+        nominal_root: impl AsRef<Path>,
+        relative: &Path,
+        files: Vec<(PathBuf, Vec<u8>)>,
+        device: crate::asr::provider::DeviceIdentity,
+    ) -> Result<Self, ManagerError> {
+        let plan = fs_support::resolve_current_plan(model_id)?;
+        let required = files
+            .iter()
+            .map(|(path, bytes)| {
+                (
+                    path.clone(),
+                    bytes.len() as u64,
+                    hex::encode(Sha256::digest(bytes)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let root_file = File::open(nominal_root.as_ref())?;
+        let storage =
+            anchored_reconcile::AnchoredFs::new(nominal_root.as_ref().to_path_buf(), root_file);
+        let installation = storage::AnchoredInstallation::capture(&storage, relative, &required)?;
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::from(
+            [(model_id.to_owned(), 1)],
+        )));
+        Ok(Self {
+            observed_sherpa_runtime: plan.sherpa_runtime.clone(),
+            installation_storage: storage::InstallationStorage::Anchored(installation),
+            plan,
+            install_dir: nominal_root.as_ref().join(relative),
             runtime_identity_json: Some("{}".to_owned()),
             device: DeviceProfile {
                 os: device.os,
@@ -410,6 +498,42 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             device: DeviceProfile::current(),
             _guard: self.acquire_execution_lease(model_id)?,
             validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_anchored_execution_lease_for_test(
+        &self,
+        model_id: &str,
+        install_dir: impl AsRef<Path>,
+        files: Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<ExecutableInstallationLease, ManagerError> {
+        let plan = fs_support::resolve_current_plan(model_id)?;
+        let relative = self.storage.relative_install_path(install_dir.as_ref())?;
+        let required = files
+            .iter()
+            .map(|(path, bytes)| {
+                (
+                    path.clone(),
+                    bytes.len() as u64,
+                    hex::encode(Sha256::digest(bytes)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let root = self
+            .storage
+            .anchored_fs()
+            .ok_or_else(|| ManagerError::structural("anchored model storage required"))?;
+        let installation = storage::AnchoredInstallation::capture(&root, &relative, &required)?;
+        Ok(ExecutableInstallationLease {
+            observed_sherpa_runtime: plan.sherpa_runtime.clone(),
+            installation_storage: storage::InstallationStorage::Anchored(installation),
+            plan,
+            install_dir: install_dir.as_ref().to_path_buf(),
+            runtime_identity_json: Some("{}".to_owned()),
+            device: DeviceProfile::current(),
+            _guard: self.acquire_execution_lease(model_id)?,
+            validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 

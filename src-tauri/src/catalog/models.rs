@@ -138,10 +138,11 @@ impl ModelCatalog for Catalog {
         download_id: &str,
         checkpoint: &ArtifactCheckpoint,
     ) -> Result<(), ManagerError> {
-        let connection = self.connection.lock().unwrap();
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction()?;
         let now = Utc::now().to_rfc3339();
         let verified_at = checkpoint.verified_sha256.as_ref().map(|_| now.as_str());
-        let changed = connection.execute(
+        let changed = transaction.execute(
             "UPDATE model_download_artifacts
              SET downloaded_bytes = ?3, temp_path = ?4, etag = ?5, last_modified = ?6,
                  verified_sha256 = ?7, checkpointed_at = ?8, verified_at = ?9,
@@ -163,7 +164,7 @@ impl ModelCatalog for Catalog {
         if changed != 1 {
             return Err(ManagerError::catalog("artifact checkpoint row missing"));
         }
-        connection.execute(
+        let changed = transaction.execute(
             "UPDATE model_downloads
              SET downloaded_bytes = (
                  SELECT COALESCE(SUM(downloaded_bytes), 0)
@@ -171,6 +172,10 @@ impl ModelCatalog for Catalog {
              ), updated_at = ?2 WHERE id = ?1",
             params![download_id, now],
         )?;
+        if changed != 1 {
+            return Err(ManagerError::catalog("model download row missing"));
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -577,6 +582,18 @@ impl Catalog {
     pub(crate) fn model_artifact_count(&self, download_id: &str) -> rusqlite::Result<i64> {
         self.connection.lock().unwrap().query_row(
             "SELECT COUNT(*) FROM model_download_artifacts WHERE download_id = ?1",
+            [download_id],
+            |row| row.get(0),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn model_downloaded_bytes_for_test(
+        &self,
+        download_id: &str,
+    ) -> rusqlite::Result<i64> {
+        self.connection.lock().unwrap().query_row(
+            "SELECT downloaded_bytes FROM model_downloads WHERE id = ?1",
             [download_id],
             |row| row.get(0),
         )

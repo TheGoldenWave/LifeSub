@@ -1,3 +1,7 @@
+use std::ffi::CString;
+use std::fs::{self, File};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +13,12 @@ use crate::domain::{AsrErrorCode, AsrProviderKind};
 
 const REQUIRED_SAMPLE_RATE_HZ: u32 = 16_000;
 const MAX_AUDIO_SAMPLES: usize = 25 * REQUIRED_SAMPLE_RATE_HZ as usize;
+const QWEN06_MODEL_ID: &str = "qwen3-asr-0.6b-int8-2026-03-25";
+const QWEN06_TOKENIZER_FILES: &[&str] = &[
+    "tokenizer/merges.txt",
+    "tokenizer/tokenizer_config.json",
+    "tokenizer/vocab.json",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendKind {
@@ -510,7 +520,69 @@ pub trait AsrProvider: Send {
 pub struct Provider {
     identity: ProviderIdentity,
     backend: Box<dyn NativeBackend>,
+    _execution_files: Vec<File>,
+    _execution_aliases: Vec<PrivateAliasDirectory>,
     execution_lease: Option<ExecutableInstallationLease>,
+}
+
+struct PrivateAliasDirectory {
+    path: PathBuf,
+}
+
+impl PrivateAliasDirectory {
+    fn for_qwen06_tokenizer(
+        installation: &ExecutableInstallationLease,
+        execution_files: &mut Vec<File>,
+    ) -> Result<Self, ProviderError> {
+        let mut template = std::env::temp_dir()
+            .join("lifesub-qwen06-tokenizer-XXXXXX")
+            .as_os_str()
+            .as_bytes()
+            .to_vec();
+        template.push(0);
+        let created = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
+        if created.is_null() {
+            return Err(ProviderError::new(
+                AsrErrorCode::ProviderInitializationFailed,
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+        let path = PathBuf::from(
+            CString::from_vec_with_nul(template)
+                .map_err(|_| ProviderError::invalid("invalid tokenizer alias path"))?
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let alias = Self { path };
+        fs::set_permissions(&alias.path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            ProviderError::new(
+                AsrErrorCode::ProviderInitializationFailed,
+                error.to_string(),
+            )
+        })?;
+        for relative in QWEN06_TOKENIZER_FILES {
+            let (file, fd_path) = installation
+                .open_execution_path(std::path::Path::new(relative))
+                .map_err(provider_storage_error)?;
+            let name = std::path::Path::new(relative)
+                .file_name()
+                .ok_or_else(|| ProviderError::invalid("invalid tokenizer file name"))?;
+            symlink(&fd_path, alias.path.join(name)).map_err(|error| {
+                ProviderError::new(
+                    AsrErrorCode::ProviderInitializationFailed,
+                    error.to_string(),
+                )
+            })?;
+            execution_files.push(file);
+        }
+        Ok(alias)
+    }
+}
+
+impl Drop for PrivateAliasDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 impl Provider {
@@ -629,7 +701,7 @@ impl<F: NativeBackendFactory> ProviderFactory<F> {
                 ProviderError::new(AsrErrorCode::ModelCapabilityUnavailable, error.to_string())
             })?;
         }
-        let mut provider = self.create(ProviderRequest {
+        let request = ProviderRequest {
             provider: manifest.provider,
             model_id: manifest.id.to_owned(),
             manifest_version: manifest.manifest_version.to_owned(),
@@ -642,7 +714,68 @@ impl<F: NativeBackendFactory> ProviderFactory<F> {
                 marker_identity: qualification_identity(manifest, &device),
                 device,
             },
-        })?;
+        };
+        if matches!(manifest.runtime, RuntimeRequirement::QwenCandleMetal { .. }) {
+            let mut provider = self.create(request)?;
+            provider.execution_lease = Some(installation);
+            return Ok(provider);
+        }
+        installation
+            .revalidate_execution_boundary()
+            .map_err(provider_storage_error)?;
+        if !installation.is_fd_anchored() {
+            let mut provider = self.create(request)?;
+            provider.execution_lease = Some(installation);
+            return Ok(provider);
+        }
+        let mut native = native_request(&request, manifest)?;
+        let mut execution_files = Vec::with_capacity(native.required_files.len());
+        let mut execution_aliases = Vec::new();
+        let execution_paths = native
+            .required_files
+            .iter()
+            .enumerate()
+            .map(|(index, nominal)| {
+                if manifest.id == QWEN06_MODEL_ID && index == 3 {
+                    let alias = PrivateAliasDirectory::for_qwen06_tokenizer(
+                        &installation,
+                        &mut execution_files,
+                    )?;
+                    let path = alias.path.clone();
+                    execution_aliases.push(alias);
+                    return Ok(path);
+                }
+                let relative = nominal
+                    .strip_prefix(installation.install_dir())
+                    .map_err(|_| {
+                        ProviderError::new(
+                            AsrErrorCode::ModelIntegrityFailed,
+                            "native execution path escaped the verified installation",
+                        )
+                    })?;
+                let (file, path) = installation
+                    .open_execution_path(relative)
+                    .map_err(provider_storage_error)?;
+                execution_files.push(file);
+                Ok(path)
+            })
+            .collect::<Result<Vec<_>, ProviderError>>()?;
+        native.install_dir = installation.install_dir().to_path_buf();
+        native.required_files = execution_paths;
+        let backend = self
+            .backends
+            .create(&native)
+            .map_err(|error| ProviderError::new(error.code(), error.detail().to_owned()))?;
+        installation
+            .revalidate_execution_boundary()
+            .map_err(provider_storage_error)?;
+        let mut provider = provider_from_native(
+            manifest,
+            native,
+            backend,
+            execution_files,
+            execution_aliases,
+        );
         provider.execution_lease = Some(installation);
         Ok(provider)
     }
@@ -656,41 +789,68 @@ impl<F: NativeBackendFactory> ProviderFactory<F> {
             .model(&request.model_id)
             .ok_or_else(|| ProviderError::invalid("unknown shipping model"))?;
         validate_identity(&request, manifest)?;
-        let native = match request.model_id.as_str() {
-            "sense-voice-small-int8-2024-07-17" => {
-                crate::asr::sense_voice::native_request(&request, manifest)?
-            }
-            "whisper-tiny" | "whisper-base" | "whisper-small" => {
-                crate::asr::whisper::native_request(&request, manifest)?
-            }
-            "qwen3-asr-0.6b-int8-2026-03-25" | "qwen3-asr-1.7b" => {
-                crate::asr::qwen3_asr::native_request(&request, manifest)?
-            }
-            _ => {
-                return Err(ProviderError::invalid(
-                    "model has no production provider dispatch",
-                ));
-            }
-        };
+        let native = native_request(&request, manifest)?;
         let backend = self
             .backends
             .create(&native)
             .map_err(|error| ProviderError::new(error.code(), error.detail().to_owned()))?;
-        Ok(Provider {
-            identity: ProviderIdentity {
-                provider: manifest.provider,
-                model_id: manifest.id.to_owned(),
-                manifest_version: manifest.manifest_version.to_owned(),
-                bundle_identity: manifest.bundle.identity_sha256.to_owned(),
-                backend: native.backend,
-                runtime: native.runtime,
-                device: native.device,
-                execution: native.runtime_identity,
-            },
+        Ok(provider_from_native(
+            manifest,
+            native,
             backend,
-            execution_lease: None,
-        })
+            Vec::new(),
+            Vec::new(),
+        ))
     }
+}
+
+fn native_request(
+    request: &ProviderRequest,
+    manifest: &ModelManifest,
+) -> Result<NativeRequest, ProviderError> {
+    match request.model_id.as_str() {
+        "sense-voice-small-int8-2024-07-17" => {
+            crate::asr::sense_voice::native_request(request, manifest)
+        }
+        "whisper-tiny" | "whisper-base" | "whisper-small" => {
+            crate::asr::whisper::native_request(request, manifest)
+        }
+        "qwen3-asr-0.6b-int8-2026-03-25" | "qwen3-asr-1.7b" => {
+            crate::asr::qwen3_asr::native_request(request, manifest)
+        }
+        _ => Err(ProviderError::invalid(
+            "model has no production provider dispatch",
+        )),
+    }
+}
+
+fn provider_from_native(
+    manifest: &ModelManifest,
+    native: NativeRequest,
+    backend: Box<dyn NativeBackend>,
+    execution_files: Vec<File>,
+    execution_aliases: Vec<PrivateAliasDirectory>,
+) -> Provider {
+    Provider {
+        identity: ProviderIdentity {
+            provider: manifest.provider,
+            model_id: manifest.id.to_owned(),
+            manifest_version: manifest.manifest_version.to_owned(),
+            bundle_identity: manifest.bundle.identity_sha256.to_owned(),
+            backend: native.backend,
+            runtime: native.runtime,
+            device: native.device,
+            execution: native.runtime_identity,
+        },
+        backend,
+        _execution_files: execution_files,
+        _execution_aliases: execution_aliases,
+        execution_lease: None,
+    }
+}
+
+fn provider_storage_error(error: crate::asr::model_manager::ManagerError) -> ProviderError {
+    ProviderError::new(AsrErrorCode::ModelIntegrityFailed, error.to_string())
 }
 
 fn validate_identity(

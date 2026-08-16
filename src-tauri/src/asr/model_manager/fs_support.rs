@@ -345,6 +345,7 @@ pub(super) fn child_dirs(root: &Path) -> Result<Vec<PathBuf>, ManagerError> {
     }
     Ok(out)
 }
+#[cfg(test)]
 pub(super) fn checkpoint_bytes(p: &Path) -> Result<u64, ManagerError> {
     match fs::metadata(p) {
         Ok(m) if m.file_type().is_file() => Ok(m.len()),
@@ -356,6 +357,7 @@ pub(super) fn checkpoint_bytes(p: &Path) -> Result<u64, ManagerError> {
         Err(e) => Err(ManagerError::new("insufficient_disk_space", e.to_string())),
     }
 }
+#[cfg(test)]
 pub(super) fn same_volume(a: &Path, b: &Path) -> Result<(), ManagerError> {
     #[cfg(unix)]
     {

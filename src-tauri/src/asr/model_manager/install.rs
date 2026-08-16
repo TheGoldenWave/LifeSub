@@ -338,10 +338,10 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             s.remove(0)
         } else {
             self.available_space_override
-                .unwrap_or(fs2::available_space(self.storage.nominal_root())?)
+                .unwrap_or(self.storage.available_space()?)
         };
         #[cfg(not(test))]
-        let available = fs2::available_space(self.storage.nominal_root())?;
+        let available = self.storage.available_space()?;
         if available < required {
             Err(ManagerError::new(
                 "insufficient_disk_space",
@@ -356,7 +356,6 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         p: &ModelInstallPlan,
         id: Option<&str>,
     ) -> Result<u64, ManagerError> {
-        fs::create_dir_all(self.storage.nominal_root())?;
         let mut remaining = 0u64;
         for a in &p.artifacts {
             let cp = id
@@ -365,7 +364,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                 .flatten();
             let file_bytes = cp
                 .as_ref()
-                .map(|c| checkpoint_bytes(&c.temp_path))
+                .map(|c| self.storage.checkpoint_bytes(&c.temp_path))
                 .transpose()?
                 .unwrap_or(0);
             let source = cp.as_ref().is_some_and(|c| {
@@ -390,11 +389,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                     })?;
             }
         }
-        let staging = self.storage.nominal_root().join("staging");
-        let final_root = self.storage.nominal_root().join("models/asr");
-        fs::create_dir_all(&staging)?;
-        fs::create_dir_all(&final_root)?;
-        same_volume(&staging, &final_root)?;
+        self.storage.ensure_assembly_roots()?;
         checked_required_additional_free(
             remaining,
             p.install_contract.max_total_written_bytes(),

@@ -260,7 +260,13 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         id: &str,
         c: F,
     ) -> Result<(), ManagerError> {
-        fs::create_dir_all(self.download_dir(id))?;
+        match &self.storage {
+            #[cfg(test)]
+            storage::ModelStorage::TestPath(_) => fs::create_dir_all(self.download_dir(id))?,
+            storage::ModelStorage::Anchored(root) => {
+                root.ensure_dir(&PathBuf::from("downloads").join(id))?;
+            }
+        }
         self.catalog.set_download_state(id, "downloading", None)?;
         for a in &p.artifacts {
             if let Err(e) = self.download_artifact(id, a, &c) {
@@ -282,9 +288,11 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         a: &ArtifactPlan,
         c: &F,
     ) -> Result<(), ManagerError> {
-        let path = self
-            .download_dir(id)
+        let relative = PathBuf::from("downloads")
+            .join(id)
             .join(format!("{}.part", a.artifact_id));
+        let mut part = self.storage.open_download_part(relative)?;
+        let path = part.nominal_path().to_path_buf();
         let identity = source_identity(a);
         let cp = self.catalog.checkpoint(id, &a.artifact_id)?;
         let valid = cp.as_ref().filter(|x| {
@@ -293,33 +301,29 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                 && x.temp_path == path
         });
         let mut offset = valid.map(|x| x.downloaded_bytes).unwrap_or(0);
-        let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let len = part.len()?;
         if valid.is_none() {
             if len > 0 {
-                let f = OpenOptions::new().write(true).open(&path)?;
-                f.set_len(0)?;
-                f.sync_all()?;
+                part.truncate_and_sync(0)?;
             }
             offset = 0;
         } else if len > offset {
-            let f = OpenOptions::new().write(true).open(&path)?;
-            f.set_len(offset)?;
-            f.sync_all()?;
+            part.truncate_and_sync(offset)?;
         } else if len < offset {
             offset = len;
             self.save_progress(
                 id,
                 a,
                 &identity,
-                &path,
+                &part,
                 offset,
                 valid.and_then(|x| x.etag.as_deref()),
                 valid.and_then(|x| x.last_modified.as_deref()),
                 "downloading",
             )?;
         }
-        if offset == a.expected_bytes && sha256_file(&path)? == a.expected_sha256 {
-            self.save_verified(id, a, path)?;
+        if offset == a.expected_bytes && part.sha256()? == a.expected_sha256 {
+            self.save_verified(id, a, &part)?;
             return Ok(());
         }
         if offset == a.expected_bytes {
@@ -382,28 +386,22 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             if declared != expected {
                 return Err(ManagerError::network("incorrect Content-Length"));
             }
-            let mut f = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(append)
-                .truncate(!append)
-                .open(&path)?;
             let base = if append { start } else { 0 };
+            part.prepare_write(base)?;
             let written = self.stream(
                 id,
                 a,
                 &identity,
-                &path,
+                &mut part,
                 base,
                 etag.as_deref(),
                 modified.as_deref(),
                 &mut r.body,
-                &mut f,
                 expected,
                 c,
             )?;
-            f.flush()?;
-            f.sync_all()?;
+            part.writer().flush()?;
+            part.writer().sync_all()?;
             let final_bytes = base
                 .checked_add(written)
                 .ok_or_else(|| ManagerError::network("response byte count overflow"))?;
@@ -411,7 +409,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                 id,
                 a,
                 &identity,
-                &path,
+                &part,
                 final_bytes,
                 etag.as_deref(),
                 modified.as_deref(),
@@ -420,10 +418,10 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             if written != expected {
                 return Err(ManagerError::network("response body length mismatch"));
             }
-            if final_bytes != a.expected_bytes || sha256_file(&path)? != a.expected_sha256 {
+            if final_bytes != a.expected_bytes || part.sha256()? != a.expected_sha256 {
                 return Err(ManagerError::integrity("artifact hash mismatch"));
             }
-            self.save_verified(id, a, path)?;
+            self.save_verified(id, a, &part)?;
             return Ok(());
         }
         Err(ManagerError::network("artifact validators changed"))
@@ -434,12 +432,11 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         id: &str,
         a: &ArtifactPlan,
         identity: &str,
-        path: &Path,
+        part: &mut storage::DownloadPart,
         base: u64,
         etag: Option<&str>,
         modified: Option<&str>,
         reader: &mut dyn Read,
-        writer: &mut File,
         expected: u64,
         c: &F,
     ) -> Result<u64, ManagerError> {
@@ -448,13 +445,13 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         let mut checkpointed = 0u64;
         loop {
             if c() {
-                writer.flush()?;
-                writer.sync_data()?;
+                part.writer().flush()?;
+                part.writer().sync_data()?;
                 self.save_progress(
                     id,
                     a,
                     identity,
-                    path,
+                    part,
                     base + written,
                     etag,
                     modified,
@@ -468,13 +465,13 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             let n = match reader.read(&mut b) {
                 Ok(n) => n,
                 Err(e) => {
-                    writer.flush()?;
-                    writer.sync_data()?;
+                    part.writer().flush()?;
+                    part.writer().sync_data()?;
                     self.save_progress(
                         id,
                         a,
                         identity,
-                        path,
+                        part,
                         base + written,
                         etag,
                         modified,
@@ -491,13 +488,13 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                 }
             };
             if n == 0 {
-                writer.flush()?;
-                writer.sync_data()?;
+                part.writer().flush()?;
+                part.writer().sync_data()?;
                 self.save_progress(
                     id,
                     a,
                     identity,
-                    path,
+                    part,
                     base + written,
                     etag,
                     modified,
@@ -509,13 +506,13 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                 .checked_add(n as u64)
                 .ok_or_else(|| ManagerError::network("response body length overflow"))?;
             if next > expected {
-                writer.flush()?;
-                writer.sync_data()?;
+                part.writer().flush()?;
+                part.writer().sync_data()?;
                 self.save_progress(
                     id,
                     a,
                     identity,
-                    path,
+                    part,
                     base + written,
                     etag,
                     modified,
@@ -525,20 +522,20 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                     "response body exceeds declared length",
                 ));
             }
-            writer.write_all(&b[..n])?;
+            part.writer().write_all(&b[..n])?;
             written = next;
             if written
                 .checked_sub(checkpointed)
                 .ok_or_else(|| ManagerError::network("checkpoint accounting underflow"))?
                 >= CHECKPOINT_INTERVAL_BYTES
             {
-                writer.flush()?;
-                writer.sync_data()?;
+                part.writer().flush()?;
+                part.writer().sync_data()?;
                 self.save_progress(
                     id,
                     a,
                     identity,
-                    path,
+                    part,
                     base + written,
                     etag,
                     modified,
@@ -554,12 +551,14 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         id: &str,
         a: &ArtifactPlan,
         identity: &str,
-        path: &Path,
+        part: &storage::DownloadPart,
         bytes: u64,
         etag: Option<&str>,
         modified: Option<&str>,
         state: &str,
     ) -> Result<(), ManagerError> {
+        self.ensure_runtime_current()?;
+        part.revalidate()?;
         self.catalog.save_checkpoint(
             id,
             &ArtifactCheckpoint {
@@ -567,7 +566,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                 source_identity: identity.to_owned(),
                 downloaded_bytes: bytes,
                 expected_bytes: a.expected_bytes,
-                temp_path: path.to_path_buf(),
+                temp_path: part.nominal_path().to_path_buf(),
                 etag: etag.map(str::to_owned),
                 last_modified: modified.map(str::to_owned),
                 verified_sha256: None,
@@ -575,7 +574,14 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             },
         )
     }
-    fn save_verified(&self, id: &str, a: &ArtifactPlan, path: PathBuf) -> Result<(), ManagerError> {
+    fn save_verified(
+        &self,
+        id: &str,
+        a: &ArtifactPlan,
+        part: &storage::DownloadPart,
+    ) -> Result<(), ManagerError> {
+        self.ensure_runtime_current()?;
+        part.revalidate()?;
         self.catalog.save_checkpoint(
             id,
             &ArtifactCheckpoint {
@@ -583,7 +589,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                 source_identity: source_identity(a),
                 downloaded_bytes: a.expected_bytes,
                 expected_bytes: a.expected_bytes,
-                temp_path: path,
+                temp_path: part.nominal_path().to_path_buf(),
                 etag: None,
                 last_modified: None,
                 verified_sha256: Some(a.expected_sha256.clone()),

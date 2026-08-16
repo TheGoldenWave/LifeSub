@@ -25,6 +25,9 @@ use crate::asr::model_manager::{
 };
 use crate::asr::provider::{ProductionProviderFactory, Provider, ProviderError, ProviderSelection};
 use crate::asr::service::{AsrService, EnqueueProviderFactory, EnqueueReservations};
+use crate::asr::vad::VerifiedVadModel;
+#[cfg(feature = "asr-runtime")]
+use crate::asr::vad::{SherpaSpeechDetector, VadRuntimeConfig};
 use crate::catalog::Catalog;
 
 use super::{EvidenceService, ServiceError};
@@ -598,6 +601,47 @@ impl CoreRuntime {
                 )
             })?;
         ProductionProviderFactory::new().create(installation, selection)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn create_verified_vad_model(
+        &self,
+        model_id: &str,
+    ) -> Result<VerifiedVadModel, crate::asr::audio::AudioPreparationError> {
+        self.ensure_model_current()
+            .map_err(|_| crate::asr::audio::AudioPreparationError::DetectorFailed)?;
+        let installation = self
+            .model_manager
+            .executable_installation(model_id)
+            .map_err(|_| crate::asr::audio::AudioPreparationError::DetectorFailed)?;
+        VerifiedVadModel::new(installation)
+    }
+
+    #[cfg(feature = "asr-runtime")]
+    #[allow(dead_code)]
+    pub(crate) fn create_vad_detector(
+        &self,
+        model_id: &str,
+    ) -> Result<SherpaSpeechDetector, crate::asr::audio::AudioPreparationError> {
+        let model = self.create_verified_vad_model(model_id)?;
+        let config = VadRuntimeConfig::from_manifest(crate::asr::manifest::vad_manifest())?;
+        SherpaSpeechDetector::new(model, config)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_verified_vad_model_for_test(
+        &self,
+        model_id: &str,
+        install_dir: impl AsRef<Path>,
+        files: Vec<(std::path::PathBuf, Vec<u8>)>,
+    ) -> Result<VerifiedVadModel, crate::asr::audio::AudioPreparationError> {
+        self.ensure_model_current()
+            .map_err(|_| crate::asr::audio::AudioPreparationError::DetectorFailed)?;
+        let installation = self
+            .model_manager
+            .hold_anchored_execution_lease_for_test(model_id, install_dir, files)
+            .map_err(|_| crate::asr::audio::AudioPreparationError::DetectorFailed)?;
+        VerifiedVadModel::new(installation)
     }
 
     #[allow(dead_code)]

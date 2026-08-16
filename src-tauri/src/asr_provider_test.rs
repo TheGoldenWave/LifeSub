@@ -1,10 +1,12 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::{fs, path::Path};
 
 use crate::asr::provider::{
     AsrProvider, AudioSlice, BackendKind, CancellationToken, DeviceIdentity, NativeBackend,
     NativeBackendFactory, NativeRequest, ProviderError, ProviderFactory, ProviderOptions,
-    ProviderRequest, QualificationEvidence, RuntimeFamily,
+    ProviderRequest, ProviderSelection, QualificationEvidence, RuntimeFamily,
 };
 use crate::asr::settings::WhisperTask;
 use crate::domain::{AsrErrorCode, AsrProviderKind};
@@ -522,28 +524,204 @@ fn executable_lease_revalidates_every_shipping_bundle_before_backend_constructio
 }
 
 #[test]
-fn provider_factory_does_not_repeat_the_manager_inventory_hash_pass() {
-    use crate::asr::model_manager::{ModelManager, ReqwestTransport};
-    use crate::asr::provider::ProviderSelection;
-    use crate::catalog::Catalog;
-
+fn provider_factory_revalidates_held_inventory_before_and_after_native_construction() {
     let directory = tempfile::tempdir().unwrap();
-    let manager = ModelManager::new(
-        directory.path(),
-        ReqwestTransport::new().unwrap(),
-        Catalog::in_memory().unwrap(),
-    );
-    let lease = manager
-        .hold_execution_lease_for_test(SENSE, directory.path())
-        .unwrap();
-    assert_eq!(lease.validation_count(), 1);
+    let root = directory.path().join("data");
+    fs::create_dir_all(&root).unwrap();
+    let lease = anchored_test_lease(SENSE, &root);
+    assert_eq!(lease.validation_count(), 0);
     let backend = FakeBackendFactory::default();
     let provider = ProviderFactory::new(backend.clone())
         .create_verified(lease, ProviderSelection::for_test(SENSE))
         .unwrap();
     assert_eq!(backend.constructed.lock().unwrap().len(), 1);
     assert_eq!(provider.identity().model_id, SENSE);
-    assert_eq!(provider.inventory_validation_count_for_test(), 1);
+    assert_eq!(provider.inventory_validation_count_for_test(), 2);
+}
+
+fn anchored_test_lease(
+    model_id: &str,
+    root: &Path,
+) -> crate::asr::model_manager::ExecutableInstallationLease {
+    use crate::asr::model_manager::ExecutableInstallationLease;
+
+    let relative = Path::new("models/asr/test/model/bundle");
+    let manifest = crate::asr::manifest::model_registry()
+        .model(model_id)
+        .unwrap();
+    let required_files = match manifest.bundle.install_constraints {
+        crate::asr::manifest::InstallConstraints::Archive(constraints) => {
+            constraints.required_files
+        }
+        crate::asr::manifest::InstallConstraints::Direct(constraints) => constraints.required_files,
+    };
+    let files = required_files
+        .iter()
+        .map(|required| {
+            let bytes = format!("held:{}:{}", model_id, required.path).into_bytes();
+            let path = root.join(relative).join(required.path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            (PathBuf::from(required.path), bytes)
+        })
+        .collect::<Vec<_>>();
+    ExecutableInstallationLease::for_anchored_test(
+        model_id,
+        root,
+        relative,
+        files,
+        DeviceIdentity::current(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn verified_sherpa_provider_consumes_held_fds_and_releases_them_on_drop() {
+    for model_id in [SENSE, TINY, BASE, SMALL, QWEN06] {
+        let parent = tempfile::tempdir().unwrap();
+        let nominal_root = parent.path().join("data");
+        fs::create_dir_all(&nominal_root).unwrap();
+        let lease = anchored_test_lease(model_id, &nominal_root);
+        let backend = FakeBackendFactory::default();
+
+        let provider = ProviderFactory::new(backend.clone())
+            .create_verified(lease, ProviderSelection::for_test(model_id))
+            .unwrap();
+        let native = backend.constructed.lock().unwrap()[0].clone();
+        let direct_fd_count = if model_id == QWEN06 {
+            3
+        } else {
+            native.required_files.len()
+        };
+        assert!(
+            native.required_files[..direct_fd_count]
+                .iter()
+                .all(|path| path.starts_with("/dev/fd"))
+        );
+        assert!(native.required_files.iter().all(|path| path.exists()));
+
+        drop(provider);
+        assert!(native.required_files.iter().all(|path| !path.exists()));
+    }
+}
+
+#[test]
+fn qwen06_tokenizer_uses_a_private_alias_directory_backed_by_held_file_fds() {
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_test_lease(QWEN06, &nominal_root);
+    let backend = FakeBackendFactory::default();
+
+    let provider = ProviderFactory::new(backend.clone())
+        .create_verified(lease, ProviderSelection::for_test(QWEN06))
+        .unwrap();
+    let tokenizer = backend.constructed.lock().unwrap()[0].required_files[3].clone();
+    assert!(!tokenizer.starts_with("/dev/fd"));
+    assert_eq!(
+        fs::metadata(&tokenizer).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    for name in ["merges.txt", "tokenizer_config.json", "vocab.json"] {
+        let bytes = fs::read(tokenizer.join(name)).unwrap();
+        assert_eq!(bytes, format!("held:{QWEN06}:tokenizer/{name}").as_bytes());
+    }
+
+    drop(provider);
+    assert!(!tokenizer.exists());
+}
+
+#[test]
+fn qwen17_verified_factory_keeps_nominal_install_dir_until_candle_fd_support_exists() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut provider_request = request(QWEN17);
+    provider_request.install_dir = directory.path().to_path_buf();
+    let native = crate::asr::qwen3_asr::native_request(
+        &provider_request,
+        crate::asr::manifest::model_registry()
+            .model(QWEN17)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(native.install_dir, directory.path());
+    assert!(
+        native
+            .required_files
+            .iter()
+            .all(|path| path.starts_with(directory.path()))
+    );
+}
+
+#[test]
+fn root_entry_swap_never_redirects_verified_provider_to_replacement_files() {
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    let held_root = parent.path().join("held-data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_test_lease(SENSE, &nominal_root);
+    fs::rename(&nominal_root, &held_root).unwrap();
+    fs::create_dir_all(nominal_root.join("models/asr/test/model/bundle")).unwrap();
+    fs::write(
+        nominal_root.join("models/asr/test/model/bundle/model.int8.onnx"),
+        b"replacement",
+    )
+    .unwrap();
+    fs::write(
+        nominal_root.join("models/asr/test/model/bundle/tokens.txt"),
+        b"replacement",
+    )
+    .unwrap();
+    let backend = FakeBackendFactory::default();
+
+    let _provider = ProviderFactory::new(backend.clone())
+        .create_verified(lease, ProviderSelection::for_test(SENSE))
+        .unwrap();
+    let native = backend.constructed.lock().unwrap()[0].clone();
+    assert!(native.required_files.iter().all(|path| {
+        let bytes = fs::read(path).unwrap();
+        bytes.starts_with(b"held:")
+    }));
+}
+
+#[test]
+fn required_file_swap_during_backend_construction_fails_post_revalidation() {
+    #[derive(Clone)]
+    struct SwappingFactory {
+        target: PathBuf,
+        constructed: Arc<Mutex<usize>>,
+    }
+
+    impl NativeBackendFactory for SwappingFactory {
+        fn create(
+            &self,
+            _request: &NativeRequest,
+        ) -> Result<Box<dyn NativeBackend>, ProviderError> {
+            *self.constructed.lock().unwrap() += 1;
+            fs::rename(&self.target, self.target.with_extension("held")).unwrap();
+            fs::write(&self.target, b"replacement").unwrap();
+            Ok(Box::new(FakeBackend {
+                calls: Arc::new(Mutex::new(0)),
+                transcribe_failure: None,
+                cancel_during_call: None,
+            }))
+        }
+    }
+
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_test_lease(SENSE, &nominal_root);
+    let constructed = Arc::new(Mutex::new(0));
+    let factory = SwappingFactory {
+        target: nominal_root.join("models/asr/test/model/bundle/model.int8.onnx"),
+        constructed: constructed.clone(),
+    };
+
+    let error = ProviderFactory::new(factory)
+        .create_verified(lease, ProviderSelection::for_test(SENSE))
+        .unwrap_err();
+    assert_eq!(error.code(), AsrErrorCode::ModelIntegrityFailed);
+    assert_eq!(*constructed.lock().unwrap(), 1);
 }
 
 #[test]

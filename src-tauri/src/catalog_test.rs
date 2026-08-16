@@ -1,3 +1,4 @@
+use crate::asr::model_manager::{ArtifactCheckpoint, ModelCatalog, ModelInstallPlan};
 use crate::catalog::Catalog;
 use crate::domain::{AudioSource, CaptureSession, TranscriptSegment};
 
@@ -58,4 +59,62 @@ fn unknown_persisted_chunk_integrity_is_rejected() {
 
     assert!(catalog.chunk_integrity(&chunk.id).is_err());
     assert!(catalog.chunk_diagnostics(&chunk.id).is_err());
+}
+
+#[test]
+fn checkpoint_aggregate_failure_rolls_back_artifact_progress() {
+    let catalog = Catalog::in_memory().unwrap();
+    let plan = ModelInstallPlan::from_manifest(
+        crate::asr::manifest::model_registry()
+            .model("qwen3-asr-1.7b")
+            .unwrap(),
+    );
+    let download_id = catalog.begin_download(&plan).unwrap();
+    let artifact = &plan.artifacts[0];
+    catalog
+        .execute_test_sql(
+            "CREATE TRIGGER fail_model_download_aggregate
+             BEFORE UPDATE OF downloaded_bytes ON model_downloads
+             BEGIN SELECT RAISE(ABORT, 'injected aggregate failure'); END;",
+        )
+        .unwrap();
+
+    let error = catalog
+        .save_checkpoint(
+            &download_id,
+            &ArtifactCheckpoint {
+                artifact_id: artifact.artifact_id.clone(),
+                source_identity: format!(
+                    "{}\n{}\n{}\n{}\n{}\n{}",
+                    artifact.source_repository,
+                    artifact.source_model,
+                    artifact.revision,
+                    artifact.url,
+                    artifact.expected_sha256,
+                    artifact.required_path
+                ),
+                downloaded_bytes: 1,
+                expected_bytes: artifact.expected_bytes,
+                temp_path: std::path::PathBuf::from("checkpoint.part"),
+                etag: None,
+                last_modified: None,
+                verified_sha256: None,
+                state: "downloading".to_owned(),
+            },
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "model_catalog_failed");
+    assert!(
+        catalog
+            .checkpoint(&download_id, &artifact.artifact_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        catalog
+            .model_downloaded_bytes_for_test(&download_id)
+            .unwrap(),
+        0
+    );
 }

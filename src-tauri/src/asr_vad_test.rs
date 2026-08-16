@@ -1,12 +1,12 @@
-#[cfg(feature = "asr-runtime")]
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::asr::audio::{AudioPreparationError, SampleRange};
 use crate::asr::manifest::vad_manifest;
 use crate::asr::vad::{
     ENERGY_FRAME, ENERGY_HALF_FRAME, FakeSpeechDetector, MAX_PROVIDER_WINDOW, PADDING,
-    SPLIT_SEARCH_RADIUS, SpeechDetector, VadRuntimeConfig, partition_detector_cores,
-    partition_without_vad, select_boundary, select_split_boundary,
+    SPLIT_SEARCH_RADIUS, SpeechDetector, VadRuntimeConfig, VerifiedVadModel,
+    partition_detector_cores, partition_without_vad, select_boundary, select_split_boundary,
 };
 
 const TOTAL: u64 = 500_000;
@@ -203,4 +203,59 @@ fn native_config_maps_every_explicit_field_without_lifesub_window_constants() {
     assert_eq!(native.num_threads, 1);
     assert_eq!(native.provider.as_deref(), Some("cpu"));
     assert!(!native.debug);
+}
+
+fn anchored_vad_lease(root: &Path) -> crate::asr::model_manager::ExecutableInstallationLease {
+    use crate::asr::model_manager::ExecutableInstallationLease;
+    use crate::asr::provider::DeviceIdentity;
+
+    let relative = Path::new("models/asr/vad/silero/bundle");
+    let model = relative.join("silero_vad.onnx");
+    fs::create_dir_all(root.join(model.parent().unwrap())).unwrap();
+    fs::write(root.join(&model), b"held-vad-model").unwrap();
+    ExecutableInstallationLease::for_anchored_test(
+        vad_manifest().id,
+        root,
+        relative,
+        vec![(PathBuf::from("silero_vad.onnx"), b"held-vad-model".to_vec())],
+        DeviceIdentity::current(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn verified_vad_model_consumes_held_fd_across_root_swap_and_releases_on_drop() {
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    let held_root = parent.path().join("held-data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_vad_lease(&nominal_root);
+    fs::rename(&nominal_root, &held_root).unwrap();
+    fs::create_dir_all(nominal_root.join("models/asr/vad/silero/bundle")).unwrap();
+    fs::write(
+        nominal_root.join("models/asr/vad/silero/bundle/silero_vad.onnx"),
+        b"replacement-vad",
+    )
+    .unwrap();
+
+    let verified = VerifiedVadModel::new(lease).unwrap();
+    let fd_path = verified.path().to_path_buf();
+    assert_eq!(fs::read(&fd_path).unwrap(), b"held-vad-model");
+    assert_eq!(verified.validation_count_for_test(), 2);
+
+    drop(verified);
+    assert!(!fd_path.exists());
+}
+
+#[test]
+fn verified_vad_model_rejects_required_file_replacement() {
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_vad_lease(&nominal_root);
+    let model = nominal_root.join("models/asr/vad/silero/bundle/silero_vad.onnx");
+    fs::rename(&model, model.with_extension("held")).unwrap();
+    fs::write(&model, b"held-vad-model").unwrap();
+
+    assert!(VerifiedVadModel::new(lease).is_err());
 }

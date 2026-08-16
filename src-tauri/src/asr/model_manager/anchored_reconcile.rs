@@ -45,6 +45,10 @@ impl EntryStat {
     pub(super) fn is_file(self) -> bool {
         self.mode & libc::S_IFMT == libc::S_IFREG
     }
+
+    pub(super) fn same_object(self, other: Self) -> bool {
+        self.device == other.device && self.inode == other.inode && self.mode == other.mode
+    }
 }
 
 impl AnchoredFs {
@@ -74,7 +78,7 @@ impl AnchoredFs {
         open_dir_from(self.root.as_raw_fd(), relative)
     }
 
-    fn ensure_dir(&self, relative: &Path) -> Result<File, ManagerError> {
+    pub(super) fn ensure_dir(&self, relative: &Path) -> Result<File, ManagerError> {
         let mut current = self.root.try_clone()?;
         for component in relative.components() {
             let name = component_name(component.as_os_str())?;
@@ -121,7 +125,7 @@ impl AnchoredFs {
         Ok(bytes)
     }
 
-    fn file_len(&self, relative: &Path) -> Result<Option<u64>, ManagerError> {
+    pub(super) fn file_len(&self, relative: &Path) -> Result<Option<u64>, ManagerError> {
         let Some((parent, name)) = self.parent_and_name(relative)? else {
             return Ok(None);
         };
@@ -183,6 +187,65 @@ impl AnchoredFs {
             return Err(ManagerError::structural("expected regular file"));
         }
         Ok(file)
+    }
+
+    pub(super) fn open_regular_create(&self, relative: &Path) -> Result<File, ManagerError> {
+        let Some((parent, name)) = self.parent_and_name(relative)? else {
+            return Err(ManagerError::structural("expected regular file"));
+        };
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK
+                    | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(map_unsafe_entry(io::Error::last_os_error()));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let stat = file_stat(file.as_raw_fd())?;
+        if !stat.is_file() {
+            return Err(ManagerError::structural("expected regular file"));
+        }
+        parent.sync_all()?;
+        Ok(file)
+    }
+
+    pub(super) fn available_space(&self) -> Result<u64, ManagerError> {
+        let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        let result = unsafe { libc::fstatfs(self.root.as_raw_fd(), stats.as_mut_ptr()) };
+        if result != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let stats = unsafe { stats.assume_init() };
+        stats
+            .f_bavail
+            .checked_mul(stats.f_bsize as u64)
+            .ok_or_else(|| ManagerError::integrity("available space overflow"))
+    }
+
+    pub(super) fn same_device(&self, left: &Path, right: &Path) -> Result<(), ManagerError> {
+        let left = self
+            .open_dir(left)?
+            .ok_or_else(|| ManagerError::integrity("assembly directory is missing"))?;
+        let right = self
+            .open_dir(right)?
+            .ok_or_else(|| ManagerError::integrity("assembly directory is missing"))?;
+        if EntryStat::from_fd(left.as_raw_fd())?.device
+            != EntryStat::from_fd(right.as_raw_fd())?.device
+        {
+            return Err(ManagerError::new(
+                "insufficient_disk_space",
+                "staging and final directories are on different volumes",
+            ));
+        }
+        Ok(())
     }
 
     fn entries(&self, relative: &Path) -> Result<Option<Vec<OsString>>, ManagerError> {

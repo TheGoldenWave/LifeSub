@@ -91,6 +91,89 @@ fn core_runtime_keeps_one_model_execution_registry_across_job_apis() {
     assert!(!install_dir.exists());
 }
 
+#[test]
+fn production_vad_factory_holds_model_lease_until_verified_model_drop() {
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let runtime = CoreRuntime::initialize_with_boot_id(&data_dir, "boot-vad-factory").unwrap();
+    let model_id = crate::asr::manifest::vad_manifest().id;
+    let plan = ModelInstallPlan::from_vad_manifest(crate::asr::manifest::vad_manifest());
+    let install_dir = data_dir
+        .join("models/asr")
+        .join(&plan.provider)
+        .join(&plan.model_id)
+        .join(format!(
+            "{}-{}",
+            plan.manifest_version, plan.bundle_identity
+        ));
+    fs::create_dir_all(&install_dir).unwrap();
+    fs::write(install_dir.join("silero_vad.onnx"), b"held-vad").unwrap();
+    runtime
+        .model_manager()
+        .catalog_ref()
+        .publish_installation(&StoredInstallation {
+            model_id: plan.model_id.clone(),
+            provider: plan.provider.clone(),
+            manifest_version: plan.manifest_version.clone(),
+            bundle_identity: plan.bundle_identity.clone(),
+            install_dir: install_dir.clone(),
+            state: "runtime_qualified".to_owned(),
+            runtime_identity_json: Some("{}".to_owned()),
+        })
+        .unwrap();
+
+    let model = runtime
+        .create_verified_vad_model_for_test(
+            model_id,
+            &install_dir,
+            vec![(
+                std::path::PathBuf::from("silero_vad.onnx"),
+                b"held-vad".to_vec(),
+            )],
+        )
+        .unwrap();
+    assert_eq!(fs::read(model.path()).unwrap(), b"held-vad");
+    assert_eq!(
+        runtime.delete_model(model_id).unwrap_err().code(),
+        "model_in_use"
+    );
+
+    drop(model);
+    runtime.delete_model(model_id).unwrap();
+    assert!(!install_dir.exists());
+}
+
+#[test]
+fn production_vad_factory_stays_on_held_root_after_nominal_swap() {
+    let parent = tempdir().unwrap();
+    let data_dir = parent.path().join("data");
+    let held_dir = parent.path().join("held-data");
+    let runtime = CoreRuntime::initialize_with_boot_id(&data_dir, "boot-vad-swap").unwrap();
+    let model_id = crate::asr::manifest::vad_manifest().id;
+    let install_dir = data_dir.join("models/asr/vad/silero/bundle");
+    fs::create_dir_all(&install_dir).unwrap();
+    fs::write(install_dir.join("silero_vad.onnx"), b"held-vad").unwrap();
+    let model = runtime
+        .create_verified_vad_model_for_test(
+            model_id,
+            &install_dir,
+            vec![(
+                std::path::PathBuf::from("silero_vad.onnx"),
+                b"held-vad".to_vec(),
+            )],
+        )
+        .unwrap();
+
+    fs::rename(&data_dir, &held_dir).unwrap();
+    fs::create_dir_all(data_dir.join("models/asr/vad/silero/bundle")).unwrap();
+    fs::write(
+        data_dir.join("models/asr/vad/silero/bundle/silero_vad.onnx"),
+        b"replacement-vad",
+    )
+    .unwrap();
+    assert_eq!(fs::read(model.path()).unwrap(), b"held-vad");
+}
+
 #[cfg(unix)]
 #[test]
 fn invalidated_core_rejects_model_delete_and_reconcile_without_side_effects() {

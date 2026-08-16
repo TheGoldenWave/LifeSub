@@ -1,5 +1,9 @@
 use crate::asr::audio::{AudioPreparationError, SampleRange, checked_sample_index};
 use crate::asr::manifest::VadManifest;
+use crate::asr::model_manager::ExecutableInstallationLease;
+
+use std::fs::File;
+use std::path::{Path, PathBuf};
 
 pub const PADDING: u64 = 3_200;
 pub const MAX_PROVIDER_WINDOW: u64 = 400_000;
@@ -17,6 +21,50 @@ pub struct ProviderWindow {
 pub struct EvidenceUtterance {
     pub evidence: SampleRange,
     pub windows: Vec<ProviderWindow>,
+}
+
+pub struct VerifiedVadModel {
+    path: PathBuf,
+    _file: File,
+    _lease: ExecutableInstallationLease,
+}
+
+impl VerifiedVadModel {
+    pub fn new(lease: ExecutableInstallationLease) -> Result<Self, AudioPreparationError> {
+        if lease.model_id() != crate::asr::manifest::vad_manifest().id || !lease.is_fd_anchored() {
+            return Err(AudioPreparationError::InvalidVadConfig);
+        }
+        lease
+            .revalidate_execution_boundary()
+            .map_err(|_| AudioPreparationError::DetectorFailed)?;
+        let (file, path) = lease
+            .open_execution_path(Path::new("silero_vad.onnx"))
+            .map_err(|_| AudioPreparationError::DetectorFailed)?;
+        lease
+            .revalidate_execution_boundary()
+            .map_err(|_| AudioPreparationError::DetectorFailed)?;
+        Ok(Self {
+            path,
+            _file: file,
+            _lease: lease,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[cfg(feature = "asr-runtime")]
+    fn revalidate(&self) -> Result<(), AudioPreparationError> {
+        self._lease
+            .revalidate_execution_boundary()
+            .map_err(|_| AudioPreparationError::DetectorFailed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_count_for_test(&self) -> usize {
+        self._lease.validation_count()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -104,20 +152,23 @@ pub trait SpeechDetector {
 pub struct SherpaSpeechDetector {
     detector: sherpa_onnx::VoiceActivityDetector,
     window_size_samples: usize,
+    _model: VerifiedVadModel,
 }
 
 #[cfg(feature = "asr-runtime")]
 impl SherpaSpeechDetector {
     pub fn new(
-        verified_model_path: &std::path::Path,
+        verified_model: VerifiedVadModel,
         config: VadRuntimeConfig,
     ) -> Result<Self, AudioPreparationError> {
-        let native = config.to_sherpa_config(verified_model_path)?;
+        verified_model.revalidate()?;
+        let native = config.to_sherpa_config(verified_model.path())?;
         let detector = sherpa_onnx::VoiceActivityDetector::create(
             &native,
             config.max_speech_duration_seconds + config.min_silence_duration_seconds + 1.0,
         )
         .ok_or(AudioPreparationError::DetectorFailed)?;
+        verified_model.revalidate()?;
         let window_size_samples = usize::try_from(config.window_size_samples)
             .map_err(|_| AudioPreparationError::InvalidVadConfig)?;
         if window_size_samples == 0 {
@@ -126,6 +177,7 @@ impl SherpaSpeechDetector {
         Ok(Self {
             detector,
             window_size_samples,
+            _model: verified_model,
         })
     }
 

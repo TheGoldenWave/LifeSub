@@ -496,8 +496,7 @@ pub(crate) enum InstallFault {
 
 #[derive(Clone)]
 pub struct ModelManager<T, C> {
-    pub(super) root: PathBuf,
-    pub(super) anchored_root: Option<std::sync::Arc<File>>,
+    pub(super) storage: super::storage::ModelStorage,
     pub(super) transport: T,
     pub(super) catalog: C,
     pub(super) observed_sherpa_runtime: Option<FullSherpaRuntimeIdentity>,

@@ -201,7 +201,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
                 self.catalog.mark_download_recovery_required(&r.id)?;
             }
         }
-        let root = self.root.join("downloads");
+        let root = self.storage.nominal_root().join("downloads");
         if real_dir(&root)? {
             for e in fs::read_dir(&root)? {
                 let p = e?.path();
@@ -221,7 +221,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
         Ok(())
     }
     fn reconcile_staging(&self) -> Result<(), ManagerError> {
-        let root = self.root.join("staging");
+        let root = self.storage.nominal_root().join("staging");
         if !real_dir(&root)? {
             return Ok(());
         }
@@ -282,7 +282,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
                         "deletion marker does not match current Catalog lease",
                     ));
                 }
-                let trash_root = self.root.join("trash");
+                let trash_root = self.storage.nominal_root().join("trash");
                 fs::create_dir_all(&trash_root)?;
                 let trash = trash_root.join(format!(
                     "{}-recovery-{}",
@@ -290,7 +290,11 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
                     uuid::Uuid::new_v4().simple()
                 ));
                 fs::rename(&r.install_dir, &trash)?;
-                sync_dir(r.install_dir.parent().unwrap_or(&self.root))?;
+                sync_dir(
+                    r.install_dir
+                        .parent()
+                        .unwrap_or(self.storage.nominal_root()),
+                )?;
                 sync_dir(&trash_root)?;
                 self.catalog.complete_deletion_recovery(&lease)?;
                 fs::remove_dir_all(trash)?;
@@ -310,7 +314,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
         Ok(())
     }
     fn reconcile_trash(&self) -> Result<(), ManagerError> {
-        let root = self.root.join("trash");
+        let root = self.storage.nominal_root().join("trash");
         if !real_dir(&root)? {
             return Ok(());
         }
@@ -342,7 +346,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
         sync_dir(&root)
     }
     fn reconcile_unrecorded(&self) -> Result<(), ManagerError> {
-        let root = self.root.join("models/asr");
+        let root = self.storage.nominal_root().join("models/asr");
         match fs::symlink_metadata(&root) {
             Ok(m) if m.file_type().is_dir() => {}
             Ok(_) => {
@@ -393,7 +397,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
         Ok(())
     }
     fn quarantine_unknown(&self, src: &Path, reason: &str) -> Result<(), ManagerError> {
-        let q = self.root.join("quarantine");
+        let q = self.storage.nominal_root().join("quarantine");
         fs::create_dir_all(&q)?;
         fs::rename(
             src,

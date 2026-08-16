@@ -228,7 +228,8 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             }
         }
         let staging = self
-            .root
+            .storage
+            .nominal_root()
             .join("staging")
             .join(format!("{}-{}-{id}", p.model_id, p.manifest_version));
         if staging.exists() {
@@ -334,10 +335,10 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             s.remove(0)
         } else {
             self.available_space_override
-                .unwrap_or(fs2::available_space(&self.root)?)
+                .unwrap_or(fs2::available_space(self.storage.nominal_root())?)
         };
         #[cfg(not(test))]
-        let available = fs2::available_space(&self.root)?;
+        let available = fs2::available_space(self.storage.nominal_root())?;
         if available < required {
             Err(ManagerError::new(
                 "insufficient_disk_space",
@@ -352,7 +353,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         p: &ModelInstallPlan,
         id: Option<&str>,
     ) -> Result<u64, ManagerError> {
-        fs::create_dir_all(&self.root)?;
+        fs::create_dir_all(self.storage.nominal_root())?;
         let mut remaining = 0u64;
         for a in &p.artifacts {
             let cp = id
@@ -386,8 +387,8 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                     })?;
             }
         }
-        let staging = self.root.join("staging");
-        let final_root = self.root.join("models/asr");
+        let staging = self.storage.nominal_root().join("staging");
+        let final_root = self.storage.nominal_root().join("models/asr");
         fs::create_dir_all(&staging)?;
         fs::create_dir_all(&final_root)?;
         same_volume(&staging, &final_root)?;
@@ -399,7 +400,8 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         .ok_or_else(|| ManagerError::new("insufficient_disk_space", "disk calculation overflow"))
     }
     pub(super) fn install_dir(&self, p: &ModelInstallPlan) -> PathBuf {
-        self.root
+        self.storage
+            .nominal_root()
             .join("models/asr")
             .join(&p.provider)
             .join(&p.model_id)
@@ -411,7 +413,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         p: &ModelInstallPlan,
         reason: &str,
     ) -> Result<(), ManagerError> {
-        let q = self.root.join("quarantine");
+        let q = self.storage.nominal_root().join("quarantine");
         fs::create_dir_all(&q)?;
         fs::rename(
             source,

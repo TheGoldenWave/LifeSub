@@ -47,7 +47,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             self.catalog.abort_delete(&lease)?;
             return Err(ManagerError::integrity("installation directory missing"));
         }
-        let trash_root = self.root.join("trash");
+        let trash_root = self.storage.nominal_root().join("trash");
         let trash = trash_root.join(format!("{}-{}", id, uuid::Uuid::new_v4().simple()));
         let prepared = (|| {
             #[cfg(test)]
@@ -57,16 +57,16 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             write_json_marker(install, DELETE_MARKER, &lease, fault)?;
             fs::create_dir_all(&trash_root)?;
             fs::rename(install, &trash)?;
-            sync_dir(install.parent().unwrap_or(&self.root))?;
+            sync_dir(install.parent().unwrap_or(self.storage.nominal_root()))?;
             sync_dir(&trash_root)
         })();
         if let Err(e) = prepared {
-            restore(install, &trash, &trash_root, &self.root)?;
+            restore(install, &trash, &trash_root, self.storage.nominal_root())?;
             self.catalog.abort_delete(&lease)?;
             return Err(e);
         }
         if let Err(e) = self.catalog.finish_delete(&lease) {
-            restore(install, &trash, &trash_root, &self.root)?;
+            restore(install, &trash, &trash_root, self.storage.nominal_root())?;
             self.catalog.abort_delete(&lease)?;
             return Err(e);
         }

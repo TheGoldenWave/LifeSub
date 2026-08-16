@@ -19,34 +19,58 @@ thread_local! {
         std::cell::RefCell::new(None);
 }
 
-struct AnchoredFs {
+#[derive(Debug)]
+pub(super) struct AnchoredFs {
+    nominal_root: PathBuf,
     root: std::sync::Arc<File>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-struct EntryStat {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct EntryStat {
     device: u64,
     inode: u64,
     mode: libc::mode_t,
-    len: u64,
+    pub(super) len: u64,
 }
 
 impl EntryStat {
-    fn is_dir(self) -> bool {
+    pub(super) fn from_fd(fd: RawFd) -> Result<Self, ManagerError> {
+        file_stat(fd)
+    }
+
+    pub(super) fn is_dir(self) -> bool {
         self.mode & libc::S_IFMT == libc::S_IFDIR
     }
 
-    fn is_file(self) -> bool {
+    pub(super) fn is_file(self) -> bool {
         self.mode & libc::S_IFMT == libc::S_IFREG
     }
 }
 
 impl AnchoredFs {
-    fn new(root: std::sync::Arc<File>) -> Self {
-        Self { root }
+    pub(super) fn new(nominal_root: PathBuf, root: File) -> Self {
+        Self {
+            nominal_root,
+            root: std::sync::Arc::new(root),
+        }
     }
 
-    fn open_dir(&self, relative: &Path) -> Result<Option<File>, ManagerError> {
+    pub(super) fn nominal_root(&self) -> &Path {
+        &self.nominal_root
+    }
+
+    pub(super) fn reanchor(&self, relative: &Path) -> Result<Self, ManagerError> {
+        let root = self
+            .open_dir(relative)?
+            .ok_or_else(|| ManagerError::integrity("installation directory is missing"))?;
+        Ok(Self::new(self.nominal_root.join(relative), root))
+    }
+
+    pub(super) fn root_identity(&self) -> Result<EntryStat, ManagerError> {
+        file_stat(self.root.as_raw_fd())
+    }
+
+    pub(super) fn open_dir(&self, relative: &Path) -> Result<Option<File>, ManagerError> {
         open_dir_from(self.root.as_raw_fd(), relative)
     }
 
@@ -130,7 +154,11 @@ impl AnchoredFs {
         Ok(hex::encode(digest.finalize()))
     }
 
-    fn open_regular(&self, relative: &Path, writable: bool) -> Result<File, ManagerError> {
+    pub(super) fn open_regular(
+        &self,
+        relative: &Path,
+        writable: bool,
+    ) -> Result<File, ManagerError> {
         let Some((parent, name)) = self.parent_and_name(relative)? else {
             return Err(ManagerError::structural("expected regular file"));
         };
@@ -216,9 +244,12 @@ impl AnchoredFs {
 
 impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
     fn anchored_fs(&self) -> Result<AnchoredFs, ManagerError> {
-        self.anchored_root
-            .clone()
-            .map(AnchoredFs::new)
+        self.storage
+            .anchored_fs()
+            .map(|storage| AnchoredFs {
+                nominal_root: storage.nominal_root.clone(),
+                root: storage.root.clone(),
+            })
             .ok_or_else(|| ManagerError::structural("anchored data directory is missing"))
     }
 }
@@ -269,7 +300,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
                 let relative = PathBuf::from("downloads")
                     .join(&record.id)
                     .join(format!("{}.part", artifact.artifact_id));
-                let nominal = self.root.join(&relative);
+                let nominal = self.storage.nominal_root().join(&relative);
                 let source_matches = checkpoint.source_identity == source_identity(artifact)
                     && checkpoint.expected_bytes == artifact.expected_bytes
                     && checkpoint.temp_path == nominal;
@@ -495,7 +526,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
                         &final_path,
                         "models final entry is not a real directory",
                     )?;
-                    if recorded.contains(&self.root.join(&final_path)) {
+                    if recorded.contains(&self.storage.nominal_root().join(&final_path)) {
                         continue;
                     }
                     let Some(identity) = final_name.to_str() else {
@@ -564,7 +595,7 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
             provider: plan.provider.clone(),
             manifest_version: plan.manifest_version.clone(),
             bundle_identity: plan.bundle_identity.clone(),
-            install_dir: self.root.join(relative),
+            install_dir: self.storage.nominal_root().join(relative),
             state: match plan.qualification_policy {
                 QualificationPolicy::StructuralWithPinnedRuntime => "runtime_qualified",
                 QualificationPolicy::RuntimeSmokeRequired => "installed_unqualified",
@@ -598,7 +629,7 @@ fn recovery_code(error: &ManagerError) -> &'static str {
     }
 }
 
-fn validate_installation_anchored(
+pub(super) fn validate_installation_anchored(
     fs: &AnchoredFs,
     relative: &Path,
     plan: &ModelInstallPlan,

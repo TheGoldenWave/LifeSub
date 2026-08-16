@@ -80,10 +80,10 @@ fn header<'a>(h: &'a BTreeMap<String, String>, n: &str) -> Option<&'a str> {
 }
 
 impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
+    #[cfg(test)]
     pub fn new(root: impl AsRef<Path>, transport: T, catalog: C) -> Self {
         Self {
-            root: root.as_ref().to_path_buf(),
-            anchored_root: None,
+            storage: storage::ModelStorage::test_path(root.as_ref().to_path_buf()),
             transport,
             catalog,
             observed_sherpa_runtime: None,
@@ -101,17 +101,39 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         }
     }
     pub fn new_anchored(root: impl AsRef<Path>, root_dir: File, transport: T, catalog: C) -> Self {
-        let mut manager = Self::new(root, transport, catalog);
-        manager.anchored_root = Some(std::sync::Arc::new(root_dir));
-        manager
+        Self {
+            storage: storage::ModelStorage::anchored(root.as_ref().to_path_buf(), root_dir),
+            transport,
+            catalog,
+            observed_sherpa_runtime: None,
+            execution_leases: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            #[cfg(test)]
+            available_space_override: None,
+            #[cfg(test)]
+            delete_marker_fault: None,
+            #[cfg(test)]
+            install_fault: None,
+            #[cfg(test)]
+            available_space_sequence: None,
+        }
     }
     pub fn with_sherpa_runtime_identity(mut self, v: FullSherpaRuntimeIdentity) -> Self {
         self.observed_sherpa_runtime = Some(v);
         self
     }
+    #[allow(dead_code)]
+    pub(crate) fn catalog_ref(&self) -> &C {
+        &self.catalog
+    }
+    #[allow(dead_code)]
+    pub(crate) fn catalog_mut(&mut self) -> &mut C {
+        &mut self.catalog
+    }
     #[cfg(test)]
     pub(crate) fn catalog(&self) -> &C {
-        &self.catalog
+        self.catalog_ref()
     }
     #[cfg(test)]
     pub(crate) fn with_available_space_for_test(mut self, v: u64) -> Self {
@@ -535,6 +557,6 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         )
     }
     pub(super) fn download_dir(&self, id: &str) -> PathBuf {
-        self.root.join("downloads").join(id)
+        self.storage.nominal_root().join("downloads").join(id)
     }
 }

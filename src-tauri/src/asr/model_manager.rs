@@ -36,6 +36,7 @@ mod fs_support;
 mod install;
 mod install_support;
 mod reconcile;
+mod storage;
 mod types;
 
 pub(crate) use types::DeleteMarkerFault;
@@ -64,8 +65,11 @@ pub struct ExecutableInstallationLease {
     install_dir: PathBuf,
     runtime_identity_json: Option<String>,
     device: DeviceProfile,
+    #[cfg(test)]
     observed_sherpa_runtime: Option<FullSherpaRuntimeIdentity>,
+    installation_storage: storage::InstallationStorage,
     _guard: ExecutionLeaseGuard,
+    #[cfg(test)]
     validation_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -140,14 +144,49 @@ impl ExecutableInstallationLease {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn revalidate(&self) -> Result<(), ManagerError> {
+        #[cfg(test)]
         self.validation_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        validate_executable_installation(
-            &self.plan,
-            &self.install_dir,
-            self.observed_sherpa_runtime.as_ref(),
-        )
+        match &self.installation_storage {
+            #[cfg(test)]
+            storage::InstallationStorage::TestPath => validate_executable_installation(
+                &self.plan,
+                &self.install_dir,
+                self.observed_sherpa_runtime.as_ref(),
+            ),
+            storage::InstallationStorage::Anchored(_) => self.installation_storage.revalidate(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn open_required_file(&self, relative: &Path) -> Result<File, ManagerError> {
+        let relative = safe_relative_path(
+            relative
+                .to_str()
+                .ok_or_else(|| ManagerError::structural("non-UTF-8 required path"))?,
+        )?;
+        if !self
+            .plan
+            .install_contract
+            .required_files()
+            .iter()
+            .any(|required| Path::new(&required.path) == relative)
+        {
+            return Err(ManagerError::structural(
+                "file is not part of the execution contract",
+            ));
+        }
+        if let Some(file) = self.installation_storage.open_required(&relative)? {
+            return Ok(file);
+        }
+        #[cfg(test)]
+        return Ok(File::open(self.install_dir.join(relative))?);
+        #[cfg(not(test))]
+        Err(ManagerError::structural(
+            "anchored execution storage is missing",
+        ))
     }
 
     #[cfg(test)]
@@ -165,6 +204,7 @@ impl ExecutableInstallationLease {
         )));
         Ok(Self {
             observed_sherpa_runtime: plan.sherpa_runtime.clone(),
+            installation_storage: storage::InstallationStorage::TestPath,
             plan,
             install_dir: install_dir.as_ref().to_path_buf(),
             runtime_identity_json: Some("{}".to_owned()),
@@ -235,16 +275,54 @@ impl<T: HttpTransport> ModelManager<T, Catalog> {
             }
             _ => {}
         }
+        let installation_storage = match &self.storage {
+            #[cfg(test)]
+            storage::ModelStorage::TestPath(_) => {
+                validate_executable_installation(
+                    &plan,
+                    &record.install_dir,
+                    self.observed_sherpa_runtime.as_ref(),
+                )?;
+                storage::InstallationStorage::TestPath
+            }
+            storage::ModelStorage::Anchored(root) => {
+                let relative = self.storage.relative_install_path(&record.install_dir)?;
+                let required = plan
+                    .install_contract
+                    .required_files()
+                    .iter()
+                    .map(|file| {
+                        Ok((
+                            safe_relative_path(&file.path)?,
+                            file.bytes,
+                            file.sha256.clone(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ManagerError>>()?;
+                let installation =
+                    storage::AnchoredInstallation::capture(root, &relative, &required)?;
+                anchored_reconcile::validate_installation_anchored(
+                    installation.root(),
+                    Path::new(""),
+                    &plan,
+                    self.observed_sherpa_runtime.as_ref(),
+                )?;
+                storage::InstallationStorage::Anchored(installation)
+            }
+        };
         let lease = ExecutableInstallationLease {
             plan,
             install_dir: record.install_dir,
             runtime_identity_json: record.runtime_identity_json,
             device,
+            #[cfg(test)]
             observed_sherpa_runtime: self.observed_sherpa_runtime.clone(),
+            installation_storage,
             _guard: guard,
+            #[cfg(test)]
             validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
-        lease.revalidate()?;
+        lease.installation_storage.revalidate()?;
         Ok(lease)
     }
 }
@@ -288,6 +366,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         let plan = ModelInstallPlan::from_manifest(manifest);
         Ok(ExecutableInstallationLease {
             observed_sherpa_runtime: plan.sherpa_runtime.clone(),
+            installation_storage: storage::InstallationStorage::TestPath,
             plan,
             install_dir: install_dir.as_ref().to_path_buf(),
             runtime_identity_json: Some("{}".to_owned()),
@@ -310,6 +389,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
     }
 }
 
+#[allow(dead_code)]
 fn validate_executable_installation(
     plan: &ModelInstallPlan,
     install_dir: &Path,

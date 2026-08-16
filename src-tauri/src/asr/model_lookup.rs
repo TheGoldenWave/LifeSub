@@ -7,6 +7,7 @@ pub struct ModelCapabilities {
     pub selectable: bool,
     pub installable: bool,
     pub executable: bool,
+    pub reason_code: Option<String>,
 }
 
 impl ModelCapabilities {
@@ -30,6 +31,7 @@ impl ModelCapabilities {
             selectable,
             installable,
             executable,
+            reason_code: None,
         }
     }
 
@@ -38,8 +40,72 @@ impl ModelCapabilities {
             .iter()
             .any(|supported| supported == language.as_str())
     }
+
+    pub fn with_reason_code(mut self, reason_code: impl Into<String>) -> Self {
+        self.reason_code = Some(reason_code.into());
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceSupport {
+    Compatible,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstallationQualification {
+    NotInstalled,
+    InstalledUnqualified,
+    RuntimeQualified,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModelLookupContext {
+    pub device: DeviceSupport,
+    pub installation: InstallationQualification,
+}
+
+impl ModelLookupContext {
+    pub const fn new(device: DeviceSupport, installation: InstallationQualification) -> Self {
+        Self {
+            device,
+            installation,
+        }
+    }
 }
 
 pub trait ModelLookup {
     fn lookup(&self, model_id: &str) -> Option<ModelCapabilities>;
+
+    fn lookup_with_context(
+        &self,
+        model_id: &str,
+        context: ModelLookupContext,
+    ) -> Option<ModelCapabilities> {
+        let mut capabilities = self.lookup(model_id)?;
+        match (context.device, context.installation) {
+            (DeviceSupport::Unsupported, _) => {
+                capabilities.installable = false;
+                capabilities.executable = false;
+                capabilities.reason_code = Some("model_device_unsupported".to_owned());
+            }
+            (DeviceSupport::Compatible, InstallationQualification::NotInstalled) => {
+                capabilities.installable = true;
+                capabilities.executable = false;
+                capabilities.reason_code = Some("model_not_installed".to_owned());
+            }
+            (DeviceSupport::Compatible, InstallationQualification::InstalledUnqualified) => {
+                capabilities.installable = true;
+                capabilities.executable = false;
+                capabilities.reason_code = Some("model_runtime_unqualified".to_owned());
+            }
+            (DeviceSupport::Compatible, InstallationQualification::RuntimeQualified) => {
+                capabilities.installable = true;
+                capabilities.executable = true;
+                capabilities.reason_code = None;
+            }
+        }
+        Some(capabilities)
+    }
 }

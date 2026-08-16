@@ -10,6 +10,8 @@ mod commands;
 use tauri::Manager;
 
 #[cfg(test)]
+mod asr_manifest_test;
+#[cfg(test)]
 mod asr_runtime_test;
 #[cfg(test)]
 mod asr_settings_test;

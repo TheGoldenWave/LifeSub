@@ -1,3 +1,4 @@
+pub mod manifest;
 pub mod model_lookup;
 pub mod receipt;
 pub mod settings;

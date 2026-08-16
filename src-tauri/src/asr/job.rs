@@ -2,9 +2,9 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
 
 use crate::catalog::Catalog;
-use crate::catalog::jobs::{CancelResult, ReadyModel, RetryResult};
+use crate::catalog::jobs::{CancelResult, JobCatalog, JobCatalogError, ReadyModel, RetryResult};
 use crate::domain::AsrErrorCode;
-use crate::service::{RuntimeOwnershipError, RuntimeOwnershipGuard};
+use crate::service::{JobOwnershipCapability, RuntimeOwnershipError};
 
 const LEASE_SECONDS: i64 = 30;
 const RENEW_SECONDS: i64 = 5;
@@ -71,8 +71,7 @@ pub enum JobError {
 }
 
 pub struct JobRepository<'a, C = SystemClock> {
-    catalog: &'a Catalog,
-    ownership: &'a RuntimeOwnershipGuard,
+    jobs: JobCatalog<'a>,
     boot_id: String,
     clock: C,
 }
@@ -84,22 +83,20 @@ struct ClaimedBy<'a> {
 }
 
 impl<'a, C: Clock> JobRepository<'a, C> {
-    pub fn new(
+    pub(crate) fn from_core(
         catalog: &'a Catalog,
-        ownership: &'a RuntimeOwnershipGuard,
+        capability: JobOwnershipCapability<'a>,
         boot_id: impl Into<String>,
         clock: C,
     ) -> Self {
         Self {
-            catalog,
-            ownership,
+            jobs: JobCatalog::new(catalog, capability),
             boot_id: boot_id.into(),
             clock,
         }
     }
 
     pub fn claim(&self, worker_id: &str) -> Result<Option<ClaimedJob>, JobError> {
-        self.ensure_owner()?;
         let now = self.clock.now();
         let lease_expires_at = now + Duration::seconds(LEASE_SECONDS);
         let claimed_by = serde_json::to_string(&ClaimedBy {
@@ -107,8 +104,8 @@ impl<'a, C: Clock> JobRepository<'a, C> {
             worker_id,
         })
         .expect("claimed-by serialization is infallible");
-        self.catalog
-            .claim_asr_job(
+        self.jobs
+            .claim(
                 &claimed_by,
                 &canonical_time(now),
                 &canonical_time(lease_expires_at),
@@ -126,36 +123,34 @@ impl<'a, C: Clock> JobRepository<'a, C> {
                     },
                 })
             })
-            .map_err(JobError::Catalog)
+            .map_err(map_catalog_error)
     }
 
     pub fn renew(&self, token: &ClaimToken) -> Result<(), JobError> {
-        self.ensure_owner()?;
         let now = self.clock.now();
         let changed = self
-            .catalog
-            .renew_asr_job(
+            .jobs
+            .renew(
                 &token.job_id,
                 &token.claimed_by,
                 token.claim_generation,
                 &canonical_time(now),
                 &canonical_time(now + Duration::seconds(LEASE_SECONDS)),
             )
-            .map_err(JobError::Catalog)?;
+            .map_err(map_catalog_error)?;
         owned(changed)
     }
 
     pub fn mark_transcribing(&self, token: &ClaimToken) -> Result<(), JobError> {
-        self.ensure_owner()?;
         let changed = self
-            .catalog
-            .mark_asr_job_transcribing(
+            .jobs
+            .mark_transcribing(
                 &token.job_id,
                 &token.claimed_by,
                 token.claim_generation,
                 &canonical_time(self.clock.now()),
             )
-            .map_err(JobError::Catalog)?;
+            .map_err(map_catalog_error)?;
         owned(changed)
     }
 
@@ -165,10 +160,9 @@ impl<'a, C: Clock> JobRepository<'a, C> {
         error_code: AsrErrorCode,
         error_summary: &str,
     ) -> Result<(), JobError> {
-        self.ensure_owner()?;
         let changed = self
-            .catalog
-            .fail_asr_job(
+            .jobs
+            .fail(
                 &token.job_id,
                 &token.claimed_by,
                 token.claim_generation,
@@ -176,46 +170,43 @@ impl<'a, C: Clock> JobRepository<'a, C> {
                 error_name(error_code),
                 error_summary,
             )
-            .map_err(JobError::Catalog)?;
+            .map_err(map_catalog_error)?;
         owned(changed)
     }
 
     pub fn request_cancel(&self, job_id: &str) -> Result<CancellationOutcome, JobError> {
-        self.ensure_owner()?;
-        self.catalog
-            .request_asr_job_cancel(job_id, &canonical_time(self.clock.now()))
+        self.jobs
+            .request_cancel(job_id, &canonical_time(self.clock.now()))
             .map(|result| match result {
                 CancelResult::Cancelled => CancellationOutcome::Cancelled,
                 CancelResult::Requested => CancellationOutcome::Requested,
                 CancelResult::Unchanged => CancellationOutcome::Unchanged,
             })
-            .map_err(JobError::Catalog)
+            .map_err(map_catalog_error)
     }
 
     pub fn acknowledge_cancel(&self, token: &ClaimToken) -> Result<(), JobError> {
-        self.ensure_owner()?;
         let changed = self
-            .catalog
-            .acknowledge_asr_job_cancel(
+            .jobs
+            .acknowledge_cancel(
                 &token.job_id,
                 &token.claimed_by,
                 token.claim_generation,
                 &canonical_time(self.clock.now()),
             )
-            .map_err(JobError::Catalog)?;
+            .map_err(map_catalog_error)?;
         owned(changed)
     }
 
     pub fn recover(&self) -> Result<RecoveryOutcome, JobError> {
-        self.ensure_owner()?;
         let now = self.clock.now();
         let counts = self
-            .catalog
-            .recover_asr_jobs(&self.boot_id, &canonical_time(now), |attempt| {
+            .jobs
+            .recover(&self.boot_id, &canonical_time(now), |attempt| {
                 let delay = if attempt <= 1 { 5 } else { 30 };
                 canonical_time(now + Duration::seconds(delay))
             })
-            .map_err(JobError::Catalog)?;
+            .map_err(map_catalog_error)?;
         Ok(RecoveryOutcome {
             requeued: counts.requeued,
             cancelled: counts.cancelled,
@@ -228,31 +219,25 @@ impl<'a, C: Clock> JobRepository<'a, C> {
         job_id: &str,
         readiness: &ModelReadiness,
     ) -> Result<bool, JobError> {
-        self.ensure_owner()?;
-        self.catalog
-            .asr_job_model_ready(job_id, &ready_model(readiness))
-            .map_err(JobError::Catalog)
+        self.jobs
+            .model_ready(job_id, &ready_model(readiness))
+            .map_err(map_catalog_error)
     }
 
     pub fn retry(&self, job_id: &str, readiness: &ModelReadiness) -> Result<i64, JobError> {
-        self.ensure_owner()?;
         match self
-            .catalog
-            .retry_asr_job(
+            .jobs
+            .retry(
                 job_id,
                 &ready_model(readiness),
                 &canonical_time(self.clock.now()),
             )
-            .map_err(JobError::Catalog)?
+            .map_err(map_catalog_error)?
         {
             RetryResult::Retried(generation) => Ok(generation),
             RetryResult::InvalidTransition => Err(JobError::InvalidTransition),
             RetryResult::ModelNotReady => Err(JobError::ModelNotReady),
         }
-    }
-
-    fn ensure_owner(&self) -> Result<(), JobError> {
-        self.ownership.ensure_current().map_err(JobError::Ownership)
     }
 }
 
@@ -275,6 +260,13 @@ fn owned(changed: usize) -> Result<(), JobError> {
         Ok(())
     } else {
         Err(JobError::OwnershipLost)
+    }
+}
+
+fn map_catalog_error(error: JobCatalogError) -> JobError {
+    match error {
+        JobCatalogError::Ownership(error) => JobError::Ownership(error),
+        JobCatalogError::Catalog(error) => JobError::Catalog(error),
     }
 }
 

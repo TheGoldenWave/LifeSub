@@ -9,6 +9,7 @@ use std::path::Path;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
+use crate::asr::job::{Clock, JobRepository, SystemClock};
 #[cfg(feature = "asr-runtime")]
 use crate::asr::model_manager::FullSherpaRuntimeIdentity;
 use crate::asr::model_manager::{ManagerError, ModelManager, ReqwestTransport};
@@ -24,6 +25,7 @@ const CORE_LOCK_SUFFIX: &str = ".lock";
 #[derive(Debug)]
 pub enum RuntimeOwnershipError {
     AlreadyOwned,
+    CatalogMismatch,
     UnsafePath,
     Io(io::Error),
 }
@@ -44,6 +46,20 @@ pub struct RuntimeOwnershipGuard {
 pub struct CoreRuntime {
     catalog: Catalog,
     ownership: RuntimeOwnershipGuard,
+}
+
+pub(crate) struct JobOwnershipCapability<'a> {
+    catalog_instance_id: uuid::Uuid,
+    ownership: &'a RuntimeOwnershipGuard,
+}
+
+impl JobOwnershipCapability<'_> {
+    pub(crate) fn ensure_for(&self, catalog: &Catalog) -> Result<(), RuntimeOwnershipError> {
+        if catalog.instance_id() != self.catalog_instance_id {
+            return Err(RuntimeOwnershipError::CatalogMismatch);
+        }
+        self.ownership.ensure_current()
+    }
 }
 
 #[derive(Debug)]
@@ -284,6 +300,46 @@ impl CoreRuntime {
 
     pub fn into_parts(self) -> (Catalog, RuntimeOwnershipGuard) {
         (self.catalog, self.ownership)
+    }
+
+    pub fn job_repository(&self, boot_id: impl Into<String>) -> JobRepository<'_> {
+        self.build_job_repository(&self.catalog, boot_id, SystemClock)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn job_repository_with_clock<C: Clock>(
+        &self,
+        boot_id: impl Into<String>,
+        clock: C,
+    ) -> JobRepository<'_, C> {
+        self.build_job_repository(&self.catalog, boot_id, clock)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn job_repository_for_foreign_core_with_clock<'a, C: Clock>(
+        &'a self,
+        foreign: &'a CoreRuntime,
+        boot_id: impl Into<String>,
+        clock: C,
+    ) -> JobRepository<'a, C> {
+        self.build_job_repository(&foreign.catalog, boot_id, clock)
+    }
+
+    fn build_job_repository<'a, C: Clock>(
+        &'a self,
+        catalog: &'a Catalog,
+        boot_id: impl Into<String>,
+        clock: C,
+    ) -> JobRepository<'a, C> {
+        JobRepository::from_core(
+            catalog,
+            JobOwnershipCapability {
+                catalog_instance_id: self.catalog.instance_id(),
+                ownership: &self.ownership,
+            },
+            boot_id,
+            clock,
+        )
     }
 }
 

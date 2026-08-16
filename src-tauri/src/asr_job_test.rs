@@ -9,9 +9,8 @@ use tempfile::TempDir;
 use crate::asr::job::{
     CancellationOutcome, Clock, JobError, JobRepository, ModelReadiness, RecoveryOutcome,
 };
-use crate::catalog::Catalog;
 use crate::domain::AsrErrorCode;
-use crate::service::{RuntimeOwnershipError, RuntimeOwnershipGuard};
+use crate::service::{CoreRuntime, RuntimeOwnershipError};
 
 const NOW: &str = "2026-08-16T08:00:00.000Z";
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -46,8 +45,7 @@ struct Fixture {
     _parent: TempDir,
     data_dir: std::path::PathBuf,
     db_path: std::path::PathBuf,
-    catalog: Catalog,
-    ownership: RuntimeOwnershipGuard,
+    runtime: CoreRuntime,
     clock: TestClock,
 }
 
@@ -55,22 +53,20 @@ impl Fixture {
     fn new() -> Self {
         let parent = tempfile::tempdir().unwrap();
         let data_dir = parent.path().join("data");
-        fs::create_dir(&data_dir).unwrap();
-        let ownership = RuntimeOwnershipGuard::acquire(&data_dir).unwrap();
         let db_path = data_dir.join("lifesub.sqlite3");
-        let catalog = Catalog::open(&db_path).unwrap();
+        let runtime = CoreRuntime::initialize(&data_dir).unwrap();
         Self {
             _parent: parent,
             data_dir,
             db_path,
-            catalog,
-            ownership,
+            runtime,
             clock: TestClock::new(),
         }
     }
 
     fn repository(&self, boot_id: &str) -> JobRepository<'_, TestClock> {
-        JobRepository::new(&self.catalog, &self.ownership, boot_id, self.clock.clone())
+        self.runtime
+            .job_repository_with_clock(boot_id, self.clock.clone())
     }
 
     fn insert_job(&self, id: &str, state: &str, integrity: &str, available_at: &str) {
@@ -249,25 +245,14 @@ fn claim_is_atomic_fenced_ordered_and_requires_available_input() {
 }
 
 #[test]
-fn two_catalog_connections_cannot_claim_the_same_job() {
+fn two_coordinators_from_one_core_cannot_claim_the_same_job() {
     let fixture = Fixture::new();
     fixture.insert_job("only", "queued", "available", NOW);
-    let second_catalog = Catalog::open(&fixture.db_path).unwrap();
     let barrier = Barrier::new(2);
 
     let claimed = thread::scope(|scope| {
-        let first = JobRepository::new(
-            &fixture.catalog,
-            &fixture.ownership,
-            "boot-a",
-            fixture.clock.clone(),
-        );
-        let second = JobRepository::new(
-            &second_catalog,
-            &fixture.ownership,
-            "boot-b",
-            fixture.clock.clone(),
-        );
+        let first = fixture.repository("boot-a");
+        let second = fixture.repository("boot-b");
         let first_barrier = &barrier;
         let second_barrier = &barrier;
         let one = scope.spawn(move || {
@@ -283,6 +268,36 @@ fn two_catalog_connections_cannot_claim_the_same_job() {
 
     assert_eq!(claimed.iter().filter(|claim| claim.is_some()).count(), 1);
     assert_eq!(fixture.row("only").attempt_count, 1);
+}
+
+#[test]
+fn core_job_repository_is_the_only_construction_boundary() {
+    let repository = include_str!("asr/job.rs");
+    let catalog_jobs = include_str!("catalog/jobs.rs");
+
+    assert!(!repository.contains("pub fn new("));
+    assert!(!catalog_jobs.contains("pub(crate) fn claim_asr_job"));
+    assert!(!catalog_jobs.contains("pub(crate) fn retry_asr_job"));
+}
+
+#[test]
+fn foreign_catalog_and_guard_capability_are_rejected() {
+    let catalog_owner = Fixture::new();
+    let guard_owner = Fixture::new();
+    catalog_owner.insert_job("owned", "queued", "available", NOW);
+    let jobs = guard_owner
+        .runtime
+        .job_repository_for_foreign_core_with_clock(
+            &catalog_owner.runtime,
+            "boot-b",
+            guard_owner.clock.clone(),
+        );
+
+    assert!(matches!(
+        jobs.claim("worker-1"),
+        Err(JobError::Ownership(RuntimeOwnershipError::CatalogMismatch))
+    ));
+    assert_eq!(catalog_owner.row("owned").state, "queued");
 }
 
 #[test]

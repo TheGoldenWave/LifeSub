@@ -19,6 +19,7 @@ pub use chunks::ChunkDiagnostics;
 pub(crate) use models::ModelInstallationRecord;
 
 pub struct Catalog {
+    instance_id: uuid::Uuid,
     connection: Mutex<Connection>,
     #[cfg(test)]
     fail_next_chunk_insert: AtomicBool,
@@ -27,6 +28,7 @@ pub struct Catalog {
 impl Catalog {
     pub fn in_memory() -> rusqlite::Result<Self> {
         let catalog = Self {
+            instance_id: uuid::Uuid::new_v4(),
             connection: Mutex::new(Connection::open_in_memory()?),
             #[cfg(test)]
             fail_next_chunk_insert: AtomicBool::new(false),
@@ -37,12 +39,17 @@ impl Catalog {
 
     pub fn open(path: impl AsRef<std::path::Path>) -> rusqlite::Result<Self> {
         let catalog = Self {
+            instance_id: uuid::Uuid::new_v4(),
             connection: Mutex::new(Connection::open(path)?),
             #[cfg(test)]
             fail_next_chunk_insert: AtomicBool::new(false),
         };
         migrations::migrate(&mut catalog.connection.lock().unwrap())?;
         Ok(catalog)
+    }
+
+    pub(crate) const fn instance_id(&self) -> uuid::Uuid {
+        self.instance_id
     }
 
     pub fn insert_session(&self, session: &CaptureSession) -> rusqlite::Result<()> {

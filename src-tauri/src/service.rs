@@ -20,6 +20,7 @@ mod runtime_lock;
 
 pub use error::{ImportFault, ServiceError};
 pub use evidence_uri::{parse_evidence_uri, EvidenceTarget};
+pub(crate) use runtime_lock::JobOwnershipCapability;
 pub use runtime_lock::{
     CoreRuntime, CoreRuntimeError, RuntimeOwnershipError, RuntimeOwnershipGuard,
 };

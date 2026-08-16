@@ -2,7 +2,148 @@ use chrono::DateTime;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::Deserialize;
 
+use crate::service::{JobOwnershipCapability, RuntimeOwnershipError};
+
 use super::Catalog;
+
+#[derive(Debug)]
+pub(crate) enum JobCatalogError {
+    Ownership(RuntimeOwnershipError),
+    Catalog(rusqlite::Error),
+}
+
+pub(crate) struct JobCatalog<'a> {
+    catalog: &'a Catalog,
+    capability: JobOwnershipCapability<'a>,
+}
+
+impl<'a> JobCatalog<'a> {
+    pub(crate) fn new(catalog: &'a Catalog, capability: JobOwnershipCapability<'a>) -> Self {
+        Self {
+            catalog,
+            capability,
+        }
+    }
+
+    pub(crate) fn claim(
+        &self,
+        claimed_by: &str,
+        now: &str,
+        lease_expires_at: &str,
+    ) -> Result<Option<ClaimedJobRow>, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .claim_asr_job(claimed_by, now, lease_expires_at)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn renew(
+        &self,
+        id: &str,
+        claimed_by: &str,
+        generation: i64,
+        now: &str,
+        lease_expires_at: &str,
+    ) -> Result<usize, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .renew_asr_job(id, claimed_by, generation, now, lease_expires_at)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn mark_transcribing(
+        &self,
+        id: &str,
+        claimed_by: &str,
+        generation: i64,
+        now: &str,
+    ) -> Result<usize, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .mark_asr_job_transcribing(id, claimed_by, generation, now)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn fail(
+        &self,
+        id: &str,
+        claimed_by: &str,
+        generation: i64,
+        now: &str,
+        error_code: &str,
+        error_summary: &str,
+    ) -> Result<usize, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .fail_asr_job(id, claimed_by, generation, now, error_code, error_summary)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn request_cancel(
+        &self,
+        id: &str,
+        now: &str,
+    ) -> Result<CancelResult, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .request_asr_job_cancel(id, now)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn acknowledge_cancel(
+        &self,
+        id: &str,
+        claimed_by: &str,
+        generation: i64,
+        now: &str,
+    ) -> Result<usize, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .acknowledge_asr_job_cancel(id, claimed_by, generation, now)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn recover(
+        &self,
+        current_boot_id: &str,
+        now: &str,
+        retry_at: impl Fn(i64) -> String,
+    ) -> Result<RecoveryCounts, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .recover_asr_jobs(current_boot_id, now, retry_at)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn model_ready(
+        &self,
+        id: &str,
+        model: &ReadyModel<'_>,
+    ) -> Result<bool, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .asr_job_model_ready(id, model)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn retry(
+        &self,
+        id: &str,
+        model: &ReadyModel<'_>,
+        now: &str,
+    ) -> Result<RetryResult, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .retry_asr_job(id, model, now)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    fn ensure(&self) -> Result<(), JobCatalogError> {
+        self.capability
+            .ensure_for(self.catalog)
+            .map_err(JobCatalogError::Ownership)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ClaimedJobRow {
@@ -58,7 +199,7 @@ pub(crate) struct ReadyModel<'a> {
 }
 
 impl Catalog {
-    pub(crate) fn claim_asr_job(
+    fn claim_asr_job(
         &self,
         claimed_by: &str,
         now: &str,
@@ -122,7 +263,7 @@ impl Catalog {
         Ok(Some(claimed))
     }
 
-    pub(crate) fn renew_asr_job(
+    fn renew_asr_job(
         &self,
         id: &str,
         claimed_by: &str,
@@ -141,7 +282,7 @@ impl Catalog {
         )
     }
 
-    pub(crate) fn mark_asr_job_transcribing(
+    fn mark_asr_job_transcribing(
         &self,
         id: &str,
         claimed_by: &str,
@@ -157,7 +298,7 @@ impl Catalog {
         )
     }
 
-    pub(crate) fn fail_asr_job(
+    fn fail_asr_job(
         &self,
         id: &str,
         claimed_by: &str,
@@ -177,11 +318,7 @@ impl Catalog {
         )
     }
 
-    pub(crate) fn request_asr_job_cancel(
-        &self,
-        id: &str,
-        now: &str,
-    ) -> rusqlite::Result<CancelResult> {
+    fn request_asr_job_cancel(&self, id: &str, now: &str) -> rusqlite::Result<CancelResult> {
         let mut connection = self.connection.lock().unwrap();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let cancelled = transaction.execute(
@@ -210,7 +347,7 @@ impl Catalog {
         })
     }
 
-    pub(crate) fn acknowledge_asr_job_cancel(
+    fn acknowledge_asr_job_cancel(
         &self,
         id: &str,
         claimed_by: &str,
@@ -228,7 +365,7 @@ impl Catalog {
         )
     }
 
-    pub(crate) fn recover_asr_jobs(
+    fn recover_asr_jobs(
         &self,
         current_boot_id: &str,
         now: &str,
@@ -319,11 +456,7 @@ impl Catalog {
         Ok(counts)
     }
 
-    pub(crate) fn asr_job_model_ready(
-        &self,
-        id: &str,
-        model: &ReadyModel<'_>,
-    ) -> rusqlite::Result<bool> {
+    fn asr_job_model_ready(&self, id: &str, model: &ReadyModel<'_>) -> rusqlite::Result<bool> {
         self.connection.lock().unwrap().query_row(
             "SELECT EXISTS(
                SELECT 1
@@ -351,7 +484,7 @@ impl Catalog {
         )
     }
 
-    pub(crate) fn retry_asr_job(
+    fn retry_asr_job(
         &self,
         id: &str,
         model: &ReadyModel<'_>,

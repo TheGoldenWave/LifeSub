@@ -1,7 +1,9 @@
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::catalog::Catalog;
+use crate::catalog::jobs::OwnedMutationResult;
 use crate::catalog::jobs::{CancelResult, JobCatalog, JobCatalogError, ReadyModel, RetryResult};
 use crate::domain::AsrErrorCode;
 use crate::service::{JobOwnershipCapability, RuntimeOwnershipError};
@@ -66,14 +68,46 @@ pub enum JobError {
     Ownership(RuntimeOwnershipError),
     Catalog(rusqlite::Error),
     OwnershipLost,
+    CancelRequested,
+    CoordinatorAlreadyActive,
     InvalidTransition,
     ModelNotReady,
 }
 
-pub struct JobRepository<'a, C = SystemClock> {
+pub(crate) struct JobRepository<'a, C = SystemClock> {
     jobs: JobCatalog<'a>,
     boot_id: String,
     clock: C,
+}
+
+pub struct JobCoordinator<'a, C = SystemClock> {
+    repository: JobRepository<'a, C>,
+    worker_id: String,
+    active: Option<ClaimedJob>,
+    _reservation: JobCoordinatorReservation<'a>,
+}
+
+pub struct JobControl<'a, C = SystemClock> {
+    repository: JobRepository<'a, C>,
+}
+
+pub(crate) struct JobCoordinatorReservation<'a> {
+    reserved: &'a AtomicBool,
+}
+
+impl<'a> JobCoordinatorReservation<'a> {
+    pub(crate) fn try_reserve(reserved: &'a AtomicBool) -> Result<Self, JobError> {
+        reserved
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| JobError::CoordinatorAlreadyActive)?;
+        Ok(Self { reserved })
+    }
+}
+
+impl Drop for JobCoordinatorReservation<'_> {
+    fn drop(&mut self) {
+        self.reserved.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Serialize)]
@@ -96,7 +130,7 @@ impl<'a, C: Clock> JobRepository<'a, C> {
         }
     }
 
-    pub fn claim(&self, worker_id: &str) -> Result<Option<ClaimedJob>, JobError> {
+    pub(crate) fn claim(&self, worker_id: &str) -> Result<Option<ClaimedJob>, JobError> {
         let now = self.clock.now();
         let lease_expires_at = now + Duration::seconds(LEASE_SECONDS);
         let claimed_by = serde_json::to_string(&ClaimedBy {
@@ -126,9 +160,9 @@ impl<'a, C: Clock> JobRepository<'a, C> {
             .map_err(map_catalog_error)
     }
 
-    pub fn renew(&self, token: &ClaimToken) -> Result<(), JobError> {
+    pub(crate) fn renew(&self, token: &ClaimToken) -> Result<(), JobError> {
         let now = self.clock.now();
-        let changed = self
+        let result = self
             .jobs
             .renew(
                 &token.job_id,
@@ -138,11 +172,11 @@ impl<'a, C: Clock> JobRepository<'a, C> {
                 &canonical_time(now + Duration::seconds(LEASE_SECONDS)),
             )
             .map_err(map_catalog_error)?;
-        owned(changed)
+        owned_mutation(result)
     }
 
-    pub fn mark_transcribing(&self, token: &ClaimToken) -> Result<(), JobError> {
-        let changed = self
+    pub(crate) fn mark_transcribing(&self, token: &ClaimToken) -> Result<(), JobError> {
+        let result = self
             .jobs
             .mark_transcribing(
                 &token.job_id,
@@ -151,16 +185,16 @@ impl<'a, C: Clock> JobRepository<'a, C> {
                 &canonical_time(self.clock.now()),
             )
             .map_err(map_catalog_error)?;
-        owned(changed)
+        owned_mutation(result)
     }
 
-    pub fn fail(
+    pub(crate) fn fail(
         &self,
         token: &ClaimToken,
         error_code: AsrErrorCode,
         error_summary: &str,
     ) -> Result<(), JobError> {
-        let changed = self
+        let result = self
             .jobs
             .fail(
                 &token.job_id,
@@ -171,10 +205,10 @@ impl<'a, C: Clock> JobRepository<'a, C> {
                 error_summary,
             )
             .map_err(map_catalog_error)?;
-        owned(changed)
+        owned_mutation(result)
     }
 
-    pub fn request_cancel(&self, job_id: &str) -> Result<CancellationOutcome, JobError> {
+    pub(crate) fn request_cancel(&self, job_id: &str) -> Result<CancellationOutcome, JobError> {
         self.jobs
             .request_cancel(job_id, &canonical_time(self.clock.now()))
             .map(|result| match result {
@@ -185,7 +219,7 @@ impl<'a, C: Clock> JobRepository<'a, C> {
             .map_err(map_catalog_error)
     }
 
-    pub fn acknowledge_cancel(&self, token: &ClaimToken) -> Result<(), JobError> {
+    pub(crate) fn acknowledge_cancel(&self, token: &ClaimToken) -> Result<(), JobError> {
         let changed = self
             .jobs
             .acknowledge_cancel(
@@ -198,7 +232,7 @@ impl<'a, C: Clock> JobRepository<'a, C> {
         owned(changed)
     }
 
-    pub fn recover(&self) -> Result<RecoveryOutcome, JobError> {
+    pub(crate) fn recover(&self) -> Result<RecoveryOutcome, JobError> {
         let now = self.clock.now();
         let counts = self
             .jobs
@@ -214,7 +248,13 @@ impl<'a, C: Clock> JobRepository<'a, C> {
         })
     }
 
-    pub fn is_ready_to_retry(
+    fn owns_running(&self, token: &ClaimToken) -> Result<bool, JobError> {
+        self.jobs
+            .owns_running(&token.job_id, &token.claimed_by, token.claim_generation)
+            .map_err(map_catalog_error)
+    }
+
+    pub(crate) fn is_ready_to_retry(
         &self,
         job_id: &str,
         readiness: &ModelReadiness,
@@ -224,7 +264,7 @@ impl<'a, C: Clock> JobRepository<'a, C> {
             .map_err(map_catalog_error)
     }
 
-    pub fn retry(&self, job_id: &str, readiness: &ModelReadiness) -> Result<i64, JobError> {
+    pub(crate) fn retry(&self, job_id: &str, readiness: &ModelReadiness) -> Result<i64, JobError> {
         match self
             .jobs
             .retry(
@@ -237,6 +277,166 @@ impl<'a, C: Clock> JobRepository<'a, C> {
             RetryResult::Retried(generation) => Ok(generation),
             RetryResult::InvalidTransition => Err(JobError::InvalidTransition),
             RetryResult::ModelNotReady => Err(JobError::ModelNotReady),
+        }
+    }
+}
+
+impl<'a, C: Clock> JobControl<'a, C> {
+    pub(crate) const fn from_core(repository: JobRepository<'a, C>) -> Self {
+        Self { repository }
+    }
+
+    pub fn request_cancel(&self, job_id: &str) -> Result<CancellationOutcome, JobError> {
+        self.repository.request_cancel(job_id)
+    }
+
+    pub fn is_ready_to_retry(
+        &self,
+        job_id: &str,
+        readiness: &ModelReadiness,
+    ) -> Result<bool, JobError> {
+        self.repository.is_ready_to_retry(job_id, readiness)
+    }
+
+    pub fn retry(&self, job_id: &str, readiness: &ModelReadiness) -> Result<i64, JobError> {
+        self.repository.retry(job_id, readiness)
+    }
+}
+
+impl<'a, C: Clock> JobCoordinator<'a, C> {
+    pub(crate) fn from_core(
+        repository: JobRepository<'a, C>,
+        worker_id: impl Into<String>,
+        reservation: JobCoordinatorReservation<'a>,
+    ) -> Self {
+        Self {
+            repository,
+            worker_id: worker_id.into(),
+            active: None,
+            _reservation: reservation,
+        }
+    }
+
+    pub fn claim_next(&mut self) -> Result<Option<ClaimedJob>, JobError> {
+        if let Some(claim) = &self.active {
+            return Ok(Some(claim.clone()));
+        }
+        let claim = self.repository.claim(&self.worker_id)?;
+        self.active = claim.clone();
+        Ok(claim)
+    }
+
+    pub const fn active_claim(&self) -> Option<&ClaimedJob> {
+        self.active.as_ref()
+    }
+
+    pub fn renew_if_due(&mut self) -> Result<bool, JobError> {
+        let Some(claim) = &self.active else {
+            return Ok(false);
+        };
+        if self.repository.clock.now() < claim.renew_at {
+            return Ok(false);
+        }
+        self.renew_active()?;
+        Ok(true)
+    }
+
+    pub fn enter_transcribing(&mut self) -> Result<(), JobError> {
+        self.renew_active()?;
+        let token = self.active_token()?;
+        let result = self.repository.mark_transcribing(&token);
+        self.handle_running_result(result)
+    }
+
+    pub fn fail(&mut self, error_code: AsrErrorCode, error_summary: &str) -> Result<(), JobError> {
+        self.renew_active()?;
+        self.finish_fail(error_code, error_summary)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_with_hook(
+        &mut self,
+        error_code: AsrErrorCode,
+        error_summary: &str,
+        hook: impl FnOnce(),
+    ) -> Result<(), JobError> {
+        self.renew_active()?;
+        hook();
+        self.finish_fail(error_code, error_summary)
+    }
+
+    fn finish_fail(
+        &mut self,
+        error_code: AsrErrorCode,
+        error_summary: &str,
+    ) -> Result<(), JobError> {
+        let token = self.active_token()?;
+        let result = self.repository.fail(&token, error_code, error_summary);
+        let result = self.handle_running_result(result);
+        if result.is_ok() {
+            self.active = None;
+        }
+        result
+    }
+
+    pub fn acknowledge_cancel(&mut self) -> Result<(), JobError> {
+        let token = self.active_token()?;
+        let result = self.repository.acknowledge_cancel(&token);
+        let result = self.clear_if_ownership_lost(result);
+        if result.is_ok() {
+            self.active = None;
+        }
+        result
+    }
+
+    pub fn recover(&mut self) -> Result<RecoveryOutcome, JobError> {
+        let outcome = self.repository.recover()?;
+        let Some(token) = self.active.as_ref().map(|claim| claim.token.clone()) else {
+            return Ok(outcome);
+        };
+        match self.repository.owns_running(&token) {
+            Ok(true) => {}
+            Ok(false) => self.active = None,
+            Err(error) => {
+                self.active = None;
+                return Err(error);
+            }
+        }
+        Ok(outcome)
+    }
+
+    fn renew_active(&mut self) -> Result<(), JobError> {
+        let token = self.active_token()?;
+        let result = self.repository.renew(&token);
+        self.handle_running_result(result)?;
+        let now = self.repository.clock.now();
+        let claim = self.active.as_mut().ok_or(JobError::OwnershipLost)?;
+        claim.renew_at = now + Duration::seconds(RENEW_SECONDS);
+        claim.lease_expires_at = now + Duration::seconds(LEASE_SECONDS);
+        Ok(())
+    }
+
+    fn active_token(&self) -> Result<ClaimToken, JobError> {
+        self.active
+            .as_ref()
+            .map(|claim| claim.token.clone())
+            .ok_or(JobError::OwnershipLost)
+    }
+
+    fn clear_if_ownership_lost<T>(&mut self, result: Result<T, JobError>) -> Result<T, JobError> {
+        if matches!(result, Err(JobError::OwnershipLost)) {
+            self.active = None;
+        }
+        result
+    }
+
+    fn handle_running_result(&mut self, result: Result<(), JobError>) -> Result<(), JobError> {
+        match result {
+            Err(JobError::CancelRequested) => {
+                self.acknowledge_cancel()?;
+                Err(JobError::CancelRequested)
+            }
+            other => self.clear_if_ownership_lost(other),
         }
     }
 }
@@ -260,6 +460,14 @@ fn owned(changed: usize) -> Result<(), JobError> {
         Ok(())
     } else {
         Err(JobError::OwnershipLost)
+    }
+}
+
+fn owned_mutation(result: OwnedMutationResult) -> Result<(), JobError> {
+    match result {
+        OwnedMutationResult::Updated => Ok(()),
+        OwnedMutationResult::CancelRequested => Err(JobError::CancelRequested),
+        OwnedMutationResult::OwnershipLost => Err(JobError::OwnershipLost),
     }
 }
 

@@ -1,5 +1,5 @@
 use chrono::DateTime;
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
 
 use crate::service::{JobOwnershipCapability, RuntimeOwnershipError};
@@ -44,7 +44,7 @@ impl<'a> JobCatalog<'a> {
         generation: i64,
         now: &str,
         lease_expires_at: &str,
-    ) -> Result<usize, JobCatalogError> {
+    ) -> Result<OwnedMutationResult, JobCatalogError> {
         self.ensure()?;
         self.catalog
             .renew_asr_job(id, claimed_by, generation, now, lease_expires_at)
@@ -57,7 +57,7 @@ impl<'a> JobCatalog<'a> {
         claimed_by: &str,
         generation: i64,
         now: &str,
-    ) -> Result<usize, JobCatalogError> {
+    ) -> Result<OwnedMutationResult, JobCatalogError> {
         self.ensure()?;
         self.catalog
             .mark_asr_job_transcribing(id, claimed_by, generation, now)
@@ -72,7 +72,7 @@ impl<'a> JobCatalog<'a> {
         now: &str,
         error_code: &str,
         error_summary: &str,
-    ) -> Result<usize, JobCatalogError> {
+    ) -> Result<OwnedMutationResult, JobCatalogError> {
         self.ensure()?;
         self.catalog
             .fail_asr_job(id, claimed_by, generation, now, error_code, error_summary)
@@ -112,6 +112,18 @@ impl<'a> JobCatalog<'a> {
         self.ensure()?;
         self.catalog
             .recover_asr_jobs(current_boot_id, now, retry_at)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn owns_running(
+        &self,
+        id: &str,
+        claimed_by: &str,
+        generation: i64,
+    ) -> Result<bool, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .owns_running_asr_job(id, claimed_by, generation)
             .map_err(JobCatalogError::Catalog)
     }
 
@@ -189,6 +201,13 @@ pub(crate) enum RetryResult {
     ModelNotReady,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OwnedMutationResult {
+    Updated,
+    CancelRequested,
+    OwnershipLost,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReadyModel<'a> {
     pub provider: &'a str,
@@ -217,6 +236,11 @@ impl Catalog {
                    AND j.available_at <= ?1
                    AND (j.lease_expires_at IS NULL OR j.lease_expires_at <= ?1)
                    AND c.integrity_state = 'available'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM asr_jobs active
+                     WHERE active.state IN ('preparing', 'transcribing')
+                       AND active.claimed_by IS NOT NULL
+                   )
                  ORDER BY j.available_at, j.created_at, j.id
                  LIMIT 1",
                 [now],
@@ -241,6 +265,11 @@ impl Catalog {
                AND EXISTS (
                  SELECT 1 FROM chunks c
                  WHERE c.id = asr_jobs.chunk_id AND c.integrity_state = 'available'
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM asr_jobs active
+                 WHERE active.state IN ('preparing', 'transcribing')
+                   AND active.claimed_by IS NOT NULL
                )",
             params![now, claimed_by, lease_expires_at, id],
         )?;
@@ -270,8 +299,10 @@ impl Catalog {
         generation: i64,
         now: &str,
         lease_expires_at: &str,
-    ) -> rusqlite::Result<usize> {
-        self.connection.lock().unwrap().execute(
+    ) -> rusqlite::Result<OwnedMutationResult> {
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
             "UPDATE asr_jobs
              SET lease_expires_at = ?5, updated_at = ?4
              WHERE id = ?1 AND claimed_by = ?2 AND claim_generation = ?3
@@ -279,7 +310,10 @@ impl Catalog {
                AND cancel_requested_at IS NULL
                AND lease_expires_at > ?4",
             params![id, claimed_by, generation, now, lease_expires_at],
-        )
+        )?;
+        let result = owned_mutation_result(&transaction, id, claimed_by, generation, now, changed)?;
+        transaction.commit()?;
+        Ok(result)
     }
 
     fn mark_asr_job_transcribing(
@@ -288,14 +322,19 @@ impl Catalog {
         claimed_by: &str,
         generation: i64,
         now: &str,
-    ) -> rusqlite::Result<usize> {
-        self.connection.lock().unwrap().execute(
+    ) -> rusqlite::Result<OwnedMutationResult> {
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
             "UPDATE asr_jobs SET state = 'transcribing', updated_at = ?4
              WHERE id = ?1 AND claimed_by = ?2 AND claim_generation = ?3
                AND state = 'preparing' AND cancel_requested_at IS NULL
                AND lease_expires_at > ?4",
             params![id, claimed_by, generation, now],
-        )
+        )?;
+        let result = owned_mutation_result(&transaction, id, claimed_by, generation, now, changed)?;
+        transaction.commit()?;
+        Ok(result)
     }
 
     fn fail_asr_job(
@@ -306,8 +345,10 @@ impl Catalog {
         now: &str,
         error_code: &str,
         error_summary: &str,
-    ) -> rusqlite::Result<usize> {
-        self.connection.lock().unwrap().execute(
+    ) -> rusqlite::Result<OwnedMutationResult> {
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
             "UPDATE asr_jobs
              SET state = 'failed', claimed_by = NULL, lease_expires_at = NULL,
                  error_code = ?5, error_summary = ?6, updated_at = ?4
@@ -315,7 +356,10 @@ impl Catalog {
                AND state IN ('preparing', 'transcribing')
                AND cancel_requested_at IS NULL AND lease_expires_at > ?4",
             params![id, claimed_by, generation, now, error_code, error_summary],
-        )
+        )?;
+        let result = owned_mutation_result(&transaction, id, claimed_by, generation, now, changed)?;
+        transaction.commit()?;
+        Ok(result)
     }
 
     fn request_asr_job_cancel(&self, id: &str, now: &str) -> rusqlite::Result<CancelResult> {
@@ -456,6 +500,23 @@ impl Catalog {
         Ok(counts)
     }
 
+    fn owns_running_asr_job(
+        &self,
+        id: &str,
+        claimed_by: &str,
+        generation: i64,
+    ) -> rusqlite::Result<bool> {
+        self.connection.lock().unwrap().query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM asr_jobs
+               WHERE id = ?1 AND claimed_by = ?2 AND claim_generation = ?3
+                 AND state IN ('preparing', 'transcribing')
+             )",
+            params![id, claimed_by, generation],
+            |row| row.get(0),
+        )
+    }
+
     fn asr_job_model_ready(&self, id: &str, model: &ReadyModel<'_>) -> rusqlite::Result<bool> {
         self.connection.lock().unwrap().query_row(
             "SELECT EXISTS(
@@ -549,4 +610,32 @@ impl Catalog {
         transaction.commit()?;
         Ok(RetryResult::Retried(generation))
     }
+}
+
+fn owned_mutation_result(
+    transaction: &Transaction<'_>,
+    id: &str,
+    claimed_by: &str,
+    generation: i64,
+    now: &str,
+    changed: usize,
+) -> rusqlite::Result<OwnedMutationResult> {
+    if changed == 1 {
+        return Ok(OwnedMutationResult::Updated);
+    }
+    let cancel_requested = transaction.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM asr_jobs
+           WHERE id = ?1 AND claimed_by = ?2 AND claim_generation = ?3
+             AND state IN ('preparing', 'transcribing')
+             AND cancel_requested_at IS NOT NULL AND lease_expires_at > ?4
+         )",
+        params![id, claimed_by, generation, now],
+        |row| row.get(0),
+    )?;
+    Ok(if cancel_requested {
+        OwnedMutationResult::CancelRequested
+    } else {
+        OwnedMutationResult::OwnershipLost
+    })
 }

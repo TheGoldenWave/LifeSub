@@ -50,3 +50,7 @@
 - 2026-08-16：资格音频 hash 本身不足以冻结 smoke 语义。phrases、匹配阈值、normalization、expected text、source/PCM hashes、archive path/hash、license 与 provenance 必须形成 canonical digest，并写入 runtime identity，防止 fixture metadata 漂移后仍资格通过。
 - 2026-08-16：UUID qualification temp marker 的错误清理必须覆盖 create/write/sync/rename/publish 冲突，启动 reconcile 还需枚举并删除合法 UUID grammar 的 stale temp 后 fsync 目录；不可用固定 `.tmp` 假设。
 - 2026-08-16：ignored real-model gate 被显式选择时不能因缺环境静默 return。缺 `LIFESUB_RUN_QWEN17_SMOKE=1` 或 `LIFESUB_QWEN17_MODEL_DIR` 必须测试失败，使 CI/人工 gate 不会产生零工作假绿。
+- 2026-08-16：目录 fd 经 `F_GETPATH`/`readlink` 转回普通 pathname 不是 SQLite 锚定，路径解析后仍可二次 swap。macOS 首发采用进程级 tokenized wrapper VFS：主库与 sidecar 用 `openat(O_NOFOLLOW)`，NULL temp fail closed + `temp_store=MEMORY`，`unix-excl` 避免物理 SHM，`HAS_MOVED` 比较 open fd 与 anchored entry 的 dev/ino，并验证 regular/current uid/0600/nlink=1。
+- 2026-08-16：文件 cleanup 即使先比较 dev/ino，identity check 与裸 `unlink` 之间仍有同名替换窗口。Evidence 与 Model startup reconciliation 的破坏性清理统一使用 no-replace 随机 tombstone 原子 rename，移动后再次核验 identity；失配时恢复原名并 fail closed。
+- 2026-08-16：Task 10 publication 成功事务必须同时 fence claimed_by、claim_generation、`state = transcribing`、cancel marker 与同一 `now` 下未过期 lease；只检查 generation 仍允许过期 worker 在 recovery 前发布。
+- 2026-08-16：Core startup fd-anchored 不等于 ModelManager 全生命周期安全。Task 10 M3 必须把 download/install/delete/qualification/provider lease 统一收口到 AnchoredFs capability，并让 provider 从已验证 fd 加载，禁止 production 模块继续直接 `root.join`。

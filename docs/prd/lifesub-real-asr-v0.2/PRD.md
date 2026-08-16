@@ -197,7 +197,7 @@ ui --> user: 展示真实转写和来源
 - 模型保存在应用数据目录 `models/asr/<provider>/<model-id>/<manifest-version>-<bundle-identity>/`，已安装版本不可原地替换。
 - `model_downloads` 持久化 bundle 级下载状态，`model_download_artifacts` 持久化每个文件的 source identity、bytes、ETag/Last-Modified、临时路径、checkpoint、hash 与状态；`model_installations` 保存 `installed_unqualified | runtime_qualified | deleting`，结构失败使用稳定错误码而不发布安装，runtime qualification 失败保持 `installed_unqualified` 而不误标 corrupt。
 - Model Manifest 支持单归档与多文件 bundle。每个文件固定来源、revision、字节大小、SHA-256、安装相对路径、是否必需、许可证和 provenance；对 canonical manifest 计算 SHA-256 得到确定性 bundle identity。
-- Qwen3-ASR 1.7B bundle 使用官方原始 `Qwen/Qwen3-ASR-1.7B` revision `d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec` 的 `thinker_config` 格式 config/分片权重/index，并混用官方 `Qwen/Qwen3-ASR-1.7B-hf` 的 `tokenizer.json`。Task 5 必须先把 tokenizer 的 floating reference 解析为 immutable commit，并确认下载内容匹配既有 size/hash；在 revision 与 expected canonical bundle SHA 写入前，shipping registry 必须拒绝该条目。
+- Qwen3-ASR 1.7B 使用 manifest version 2，canonical bundle identity 固定为 `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a`。bundle 使用官方原始 `Qwen/Qwen3-ASR-1.7B` revision `d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec` 的 `thinker_config` 格式 config/分片权重/index，并混用官方 `Qwen/Qwen3-ASR-1.7B-hf` 的 `tokenizer.json`；ModelScope redirect allowlist 固定为 `cdn-lfs-cn-1.modelscope.cn` 与 `www.modelscope.cn`。`26fea093b01541244dcb170fe3dbc33854d07c770ea60dadcba806bfb0e23ea5` 是 endpoint/allowlist 已修正但仍使用 manifest version 1 的 rejected post-discovery draft；更早的 `8279…` 是 allowlist 不完整的 rejected pre-discovery draft。两者均禁止 shipping、安装或 Receipt 使用。
 - 正式目录不直接写入；所有 bundle 文件分别下载到可恢复 checkpoint，经逐文件校验后在同一 staging 组装，写入安装 marker 并原子 rename。磁盘预检同时覆盖下载临时文件、staging 和最终安装占用。
 
 ### 5.3 真实转写任务

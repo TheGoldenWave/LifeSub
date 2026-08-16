@@ -62,7 +62,7 @@
 - Create `src-tauri/src/host_control_test.rs`: requester/claimer separation, event replay, consent CAS and crash recovery tests.
 - Create `tests/fixtures/asr/fixture-manifest.json`: hashes, transcripts, intervals, phrases, licenses.
 - Create `tests/fixtures/asr/zh.wav`, `en.wav`, `zh-en.wav`: redistributable fixed speech samples.
-- Create `tests/fixtures/models/qwen17-bundle-v1.json`: reviewed RFC 8785/JCS golden canonical payload used to derive the frozen bundle SHA.
+- Create `tests/fixtures/models/qwen17-bundle-v2.json`: shipping manifest version 2 RFC 8785/JCS golden payload with identity `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a`.
 - Create `tests/fixtures/catalog/lifesub-v0.1.sqlite3`: pre-v2 migration fixture.
 - Create `tests/fixtures/catalog/lifesub-v0.2.sqlite3`: immutable pre-v3 migration fixture.
 - Create `tests/fixtures/catalog/lifesub-v0.3.sqlite3`: immutable pre-v4 migration fixture.
@@ -362,11 +362,11 @@ git commit -m "feat: harden immutable audio imports"
 - Modify: `src-tauri/Cargo.toml`
 - Modify: `src-tauri/Cargo.lock`
 - Create: `THIRD_PARTY_NOTICES.md`
-- Create: `tests/fixtures/models/qwen17-bundle-v1.json`
+- Create: `tests/fixtures/models/qwen17-bundle-v2.json`
 
 - [ ] **Step 1: Write failing manifest contract tests**
 
-Require unique immutable IDs, supported languages, SPDX/license provenance, runtime identity, `qualification_policy` and an explicit installable artifact bundle. Every `ArtifactFile` requires `artifact_id`, source repository/model, provider API endpoint or immutable normalized HTTPS URL, immutable revision, exact byte size, 64-character SHA-256, normalized non-overlapping required path, required flag, direct/extract mode, SPDX, provenance and exact redirect allowlist. Assert RFC 8785 JCS canonical payload v1 and SHA-256 identity excluding the identity field itself, with artifacts sorted by bytewise UTF-8 ID. Compare serialization byte-for-byte with `tests/fixtures/models/qwen17-bundle-v1.json` and assert its golden SHA. Assert every shipping model/VAD has an explicit policy: sherpa-backed entries use `structural_with_pinned_runtime`, only Qwen 1.7B uses `runtime_smoke_required`; no null/TODO/zero-hash placeholder or unhandled policy enters the registry. For VAD, assert every `VadManifest` field below, the exact sherpa-onnx version/commit/source-header provenance, and the eight canonical source defaults. Add a separate mutation test for `threshold`, `min_silence_duration_seconds`, `min_speech_duration_seconds`, `max_speech_duration_seconds`, `window_size_samples`, `sample_rate_hz`, `num_threads`, and `provider`; separately mutate the sherpa version, commit, and each source-header path. Also reject NaN/infinity, invalid ranges, empty provenance, a malformed artifact hash, and a required-files list that is not exactly the pinned `silero_vad.onnx` identity.
+Require unique immutable IDs, supported languages, SPDX/license provenance, runtime identity, `qualification_policy` and an explicit installable artifact bundle. Every `ArtifactFile` requires `artifact_id`, source repository/model, provider API endpoint or immutable normalized HTTPS URL, immutable revision, exact byte size, 64-character SHA-256, normalized non-overlapping required path, required flag, direct/extract mode, SPDX, provenance and exact redirect allowlist. Assert RFC 8785 JCS canonical payload schema v1 and SHA-256 identity excluding the identity field itself, with artifacts sorted by bytewise UTF-8 ID. Qwen 1.7B manifest version must be `2`; compare serialization byte-for-byte with `tests/fixtures/models/qwen17-bundle-v2.json` and assert SHA `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a`. Assert ModelScope rows use exact allowlist `[cdn-lfs-cn-1.modelscope.cn,www.modelscope.cn]`, HF canonical endpoint has no query, `26fea…` post-discovery version 1 and `8279…` pre-discovery drafts are both rejected. Assert every shipping model/VAD has an explicit policy: sherpa-backed entries use `structural_with_pinned_runtime`, only Qwen 1.7B uses `runtime_smoke_required`; no null/TODO/zero-hash placeholder or unhandled policy enters the registry. For VAD, assert every `VadManifest` field below, the exact sherpa-onnx version/commit/source-header provenance, and the eight canonical source defaults. Add a separate mutation test for `threshold`, `min_silence_duration_seconds`, `min_speech_duration_seconds`, `max_speech_duration_seconds`, `window_size_samples`, `sample_rate_hz`, `num_threads`, and `provider`; separately mutate the sherpa version, commit, and each source-header path. Also reject NaN/infinity, invalid ranges, empty provenance, a malformed artifact hash, and a required-files list that is not exactly the pinned `silero_vad.onnx` identity.
 
 The RED tests must also prove the exact 1.7B runtime contract: crate version 0.2.2, Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`, discovered Candle Metal feature wiring, original config requiring top-level `thinker_config`, and rejection of a config containing only top-level `audio_config/text_config`. They must prove the four-row ModelLookup matrix: unsupported device `true/false/false`, compatible uninstalled `true/true/false`, `installed_unqualified` `true/true/false`, and `runtime_qualified` `true/true/true`, each with stable reason codes.
 
@@ -406,7 +406,7 @@ model.safetensors.index.json size 64,821; sha256 f994739fe38e5210b9e3e8ce6c63073
 
 Official Hugging Face `Qwen/Qwen3-ASR-1.7B-hf` tokenizer.json:
 size 11,429,653; sha256 fe1fad59be22a41ee293363fcf95fdedbc7c93f3b49270b1d2e18bd1399a7a05
-Resolve its exact immutable commit through the provider revision API, download via `/resolve/{commit}/tokenizer.json`, and verify the existing size/hash. Also resolve/persist the four ModelScope immutable endpoints, exact redirect hosts, per-file SPDX/provenance, canonical golden JSON and expected bundle SHA. A branch name, floating `main`, missing discovery field or placeholder identity is forbidden and keeps the registry RED.
+Resolve its exact immutable commit through the provider revision API and verify the existing size/hash. Query parameters such as `?blobs=true` are discovery-only and excluded from canonical source; persist `/resolve/{commit}/tokenizer.json` without query. Freeze ModelScope allowlist exactly as `[cdn-lfs-cn-1.modelscope.cn,www.modelscope.cn]`, manifest version 2, golden fixture v2 and expected identity `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a`. Reject `26fea…` because it is the same verified endpoints/allowlist under manifest version 1, and reject `8279…` because its pre-discovery allowlist was incomplete. A branch name, floating `main`, missing discovery field, v1 shipping fixture or placeholder identity keeps the registry RED.
 
 Silero VAD
 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
@@ -490,7 +490,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src-tauri/src/asr/manifest.rs src-tauri/src/asr_manifest_test.rs src-tauri/src/lib.rs src-tauri/Cargo.toml src-tauri/Cargo.lock THIRD_PARTY_NOTICES.md tests/fixtures/models/qwen17-bundle-v1.json
+git add src-tauri/src/asr/manifest.rs src-tauri/src/asr_manifest_test.rs src-tauri/src/lib.rs src-tauri/Cargo.toml src-tauri/Cargo.lock THIRD_PARTY_NOTICES.md tests/fixtures/models/qwen17-bundle-v2.json
 git commit -m "feat: pin local ASR model manifests"
 ```
 

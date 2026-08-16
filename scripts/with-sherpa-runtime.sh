@@ -14,6 +14,24 @@ readonly CARGO_COMMAND="$1"
 shift
 readonly REQUESTED_TARGET_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/src-tauri/target}"
 readonly ARCHIVE_DIR="$(${SCRIPT_DIR}/fetch-sherpa-runtime.sh)"
+readonly ATTESTATION_FILE="${ARCHIVE_DIR}/.lifesub-sherpa-runtime-attestation-v1"
+readonly ARCHIVE_FILE="${ARCHIVE_DIR}/sherpa-onnx-v1.13.5-osx-arm64-static-lib.tar.bz2"
+readonly ARCHIVE_SIZE="19862746"
+readonly ARCHIVE_SHA256="339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44"
+readonly BUILD_ID="sherpa-onnx-v1.13.5-osx-arm64-static-lib"
+
+archive_sha256() {
+    /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{ print $1 }'
+}
+
+runtime_inputs_are_valid() {
+    [ ! -L "$ARCHIVE_FILE" ] \
+        && [ -f "$ARCHIVE_FILE" ] \
+        && [ "$(/usr/bin/stat -f '%z' "$ARCHIVE_FILE")" = "$ARCHIVE_SIZE" ] \
+        && [ "$(archive_sha256 "$ARCHIVE_FILE")" = "$ARCHIVE_SHA256" ] \
+        && [ ! -L "$ATTESTATION_FILE" ] \
+        && [ -f "$ATTESTATION_FILE" ]
+}
 
 /bin/mkdir -p "$REQUESTED_TARGET_DIR"
 readonly TARGET_DIR="$(CDPATH= cd -- "$REQUESTED_TARGET_DIR" && pwd -P)"
@@ -137,6 +155,11 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+if ! runtime_inputs_are_valid; then
+    >&2 /bin/echo "Sherpa runtime archive or attestation changed after verified fetch"
+    exit 1
+fi
+
 if [ -e "$PREBUILT_ROOT" ] || [ -L "$PREBUILT_ROOT" ]; then
     quarantine_path="${PREBUILT_ROOT}.quarantine.$(/bin/date '+%Y%m%d%H%M%S').$$"
     >&2 /bin/echo "Quarantining sherpa-onnx prebuilt cache at ${quarantine_path}"
@@ -145,6 +168,10 @@ fi
 
 export CARGO_TARGET_DIR="$TARGET_DIR"
 export SHERPA_ONNX_ARCHIVE_DIR="$ARCHIVE_DIR"
+export LIFESUB_SHERPA_RUNTIME_ATTESTATION_FILE="$ATTESTATION_FILE"
+export LIFESUB_SHERPA_ARCHIVE_SHA256="$ARCHIVE_SHA256"
+export LIFESUB_SHERPA_BUILD_ID="$BUILD_ID"
+export LIFESUB_SHERPA_VERIFIED="1"
 
 "$CARGO_COMMAND" clean --manifest-path "$MANIFEST_PATH" -p sherpa-onnx-sys
 "$CARGO_COMMAND" "$@"

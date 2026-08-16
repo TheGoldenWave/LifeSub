@@ -1,15 +1,16 @@
 use super::*;
 
 #[test]
-fn creates_complete_v2_schema_for_fresh_catalog() {
+fn creates_complete_v3_schema_for_fresh_catalog() {
     let mut connection = Connection::open_in_memory().unwrap();
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 2);
+    assert_eq!(user_version(&connection), 3);
     for table in [
         "asr_settings",
         "model_installations",
         "model_downloads",
+        "model_download_artifacts",
         "asr_jobs",
         "provider_receipts",
         "revision_receipts",
@@ -25,6 +26,7 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
     }
     for index in [
         "model_downloads_one_active_model",
+        "model_download_artifacts_state",
         "asr_jobs_one_active_fingerprint",
         "asr_jobs_claimable",
     ] {
@@ -133,6 +135,8 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
             ("install_dir", "TEXT", true, None, 0),
             ("state", "TEXT", true, None, 0),
             ("installed_at", "TEXT", true, None, 0),
+            ("runtime_identity_json", "TEXT", false, None, 0),
+            ("qualified_at", "TEXT", false, None, 0),
             ("last_error_code", "TEXT", false, None, 0),
         ],
     );
@@ -293,6 +297,19 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
         );
     }
     assert_eq!(
+        foreign_keys(&connection, "model_download_artifacts"),
+        [(
+            "download_id".to_owned(),
+            "model_downloads".to_owned(),
+            "id".to_owned(),
+            "NO ACTION".to_owned(),
+            "CASCADE".to_owned(),
+            "NONE".to_owned(),
+        )]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
         foreign_keys(&connection, "revisions"),
         [fk("session_id", "sessions", "id")].into_iter().collect()
     );
@@ -397,6 +414,15 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
         .collect()
     );
     assert_eq!(
+        unique_contracts(&connection, "model_download_artifacts"),
+        [
+            contract("pk", false, &["download_id", "artifact_id"]),
+            contract("u", false, &["download_id", "required_path"]),
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
         unique_contracts(&connection, "asr_jobs"),
         [
             contract("pk", false, &["id"]),
@@ -437,6 +463,10 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
             "asr_jobs_claimable",
             "CREATE INDEX asr_jobs_claimable ON asr_jobs(state, available_at, lease_expires_at)",
         ),
+        (
+            "model_download_artifacts_state",
+            "CREATE INDEX model_download_artifacts_state ON model_download_artifacts(download_id, state)",
+        ),
     ] {
         assert_eq!(
             compact_sql(&schema_sql(&connection, name)),
@@ -468,7 +498,17 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
             "model_installations",
             &[
                 "CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr', 'vad'))",
-                "CHECK(state IN ('ready', 'corrupt', 'deleting'))",
+                "CHECK(state IN ('installed_unqualified', 'runtime_qualified', 'deleting'))",
+            ][..],
+        ),
+        (
+            "model_download_artifacts",
+            &[
+                "CHECK(expected_bytes >= 0)",
+                "CHECK(downloaded_bytes >= 0 AND downloaded_bytes <= expected_bytes)",
+                "CHECK(length(expected_sha256) = 64)",
+                "CHECK(verified_sha256 IS NULL OR length(verified_sha256) = 64)",
+                "CHECK(state IN ('pending', 'downloading', 'downloaded', 'verifying', 'verified', 'failed', 'cancelled'))",
             ][..],
         ),
         (
@@ -504,7 +544,7 @@ fn creates_complete_v2_schema_for_fresh_catalog() {
 }
 
 #[test]
-fn fresh_v2_accepts_qwen3_asr_settings() {
+fn fresh_v3_accepts_qwen3_asr_settings() {
     let mut connection = Connection::open_in_memory().unwrap();
     migrations::migrate(&mut connection).unwrap();
 

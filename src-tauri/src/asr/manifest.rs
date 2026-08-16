@@ -54,6 +54,35 @@ pub struct ArtifactBundle {
     pub artifacts: &'static [ArtifactFile],
     pub required_paths: &'static [&'static str],
     pub identity_sha256: &'static str,
+    pub install_constraints: InstallConstraints,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequiredInstallFile {
+    pub path: &'static str,
+    pub bytes: u64,
+    pub sha256: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArchiveInstallConstraints {
+    pub max_scanned_entries: u64,
+    pub max_written_file_bytes: u64,
+    pub max_total_written_bytes: u64,
+    pub required_files: &'static [RequiredInstallFile],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectInstallConstraints {
+    pub max_written_file_bytes: u64,
+    pub max_total_written_bytes: u64,
+    pub required_files: &'static [RequiredInstallFile],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstallConstraints {
+    Archive(ArchiveInstallConstraints),
+    Direct(DirectInstallConstraints),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,6 +90,8 @@ pub enum RuntimeRequirement {
     SherpaOnnx {
         crate_version: &'static str,
         git_commit: &'static str,
+        native_archive_sha256: &'static str,
+        build_id: &'static str,
         cargo_feature: &'static str,
     },
     QwenCandleMetal {
@@ -178,6 +209,7 @@ pub enum RegistryValidationError {
     InvalidRequiredPath,
     OverlappingRequiredPath,
     InvalidBundleIdentity,
+    InvalidInstallConstraints,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -320,6 +352,7 @@ fn validate_vad_contract(vad: &VadManifest) -> Result<(), RegistryValidationErro
         || vad.bundle.artifacts.len() != 1
         || vad.bundle.artifacts[0].install_mode != ArtifactInstallMode::Direct
         || vad.bundle.identity_sha256 != vad.bundle.artifacts[0].sha256
+        || vad.bundle.install_constraints != VAD_INSTALL_CONSTRAINTS
         || vad.source.license_spdx != vad.bundle.artifacts[0].license_spdx
         || !valid_vad_parameters(vad)
     {
@@ -345,8 +378,8 @@ fn valid_vad_parameters(vad: &VadManifest) -> bool {
         && vad.window_size_samples > 0
         && vad.sample_rate_hz > 0
         && vad.num_threads > 0
-        && vad.sherpa_onnx_version == VAD_SHERPA_VERSION
-        && vad.sherpa_onnx_commit == VAD_SHERPA_COMMIT
+        && vad.sherpa_onnx_version == PINNED_SHERPA_RUNTIME.version
+        && vad.sherpa_onnx_commit == PINNED_SHERPA_RUNTIME.git_commit
         && vad.silero_config_source_header == VAD_SILERO_SOURCE_HEADER
         && vad.vad_config_source_header == VAD_SOURCE_HEADER
         && vad.threshold.to_bits() == VAD_THRESHOLD.to_bits()
@@ -402,6 +435,95 @@ fn validate_bundle(bundle: &ArtifactBundle) -> Result<(), RegistryValidationErro
             .any(|other| paths_overlap(path, other))
         {
             return Err(RegistryValidationError::OverlappingRequiredPath);
+        }
+    }
+    validate_install_constraints(bundle)?;
+    Ok(())
+}
+
+fn validate_install_constraints(bundle: &ArtifactBundle) -> Result<(), RegistryValidationError> {
+    let (max_scanned_entries, max_written_file_bytes, max_total_written_bytes, required_files) =
+        match bundle.install_constraints {
+            InstallConstraints::Archive(constraints) => (
+                Some(constraints.max_scanned_entries),
+                constraints.max_written_file_bytes,
+                constraints.max_total_written_bytes,
+                constraints.required_files,
+            ),
+            InstallConstraints::Direct(constraints) => (
+                None,
+                constraints.max_written_file_bytes,
+                constraints.max_total_written_bytes,
+                constraints.required_files,
+            ),
+        };
+    if required_files.is_empty() {
+        return Err(RegistryValidationError::InvalidInstallConstraints);
+    }
+    let mut paths = HashSet::new();
+    let mut total = 0_u64;
+    let mut max_file = 0_u64;
+    for file in required_files {
+        if !valid_relative_path(file.path)
+            || file.bytes == 0
+            || !is_sha256(file.sha256)
+            || !paths.insert(file.path)
+        {
+            return Err(RegistryValidationError::InvalidInstallConstraints);
+        }
+        total = total
+            .checked_add(file.bytes)
+            .ok_or(RegistryValidationError::InvalidInstallConstraints)?;
+        max_file = max_file.max(file.bytes);
+    }
+    if max_file != max_written_file_bytes
+        || total != max_total_written_bytes
+        || bundle.required_paths.len() != required_files.len()
+        || !bundle
+            .required_paths
+            .iter()
+            .all(|path| paths.contains(path))
+    {
+        return Err(RegistryValidationError::InvalidInstallConstraints);
+    }
+    match bundle.install_constraints {
+        InstallConstraints::Archive(_) => {
+            if max_scanned_entries.is_none_or(|entries| {
+                entries < u64::try_from(required_files.len()).unwrap_or(u64::MAX)
+            }) || bundle
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.install_mode != ArtifactInstallMode::ExtractTarBz2)
+            {
+                return Err(RegistryValidationError::InvalidInstallConstraints);
+            }
+        }
+        InstallConstraints::Direct(_) => {
+            if bundle
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.install_mode != ArtifactInstallMode::Direct)
+                || bundle.artifacts.len() != required_files.len()
+                || bundle.artifacts.iter().any(|artifact| {
+                    !required_files.iter().any(|file| {
+                        (file.path, file.bytes, file.sha256)
+                            == (artifact.required_path, artifact.bytes, artifact.sha256)
+                    })
+                })
+                || required_files.iter().any(|file| {
+                    bundle
+                        .artifacts
+                        .iter()
+                        .filter(|artifact| {
+                            (file.path, file.bytes, file.sha256)
+                                == (artifact.required_path, artifact.bytes, artifact.sha256)
+                        })
+                        .count()
+                        != 1
+                })
+            {
+                return Err(RegistryValidationError::InvalidInstallConstraints);
+            }
         }
     }
     Ok(())
@@ -602,11 +724,15 @@ fn runtime_payload(runtime: RuntimeRequirement) -> Value {
         RuntimeRequirement::SherpaOnnx {
             crate_version,
             git_commit,
+            native_archive_sha256,
+            build_id,
             cargo_feature,
         } => json!({
+            "build_id": build_id,
             "cargo_feature": cargo_feature,
             "crate": "sherpa-onnx",
             "git_commit": git_commit,
+            "native_archive_sha256": native_archive_sha256,
             "version": crate_version,
         }),
         RuntimeRequirement::QwenCandleMetal {
@@ -659,9 +785,13 @@ fn qualification_name(policy: QualificationPolicy) -> &'static str {
     }
 }
 
+const PINNED_SHERPA_RUNTIME: crate::asr::PinnedSherpaRuntimeIdentity =
+    crate::asr::pinned_sherpa_runtime_identity();
 const SHERPA_RUNTIME: RuntimeRequirement = RuntimeRequirement::SherpaOnnx {
-    crate_version: "1.13.5",
-    git_commit: "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5",
+    crate_version: PINNED_SHERPA_RUNTIME.version,
+    git_commit: PINNED_SHERPA_RUNTIME.git_commit,
+    native_archive_sha256: PINNED_SHERPA_RUNTIME.native_archive_sha256,
+    build_id: PINNED_SHERPA_RUNTIME.build_id,
     cargo_feature: "static",
 };
 
@@ -674,8 +804,6 @@ const QWEN_RUNTIME: RuntimeRequirement = RuntimeRequirement::QwenCandleMetal {
     target_os: "macos",
     target_arch: "aarch64",
 };
-const VAD_SHERPA_VERSION: &str = "1.13.5";
-const VAD_SHERPA_COMMIT: &str = "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5";
 const VAD_SILERO_SOURCE_HEADER: &str = "sherpa-onnx/csrc/silero-vad-model-config.h";
 const VAD_SOURCE_HEADER: &str = "sherpa-onnx/csrc/vad-model-config.h";
 const VAD_THRESHOLD: f32 = 0.5;
@@ -686,6 +814,303 @@ const VAD_WINDOW_SIZE_SAMPLES: i32 = 512;
 const VAD_SAMPLE_RATE_HZ: i32 = 16_000;
 const VAD_NUM_THREADS: i32 = 1;
 const VAD_PROVIDER: &str = "cpu";
+
+const SENSE_INSTALL_FILES: &[RequiredInstallFile] = &[
+    RequiredInstallFile {
+        path: "model.int8.onnx",
+        bytes: 239_233_841,
+        sha256: "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/en.wav",
+        bytes: 228_908,
+        sha256: "eb1eb008904465b74c304aad8342e8c7d3c6e61ffe9f66adcaca9cf0f76a93f4",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/ja.wav",
+        bytes: 230_444,
+        sha256: "460bd8dccb0d2a5f4e29c628f837be4082d13defc64c3fc21dd1b6bb0e119095",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/ko.wav",
+        bytes: 147_500,
+        sha256: "0dc797a5c81ed30fc339d91f3da718ab02854e17ffa37cb93c4c039ac5c6bb9c",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/yue.wav",
+        bytes: 164_780,
+        sha256: "0960b2db54ae202071d250e6462fbf74a3c863f0e3e7f01273e4939c996875a0",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/zh.wav",
+        bytes: 178_988,
+        sha256: "b77f1794fe374a0ba1ee1dc458bfaf9349496cbbfc32780c50ba3c5a7ad8e373",
+    },
+    RequiredInstallFile {
+        path: "tokens.txt",
+        bytes: 315_894,
+        sha256: "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+    },
+];
+const TINY_INSTALL_FILES: &[RequiredInstallFile] = &[
+    RequiredInstallFile {
+        path: "test_wavs/0.wav",
+        bytes: 212_044,
+        sha256: "6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/1.wav",
+        bytes: 534_924,
+        sha256: "5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/8k.wav",
+        bytes: 77_244,
+        sha256: "f6f3c8b33e2534cdc154fe773ad2750f1f6a2ca5096179cdf037ae782456613e",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/trans.txt",
+        bytes: 449,
+        sha256: "b9ac44e7b794abb1a2d5faf0005e98a665971e7ac2ed15435832cc34edaa9100",
+    },
+    RequiredInstallFile {
+        path: "tiny-decoder.onnx",
+        bytes: 114_505_801,
+        sha256: "e144c07dc6b55cece24392811f2d934b97013811f5e677d1315d341a0a74a25d",
+    },
+    RequiredInstallFile {
+        path: "tiny-encoder.onnx",
+        bytes: 37_647_080,
+        sha256: "42c1d4cbf889632ba21ab6f0d4064c80209755f265ce5cd630db4a6793e7089c",
+    },
+    RequiredInstallFile {
+        path: "tiny-tokens.txt",
+        bytes: 816_730,
+        sha256: "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126",
+    },
+];
+const BASE_INSTALL_FILES: &[RequiredInstallFile] = &[
+    RequiredInstallFile {
+        path: "base-decoder.onnx",
+        bytes: 196_548_998,
+        sha256: "8a12c3f6ad65bb5b86d7e6eccc302378f20f9fb2df6cb10747c62895da7ac194",
+    },
+    RequiredInstallFile {
+        path: "base-encoder.onnx",
+        bytes: 95_087_154,
+        sha256: "5a6b87cb313993f6c9fefec9e7027556f6cb30becddf49655bee36c50ecc12d7",
+    },
+    RequiredInstallFile {
+        path: "base-tokens.txt",
+        bytes: 816_730,
+        sha256: "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/0.wav",
+        bytes: 212_044,
+        sha256: "6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/1.wav",
+        bytes: 534_924,
+        sha256: "5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/8k.wav",
+        bytes: 77_244,
+        sha256: "f6f3c8b33e2534cdc154fe773ad2750f1f6a2ca5096179cdf037ae782456613e",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/trans.txt",
+        bytes: 449,
+        sha256: "b9ac44e7b794abb1a2d5faf0005e98a665971e7ac2ed15435832cc34edaa9100",
+    },
+];
+const SMALL_INSTALL_FILES: &[RequiredInstallFile] = &[
+    RequiredInstallFile {
+        path: "small-decoder.onnx",
+        bytes: 559_127_829,
+        sha256: "a4165cca5c77e381938c0e111032a384901b1e434ae2ad948859035392d21d2c",
+    },
+    RequiredInstallFile {
+        path: "small-encoder.onnx",
+        bytes: 409_528_992,
+        sha256: "119bd1e8ba0524baee1687f6b22bf0abd2fe539549cd000734edbca81c66751e",
+    },
+    RequiredInstallFile {
+        path: "small-tokens.txt",
+        bytes: 816_730,
+        sha256: "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/0.wav",
+        bytes: 212_044,
+        sha256: "6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/1.wav",
+        bytes: 534_924,
+        sha256: "5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/8k.wav",
+        bytes: 77_244,
+        sha256: "f6f3c8b33e2534cdc154fe773ad2750f1f6a2ca5096179cdf037ae782456613e",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/trans.txt",
+        bytes: 449,
+        sha256: "b9ac44e7b794abb1a2d5faf0005e98a665971e7ac2ed15435832cc34edaa9100",
+    },
+];
+const QWEN06_INSTALL_FILES: &[RequiredInstallFile] = &[
+    RequiredInstallFile {
+        path: "conv_frontend.onnx",
+        bytes: 44_148_281,
+        sha256: "d22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e",
+    },
+    RequiredInstallFile {
+        path: "decoder.int8.onnx",
+        bytes: 755_914_231,
+        sha256: "4f6885be5959ae26af3089d38ee7972c5fafbeeb1cf8d5e76eab6d8b61ca5771",
+    },
+    RequiredInstallFile {
+        path: "encoder.int8.onnx",
+        bytes: 182_491_662,
+        sha256: "60748d3e6744a57c9c91e1b17424a6c2990567e8adceb0783940c03ed98fa9d9",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/ar1.wav",
+        bytes: 168_044,
+        sha256: "700b3c274f2fedffbb6016f03c574adaad7aa0291acc1a1ba72f07112051073f",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/cantonese.wav",
+        bytes: 526_444,
+        sha256: "ec832e035c13c670e0cf68dee0ca5dfae38bf2c583aab31e587441cb3eba3f3f",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/codeswitch.wav",
+        bytes: 549_550,
+        sha256: "2def7fa41004d0a7d148d4afbf4c467c9d112d8b373996123e9a4c43d94957c7",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/de.wav",
+        bytes: 215_084,
+        sha256: "80bb10c44085a7ce01a17abaf6a2095ed37e1695fca41cc0ea9733f1f24a749c",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/es1.wav",
+        bytes: 164_844,
+        sha256: "4543f94738445a38306fb80bb0329ef5ca6d81ab1b6c3f15af1de1c3382f4b31",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/f1_noise.wav",
+        bytes: 1_677_606,
+        sha256: "7ae35f5d8f038e518f3abdeda5f78d71cb2f67c9ca29cb9a49a0b4d0702909bd",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/fast1.wav",
+        bytes: 1_003_794,
+        sha256: "b43bbd0bd982c3cc88081f64389bf29fe9e9a01287d44f0b15887bc49c2b352a",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/fr1.wav",
+        bytes: 191_916,
+        sha256: "c6421b34feccbe7fdfaa8b641b8ecb7bcd7b9f2c237c7b82712c860be524db4e",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/ja1.wav",
+        bytes: 448_100,
+        sha256: "d926ed0159a2d750d1ae7835e60a5cb5f8737629f7bb3de6cd111a3614d5dc67",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/noise1-en.wav",
+        bytes: 2_831_516,
+        sha256: "3664ef02fa664da93d94a1afc271bda31c0f8d07a9f3c74ac6cd1e5aabe8572c",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/noise2.wav",
+        bytes: 741_186,
+        sha256: "33f85268f7fbad6b3152b9ab051edab1a85082fde66bccff61d7f5ef7b437e58",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/qiqiu1.wav",
+        bytes: 1_631_150,
+        sha256: "1b69a0fce35936979824c1751a11c285559a635aeb91160d1da3b00118321495",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/raokouling.wav",
+        bytes: 1_831_074,
+        sha256: "3cc59ec494f71135ff5761717e20597f0559b43f793dd72ae4924b86c5e038d8",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/rap1.wav",
+        bytes: 935_868,
+        sha256: "ac6186d732b59c664776f84238f586d3e6c97adbc8b9f66e939ddcab5773cf3c",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/ru1.wav",
+        bytes: 152_364,
+        sha256: "e48b22f32d4d1c38f0a94a58acfc43bb8f5b7fc3b0ac01ea49372040ca831acf",
+    },
+    RequiredInstallFile {
+        path: "test_wavs/transcript.txt",
+        bytes: 5_386,
+        sha256: "9cab82a507e1e5a7743336f2e40fabdaa1eb6181818d7a3768925abc03effd24",
+    },
+    RequiredInstallFile {
+        path: "tokenizer/merges.txt",
+        bytes: 1_671_853,
+        sha256: "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+    },
+    RequiredInstallFile {
+        path: "tokenizer/tokenizer_config.json",
+        bytes: 12_487,
+        sha256: "4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c",
+    },
+    RequiredInstallFile {
+        path: "tokenizer/vocab.json",
+        bytes: 2_776_833,
+        sha256: "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    },
+];
+
+const SENSE_INSTALL_CONSTRAINTS: InstallConstraints =
+    InstallConstraints::Archive(ArchiveInstallConstraints {
+        max_scanned_entries: 12,
+        max_written_file_bytes: 239_233_841,
+        max_total_written_bytes: 240_500_355,
+        required_files: SENSE_INSTALL_FILES,
+    });
+const TINY_INSTALL_CONSTRAINTS: InstallConstraints =
+    InstallConstraints::Archive(ArchiveInstallConstraints {
+        max_scanned_entries: 11,
+        max_written_file_bytes: 114_505_801,
+        max_total_written_bytes: 153_794_272,
+        required_files: TINY_INSTALL_FILES,
+    });
+const BASE_INSTALL_CONSTRAINTS: InstallConstraints =
+    InstallConstraints::Archive(ArchiveInstallConstraints {
+        max_scanned_entries: 11,
+        max_written_file_bytes: 196_548_998,
+        max_total_written_bytes: 293_277_543,
+        required_files: BASE_INSTALL_FILES,
+    });
+const SMALL_INSTALL_CONSTRAINTS: InstallConstraints =
+    InstallConstraints::Archive(ArchiveInstallConstraints {
+        max_scanned_entries: 11,
+        max_written_file_bytes: 559_127_829,
+        max_total_written_bytes: 970_298_212,
+        required_files: SMALL_INSTALL_FILES,
+    });
+const QWEN06_INSTALL_CONSTRAINTS: InstallConstraints =
+    InstallConstraints::Archive(ArchiveInstallConstraints {
+        max_scanned_entries: 27,
+        max_written_file_bytes: 755_914_231,
+        max_total_written_bytes: 1_000_089_273,
+        required_files: QWEN06_INSTALL_FILES,
+    });
 
 const SENSE_PATHS: &[&str] = &[
     "model.int8.onnx",
@@ -895,6 +1320,39 @@ const QWEN17_ARTIFACTS: &[ArtifactFile] = &[
         "Official original safetensors weight shard 2; conversion none.",
     ),
 ];
+const QWEN17_INSTALL_FILES: &[RequiredInstallFile] = &[
+    RequiredInstallFile {
+        path: "config.json",
+        bytes: 6_194,
+        sha256: "2e74a751548b8ad7d7526d29365ad8144c345d8b412b1152d25dc6698452712f",
+    },
+    RequiredInstallFile {
+        path: "model.safetensors.index.json",
+        bytes: 64_821,
+        sha256: "f994739fe38e5210b9e3e8ce6c6307315e2ceac3cb630e7b7414d69dce520f60",
+    },
+    RequiredInstallFile {
+        path: "tokenizer.json",
+        bytes: 11_429_653,
+        sha256: "fe1fad59be22a41ee293363fcf95fdedbc7c93f3b49270b1d2e18bd1399a7a05",
+    },
+    RequiredInstallFile {
+        path: "model-00001-of-00002.safetensors",
+        bytes: 4_220_320_824,
+        sha256: "a4cd1f1a04d90b757dc7f7dd26254e69a013b19e80efe590a83c6a3bde8608d6",
+    },
+    RequiredInstallFile {
+        path: "model-00002-of-00002.safetensors",
+        bytes: 478_200_688,
+        sha256: "6e0b9d9e09e2e0238e7ef3cc8a484ab387e91b90f1900bedf88bc92d7929ccfc",
+    },
+];
+const QWEN17_INSTALL_CONSTRAINTS: InstallConstraints =
+    InstallConstraints::Direct(DirectInstallConstraints {
+        max_written_file_bytes: 4_220_320_824,
+        max_total_written_bytes: 4_710_022_180,
+        required_files: QWEN17_INSTALL_FILES,
+    });
 
 const fn modelscope_file(
     artifact_id: &'static str,
@@ -942,6 +1400,7 @@ const MODELS: &[ModelManifest] = &[
             artifacts: SENSE_ARTIFACTS,
             required_paths: SENSE_PATHS,
             identity_sha256: "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
+            install_constraints: SENSE_INSTALL_CONSTRAINTS,
         },
         runtime: SHERPA_RUNTIME,
         device: DeviceRequirement::AnyDesktop,
@@ -959,6 +1418,7 @@ const MODELS: &[ModelManifest] = &[
         WHISPER_TINY_ARTIFACTS,
         WHISPER_TINY_PATHS,
         "c46116994e539aa165266d96b325252728429c12535eb9d8b6a2b10f129e66b1",
+        TINY_INSTALL_CONSTRAINTS,
     ),
     whisper_model(
         "whisper-base",
@@ -966,6 +1426,7 @@ const MODELS: &[ModelManifest] = &[
         WHISPER_BASE_ARTIFACTS,
         WHISPER_BASE_PATHS,
         "911b2083efd7c0dca2ac3b358b75222660dc09fb716d64fbfc417ba6c99ff3de",
+        BASE_INSTALL_CONSTRAINTS,
     ),
     whisper_model(
         "whisper-small",
@@ -973,6 +1434,7 @@ const MODELS: &[ModelManifest] = &[
         WHISPER_SMALL_ARTIFACTS,
         WHISPER_SMALL_PATHS,
         "486a46afbb7ba798507190ffe02fea2dd726049af212e774537efac6afb210a6",
+        SMALL_INSTALL_CONSTRAINTS,
     ),
     ModelManifest {
         id: "qwen3-asr-0.6b-int8-2026-03-25",
@@ -984,6 +1446,7 @@ const MODELS: &[ModelManifest] = &[
             artifacts: QWEN06_ARTIFACTS,
             required_paths: QWEN06_PATHS,
             identity_sha256: "393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96",
+            install_constraints: QWEN06_INSTALL_CONSTRAINTS,
         },
         runtime: SHERPA_RUNTIME,
         device: DeviceRequirement::AnyDesktop,
@@ -1005,6 +1468,7 @@ const MODELS: &[ModelManifest] = &[
             artifacts: QWEN17_ARTIFACTS,
             required_paths: QWEN17_PATHS,
             identity_sha256: QWEN17_IDENTITY,
+            install_constraints: QWEN17_INSTALL_CONSTRAINTS,
         },
         runtime: QWEN_RUNTIME,
         device: DeviceRequirement::AppleSiliconMetal {
@@ -1027,6 +1491,7 @@ const fn whisper_model(
     artifacts: &'static [ArtifactFile],
     required_paths: &'static [&'static str],
     identity_sha256: &'static str,
+    install_constraints: InstallConstraints,
 ) -> ModelManifest {
     ModelManifest {
         id,
@@ -1038,6 +1503,7 @@ const fn whisper_model(
             artifacts,
             required_paths,
             identity_sha256,
+            install_constraints,
         },
         runtime: SHERPA_RUNTIME,
         device: DeviceRequirement::AnyDesktop,
@@ -1067,6 +1533,17 @@ const VAD_ARTIFACTS: &[ArtifactFile] = &[ArtifactFile {
     provenance: "Silero VAD ONNX model distributed by sherpa-onnx; detector defaults are frozen from sherpa-onnx 1.13.5 source headers at commit 3dc7c569f31ca2cd4a20ed6f7db780327e6714c5.",
     redirect_hosts: GITHUB_REDIRECT_HOSTS,
 }];
+const VAD_INSTALL_FILES: &[RequiredInstallFile] = &[RequiredInstallFile {
+    path: "silero_vad.onnx",
+    bytes: 643_854,
+    sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+}];
+const VAD_INSTALL_CONSTRAINTS: InstallConstraints =
+    InstallConstraints::Direct(DirectInstallConstraints {
+        max_written_file_bytes: 643_854,
+        max_total_written_bytes: 643_854,
+        required_files: VAD_INSTALL_FILES,
+    });
 
 static REGISTRY: ModelRegistry = ModelRegistry::new(MODELS);
 static VAD: VadManifest = VadManifest {
@@ -1076,6 +1553,7 @@ static VAD: VadManifest = VadManifest {
         artifacts: VAD_ARTIFACTS,
         required_paths: &["silero_vad.onnx"],
         identity_sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+        install_constraints: VAD_INSTALL_CONSTRAINTS,
     },
     runtime: SHERPA_RUNTIME,
     qualification_policy: QualificationPolicy::StructuralWithPinnedRuntime,
@@ -1085,8 +1563,8 @@ static VAD: VadManifest = VadManifest {
         license_spdx: "MIT",
         provenance: "Official Silero VAD ONNX asset redistributed by sherpa-onnx.",
     },
-    sherpa_onnx_version: VAD_SHERPA_VERSION,
-    sherpa_onnx_commit: VAD_SHERPA_COMMIT,
+    sherpa_onnx_version: PINNED_SHERPA_RUNTIME.version,
+    sherpa_onnx_commit: PINNED_SHERPA_RUNTIME.git_commit,
     silero_config_source_header: VAD_SILERO_SOURCE_HEADER,
     vad_config_source_header: VAD_SOURCE_HEADER,
     threshold: VAD_THRESHOLD,

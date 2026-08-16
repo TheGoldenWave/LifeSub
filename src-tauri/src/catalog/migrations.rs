@@ -2,8 +2,10 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Error, TransactionBehavior, ffi};
 
-use self::ddl::{ASR_SCHEMA, CURRENT_VERSION, FRESH_BASE_SCHEMA, LEGACY_ALTERS};
-use self::fingerprint::{classify_locked, is_v2};
+use self::ddl::{
+    ASR_SCHEMA, CURRENT_VERSION, FRESH_BASE_SCHEMA, LEGACY_ALTERS, MODEL_MANAGER_V3_SCHEMA,
+};
+use self::fingerprint::{classify_locked, is_v2, is_v3};
 
 mod ddl;
 mod fingerprint;
@@ -15,6 +17,7 @@ pub(crate) enum SchemaKind {
     Fresh,
     LegacyV1,
     CurrentV2,
+    CurrentV3,
     Unknown,
 }
 
@@ -64,20 +67,29 @@ where
     let kind = classify_locked(&transaction)?;
     classification_hook()?;
     match kind {
-        SchemaKind::CurrentV2 => return transaction.commit(),
+        SchemaKind::CurrentV3 => return transaction.commit(),
         SchemaKind::Unknown => return Err(migration_error("unknown or corrupt catalog schema")),
-        SchemaKind::Fresh | SchemaKind::LegacyV1 => {}
+        SchemaKind::Fresh | SchemaKind::LegacyV1 | SchemaKind::CurrentV2 => {}
     }
     match kind {
         SchemaKind::Fresh => transaction.execute_batch(FRESH_BASE_SCHEMA)?,
         SchemaKind::LegacyV1 => transaction.execute_batch(LEGACY_ALTERS)?,
-        SchemaKind::CurrentV2 | SchemaKind::Unknown => unreachable!(),
+        SchemaKind::CurrentV2 => {}
+        SchemaKind::CurrentV3 | SchemaKind::Unknown => unreachable!(),
     }
-    transaction.execute_batch(ASR_SCHEMA)?;
-    ddl_hook()?;
+    if matches!(kind, SchemaKind::Fresh | SchemaKind::LegacyV1) {
+        transaction.execute_batch(ASR_SCHEMA)?;
+    }
     if !is_v2(&transaction)? {
         return Err(migration_error(
             "migration produced invalid v2 catalog schema",
+        ));
+    }
+    transaction.execute_batch(MODEL_MANAGER_V3_SCHEMA)?;
+    ddl_hook()?;
+    if !is_v3(&transaction)? {
+        return Err(migration_error(
+            "migration produced invalid v3 catalog schema",
         ));
     }
     transaction.pragma_update(None, "user_version", CURRENT_VERSION)?;

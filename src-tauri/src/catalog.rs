@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::domain::{
     AudioSource, CaptureSession, CaptureState, TranscriptRevision, TranscriptSegment,
@@ -12,8 +12,10 @@ use crate::domain::{
 
 mod chunks;
 pub(crate) mod migrations;
+mod models;
 
 pub use chunks::ChunkDiagnostics;
+pub(crate) use models::ModelInstallationRecord;
 
 pub struct Catalog {
     connection: Mutex<Connection>,

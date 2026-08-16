@@ -1,4 +1,4 @@
-pub(super) const CURRENT_VERSION: i64 = 2;
+pub(super) const CURRENT_VERSION: i64 = 3;
 pub(super) const FTS_TABLE: &str = "segment_search";
 pub(super) const FTS_SHADOWS: [&str; 5] = [
     "segment_search_config",
@@ -18,6 +18,20 @@ pub(super) const V2_TABLES: [&str; 11] = [
     "asr_jobs",
     "asr_settings",
     "chunks",
+    "model_downloads",
+    "model_installations",
+    "provider_receipts",
+    "revision_receipts",
+    "revisions",
+    "segment_search",
+    "segments",
+    "sessions",
+];
+pub(super) const V3_TABLES: [&str; 12] = [
+    "asr_jobs",
+    "asr_settings",
+    "chunks",
+    "model_download_artifacts",
     "model_downloads",
     "model_installations",
     "provider_receipts",
@@ -88,3 +102,40 @@ CREATE UNIQUE INDEX asr_jobs_one_active_fingerprint ON asr_jobs(fingerprint) WHE
 CREATE INDEX asr_jobs_claimable ON asr_jobs(state, available_at, lease_expires_at);
 CREATE TABLE provider_receipts (id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE REFERENCES asr_jobs(id), chunk_id TEXT NOT NULL REFERENCES chunks(id), provider TEXT NOT NULL, model_id TEXT NOT NULL, manifest_version TEXT NOT NULL, archive_sha256 TEXT NOT NULL, required_file_hashes_json TEXT NOT NULL, model_source_json TEXT NOT NULL, vad_model_id TEXT, vad_manifest_version TEXT, vad_archive_sha256 TEXT, vad_required_file_hashes_json TEXT, runtime_version TEXT NOT NULL, runtime_build_id TEXT NOT NULL, parameters_json TEXT NOT NULL, input_sha256 TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, data_destination TEXT NOT NULL CHECK(data_destination = 'local_device'), outcome TEXT NOT NULL CHECK(outcome = 'succeeded'));
 CREATE TABLE revision_receipts (revision_id TEXT NOT NULL REFERENCES revisions(id), receipt_id TEXT NOT NULL UNIQUE REFERENCES provider_receipts(id), PRIMARY KEY(revision_id, receipt_id));";
+
+pub(super) const MODEL_MANAGER_V3_SCHEMA: &str = "
+ALTER TABLE model_installations RENAME TO model_installations_v2;
+CREATE TABLE model_installations (model_id TEXT PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr', 'vad')), manifest_version TEXT NOT NULL, archive_sha256 TEXT NOT NULL, install_dir TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK(state IN ('installed_unqualified', 'runtime_qualified', 'deleting')), installed_at TEXT NOT NULL, runtime_identity_json TEXT, qualified_at TEXT, last_error_code TEXT);
+INSERT INTO model_installations(model_id, provider, manifest_version, archive_sha256, install_dir, state, installed_at, runtime_identity_json, qualified_at, last_error_code)
+SELECT model_id, provider, manifest_version, archive_sha256, install_dir,
+       CASE state WHEN 'deleting' THEN 'deleting' ELSE 'installed_unqualified' END,
+       installed_at, NULL, NULL,
+       CASE WHEN state = 'corrupt' THEN COALESCE(last_error_code, 'model_integrity_failed') ELSE last_error_code END
+FROM model_installations_v2;
+DROP TABLE model_installations_v2;
+CREATE TABLE model_download_artifacts (
+  download_id TEXT NOT NULL REFERENCES model_downloads(id) ON DELETE CASCADE,
+  artifact_id TEXT NOT NULL,
+  source_repository TEXT NOT NULL,
+  source_model TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  source_revision TEXT NOT NULL,
+  expected_bytes INTEGER NOT NULL CHECK(expected_bytes >= 0),
+  downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK(downloaded_bytes >= 0 AND downloaded_bytes <= expected_bytes),
+  expected_sha256 TEXT NOT NULL CHECK(length(expected_sha256) = 64),
+  verified_sha256 TEXT CHECK(verified_sha256 IS NULL OR length(verified_sha256) = 64),
+  required_path TEXT NOT NULL,
+  temp_path TEXT,
+  etag TEXT,
+  last_modified TEXT,
+  checkpointed_at TEXT,
+  verified_at TEXT,
+  state TEXT NOT NULL CHECK(state IN ('pending', 'downloading', 'downloaded', 'verifying', 'verified', 'failed', 'cancelled')),
+  error_code TEXT,
+  error_summary TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(download_id, artifact_id),
+  UNIQUE(download_id, required_path)
+);
+CREATE INDEX model_download_artifacts_state ON model_download_artifacts(download_id, state);";

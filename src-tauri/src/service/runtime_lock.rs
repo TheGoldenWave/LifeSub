@@ -9,6 +9,9 @@ use std::path::Path;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "asr-runtime")]
+use crate::asr::model_manager::FullSherpaRuntimeIdentity;
+use crate::asr::model_manager::{ManagerError, ModelManager, ReqwestTransport};
 use crate::catalog::Catalog;
 
 use super::{EvidenceService, ServiceError};
@@ -48,6 +51,7 @@ pub enum CoreRuntimeError {
     Ownership(RuntimeOwnershipError),
     Catalog(rusqlite::Error),
     Service(ServiceError),
+    ModelManager(ManagerError),
     Io(io::Error),
 }
 
@@ -126,7 +130,12 @@ impl RuntimeOwnershipGuard {
         )?;
         let data_dir_file = open_directory_at(&anchor.parent, &data_dir_name)?;
         let data_dir_identity = file_identity(&data_dir_file)?;
-        ensure_entry_identity(&anchor.parent, &data_dir_name, data_dir_identity, libc::S_IFDIR)?;
+        ensure_entry_identity(
+            &anchor.parent,
+            &data_dir_name,
+            data_dir_identity,
+            libc::S_IFDIR,
+        )?;
         match data_dir_file.try_lock_exclusive() {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -146,7 +155,12 @@ impl RuntimeOwnershipGuard {
             Err(error) => return Err(RuntimeOwnershipError::Io(error)),
         }
         ensure_entry_identity(&data_dir_file, &lock_name, lock_identity, libc::S_IFREG)?;
-        ensure_entry_identity(&anchor.parent, &data_dir_name, data_dir_identity, libc::S_IFDIR)?;
+        ensure_entry_identity(
+            &anchor.parent,
+            &data_dir_name,
+            data_dir_identity,
+            libc::S_IFDIR,
+        )?;
         Ok(Self {
             core_lock: anchor.lock,
             core_lock_name: anchor.lock_name,
@@ -213,20 +227,50 @@ impl CoreRuntime {
         data_dir: &Path,
         hook: impl FnOnce() -> io::Result<()>,
     ) -> Result<Self, CoreRuntimeError> {
-        let anchor = ExternalOwnershipAnchor::acquire(data_dir)
-            .map_err(CoreRuntimeError::Ownership)?;
+        let anchor =
+            ExternalOwnershipAnchor::acquire(data_dir).map_err(CoreRuntimeError::Ownership)?;
         fs::create_dir_all(data_dir).map_err(CoreRuntimeError::Io)?;
-        let ownership = RuntimeOwnershipGuard::acquire_with_anchor_and_hook(data_dir, anchor, || Ok(()))
+        let ownership =
+            RuntimeOwnershipGuard::acquire_with_anchor_and_hook(data_dir, anchor, || Ok(()))
+                .map_err(CoreRuntimeError::Ownership)?;
+        ownership
+            .ensure_current()
             .map_err(CoreRuntimeError::Ownership)?;
-        ownership.ensure_current().map_err(CoreRuntimeError::Ownership)?;
         hook().map_err(CoreRuntimeError::Io)?;
-        ownership.ensure_current().map_err(CoreRuntimeError::Ownership)?;
-        let catalog = Catalog::open(data_dir.join(CATALOG_FILE))
-            .map_err(CoreRuntimeError::Catalog)?;
-        ownership.ensure_current().map_err(CoreRuntimeError::Ownership)?;
+        ownership
+            .ensure_current()
+            .map_err(CoreRuntimeError::Ownership)?;
+        let catalog =
+            Catalog::open(data_dir.join(CATALOG_FILE)).map_err(CoreRuntimeError::Catalog)?;
+        ownership
+            .ensure_current()
+            .map_err(CoreRuntimeError::Ownership)?;
         let catalog = EvidenceService::initialize(catalog, data_dir)
             .map_err(CoreRuntimeError::Service)?
             .into_catalog();
+        let manager = ModelManager::new(
+            data_dir,
+            ReqwestTransport::new().map_err(CoreRuntimeError::ModelManager)?,
+            catalog,
+        );
+        #[cfg(feature = "asr-runtime")]
+        let manager = {
+            let identity = crate::asr::verify_runtime_identity().map_err(|error| {
+                CoreRuntimeError::ModelManager(ManagerError::catalog(format!("{error:?}")))
+            })?;
+            manager.with_sherpa_runtime_identity(FullSherpaRuntimeIdentity {
+                version: identity.version,
+                git_commit: identity.pinned_git_sha1.to_owned(),
+                native_archive_sha256: identity.native_archive_sha256.to_owned(),
+                build_id: identity.build_id.to_owned(),
+            })
+        };
+        #[cfg(not(feature = "asr-runtime"))]
+        let manager = manager;
+        manager
+            .reconcile_all()
+            .map_err(CoreRuntimeError::ModelManager)?;
+        let catalog = manager.into_catalog();
         Ok(Self { catalog, ownership })
     }
 
@@ -247,7 +291,10 @@ fn open_directory_path(path: &Path) -> Result<File, RuntimeOwnershipError> {
     let path = c_string(path.as_os_str())?;
     let descriptor = unsafe {
         // SAFETY: path is NUL terminated and flags request a no-follow directory handle.
-        libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
     };
     file_from_descriptor(descriptor)
 }
@@ -255,7 +302,11 @@ fn open_directory_path(path: &Path) -> Result<File, RuntimeOwnershipError> {
 fn open_directory_at(parent: &File, name: &CString) -> Result<File, RuntimeOwnershipError> {
     let descriptor = unsafe {
         // SAFETY: parent is an open directory and name is a valid relative C string.
-        libc::openat(parent.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
     };
     file_from_descriptor(descriptor)
 }
@@ -263,7 +314,12 @@ fn open_directory_at(parent: &File, name: &CString) -> Result<File, RuntimeOwner
 fn open_lock_at(data_dir: &File, name: &CString) -> Result<File, RuntimeOwnershipError> {
     let descriptor = unsafe {
         // SAFETY: data_dir is open and creation is relative with no symlink following.
-        libc::openat(data_dir.as_raw_fd(), name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW, 0o600)
+        libc::openat(
+            data_dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
     };
     file_from_descriptor(descriptor)
 }
@@ -293,7 +349,12 @@ fn ensure_entry_identity(
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     let result = unsafe {
         // SAFETY: name is NUL terminated and stat points to writable storage.
-        libc::fstatat(directory.as_raw_fd(), name.as_ptr(), stat.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW)
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
     };
     if result == -1 {
         return Err(RuntimeOwnershipError::Io(io::Error::last_os_error()));

@@ -3,6 +3,7 @@ set -eu
 
 readonly SCRIPT_DIR="$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd)"
 readonly WRAPPER_SCRIPT="${SCRIPT_DIR}/with-sherpa-runtime.sh"
+readonly FETCH_SCRIPT="${SCRIPT_DIR}/fetch-sherpa-runtime.sh"
 readonly ARCHIVE_STEM="sherpa-onnx-v1.13.5-osx-arm64-static-lib"
 readonly ARCHIVE_SHA256="339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44"
 readonly TEST_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/lifesub-sherpa-wrapper-test.XXXXXX")"
@@ -31,6 +32,10 @@ set -eu
 
 : "${CARGO_TARGET_DIR:?}"
 : "${SHERPA_ONNX_ARCHIVE_DIR:?}"
+: "${LIFESUB_SHERPA_RUNTIME_ATTESTATION_FILE:?}"
+: "${LIFESUB_SHERPA_ARCHIVE_SHA256:?}"
+: "${LIFESUB_SHERPA_BUILD_ID:?}"
+: "${LIFESUB_SHERPA_VERIFIED:?}"
 : "${TEST_EXPECTED_TARGET_DIR:?}"
 : "${TEST_STUB_LOG:?}"
 : "${TEST_STUB_SLEEP_SECONDS:?}"
@@ -38,6 +43,10 @@ set -eu
 
 [ "$CARGO_TARGET_DIR" = "$TEST_EXPECTED_TARGET_DIR" ] || exit 92
 [ -f "${SHERPA_ONNX_ARCHIVE_DIR}/sherpa-onnx-v1.13.5-osx-arm64-static-lib.tar.bz2" ] || exit 93
+[ "$LIFESUB_SHERPA_RUNTIME_ATTESTATION_FILE" = "${SHERPA_ONNX_ARCHIVE_DIR}/.lifesub-sherpa-runtime-attestation-v1" ] || exit 98
+[ "$LIFESUB_SHERPA_ARCHIVE_SHA256" = "339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44" ] || exit 99
+[ "$LIFESUB_SHERPA_BUILD_ID" = "sherpa-onnx-v1.13.5-osx-arm64-static-lib" ] || exit 100
+[ "$LIFESUB_SHERPA_VERIFIED" = "1" ] || exit 101
 owner_pid_file="${CARGO_TARGET_DIR}/.lifesub-sherpa-runtime.lock/owner.pid"
 [ -f "$owner_pid_file" ] || exit 95
 owner_pid="$(/bin/cat "$owner_pid_file")"
@@ -115,6 +124,40 @@ set -e
     /bin/cat "${TEST_ROOT}/dead.out" >&2
     fail "dead owner recovery failed with status ${dead_status}"
 }
+
+verified_archive_dir="$($FETCH_SCRIPT)"
+tamper_cache_root="${TEST_ROOT}/tamper-cache"
+tamper_archive_dir="${tamper_cache_root}/lifesub/sherpa-onnx/v1.13.5"
+/bin/mkdir -p "$tamper_archive_dir"
+/bin/cp "${verified_archive_dir}/sherpa-onnx-v1.13.5-osx-arm64-static-lib.tar.bz2" "$tamper_archive_dir/"
+/bin/cp "${verified_archive_dir}/.lifesub-sherpa-runtime-attestation-v1" "$tamper_archive_dir/"
+tamper_target="${TEST_ROOT}/tamper-target"
+/bin/mkdir -p "${tamper_target}/.lifesub-sherpa-runtime.lock"
+/bin/echo "$$" >"${tamper_target}/.lifesub-sherpa-runtime.lock/owner.pid"
+XDG_CACHE_HOME="$tamper_cache_root" \
+    CARGO_TARGET_DIR="$tamper_target" \
+    LIFESUB_SHERPA_LOCK_POLL_SECONDS=0.01 \
+    LIFESUB_SHERPA_LOCK_WAIT_ATTEMPTS=900 \
+    TEST_EXPECTED_TARGET_DIR="$tamper_target" \
+    TEST_STUB_LOG="$STUB_LOG" \
+    TEST_STUB_SLEEP_SECONDS=0 \
+    TEST_STUB_FAIL_RUN=0 \
+    PATH="${STUB_BIN}:${PATH}" \
+    "$WRAPPER_SCRIPT" cargo test >"${TEST_ROOT}/tamper.out" 2>&1 &
+tamper_wrapper_pid=$!
+/bin/sleep 1
+/usr/bin/printf 'X' | /bin/dd \
+    of="${tamper_archive_dir}/sherpa-onnx-v1.13.5-osx-arm64-static-lib.tar.bz2" \
+    bs=1 seek=0 conv=notrunc 2>/dev/null
+/bin/rm -f "${tamper_target}/.lifesub-sherpa-runtime.lock/owner.pid"
+/bin/rmdir "${tamper_target}/.lifesub-sherpa-runtime.lock"
+set +e
+wait "$tamper_wrapper_pid"
+tamper_status=$?
+set -e
+[ "$tamper_status" -ne 0 ] || fail "same-size archive tamper passed trusted wrapper"
+/usr/bin/grep -q 'changed after verified fetch' "${TEST_ROOT}/tamper.out" \
+    || fail "same-size archive tamper did not reach wrapper verification"
 [ ! -d "$dead_lock" ] || fail "recovered dead-owner lock was not released"
 dead_stale_count="$(
     /usr/bin/find "$dead_target" -maxdepth 1 -type d -name '.lifesub-sherpa-runtime.lock.stale.*' -print \

@@ -6,8 +6,11 @@ readonly ARCHIVE_NAME="sherpa-onnx-v${RUNTIME_VERSION}-osx-arm64-static-lib.tar.
 readonly ARCHIVE_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${RUNTIME_VERSION}/${ARCHIVE_NAME}"
 readonly ARCHIVE_SIZE="19862746"
 readonly ARCHIVE_SHA256="339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44"
+readonly RUNTIME_GIT_COMMIT="3dc7c569f31ca2cd4a20ed6f7db780327e6714c5"
+readonly BUILD_ID="sherpa-onnx-v1.13.5-osx-arm64-static-lib"
 readonly CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/Library/Caches}/lifesub/sherpa-onnx/v${RUNTIME_VERSION}"
 readonly ARCHIVE_PATH="${CACHE_ROOT}/${ARCHIVE_NAME}"
+readonly ATTESTATION_PATH="${CACHE_ROOT}/.lifesub-sherpa-runtime-attestation-v1"
 
 archive_size() {
     /usr/bin/stat -f '%z' "$1"
@@ -18,9 +21,27 @@ archive_sha256() {
 }
 
 archive_is_valid() {
-    [ -f "$1" ] \
+    [ ! -L "$1" ] \
+        && [ -f "$1" ] \
         && [ "$(archive_size "$1")" = "$ARCHIVE_SIZE" ] \
         && [ "$(archive_sha256 "$1")" = "$ARCHIVE_SHA256" ]
+}
+
+attestation_payload() {
+    /usr/bin/printf '%s\n' \
+        'schema=lifesub.sherpa-runtime-attestation.v1' \
+        "version=${RUNTIME_VERSION}" \
+        "git_commit=${RUNTIME_GIT_COMMIT}" \
+        "archive_name=${ARCHIVE_NAME}" \
+        "archive_size=${ARCHIVE_SIZE}" \
+        "archive_sha256=${ARCHIVE_SHA256}" \
+        "build_id=${BUILD_ID}"
+}
+
+attestation_is_valid() {
+    [ ! -L "$ATTESTATION_PATH" ] \
+        && [ -f "$ATTESTATION_PATH" ] \
+        && [ "$(/bin/cat "$ATTESTATION_PATH")" = "$(attestation_payload)" ]
 }
 
 /bin/mkdir -p "$CACHE_ROOT"
@@ -39,6 +60,14 @@ if ! archive_is_valid "$ARCHIVE_PATH"; then
     fi
 
     /bin/mv -f "$temporary_archive" "$ARCHIVE_PATH"
+    trap - EXIT HUP INT TERM
+fi
+
+if ! attestation_is_valid; then
+    temporary_attestation="$(/usr/bin/mktemp "${CACHE_ROOT}/.lifesub-sherpa-runtime-attestation-v1.XXXXXX")"
+    trap '/bin/rm -f "$temporary_attestation"' EXIT HUP INT TERM
+    attestation_payload >"$temporary_attestation"
+    /bin/mv -f "$temporary_attestation" "$ATTESTATION_PATH"
     trap - EXIT HUP INT TERM
 fi
 

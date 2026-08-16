@@ -1,0 +1,11 @@
+include!("asr_model_manager_test/support.rs");
+include!("asr_model_manager_test/download_resume.rs");
+include!("asr_model_manager_test/download_integrity.rs");
+include!("asr_model_manager_test/path_cancel.rs");
+include!("asr_model_manager_test/archive.rs");
+include!("asr_model_manager_test/install_state.rs");
+include!("asr_model_manager_test/install_reconcile.rs");
+include!("asr_model_manager_test/catalog_delete.rs");
+include!("asr_model_manager_test/manifest_startup.rs");
+include!("asr_model_manager_test/reconcile_delete.rs");
+include!("asr_model_manager_test/stream_socket.rs");

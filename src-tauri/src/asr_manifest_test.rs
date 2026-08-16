@@ -1,13 +1,15 @@
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path};
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
 use crate::asr::manifest::{
-    ArtifactInstallMode, ConfigCompatibilityError, DeviceRequirement, QualificationPolicy,
-    RegistryValidationError, RuntimeRequirement, canonical_bundle_payload, model_registry,
-    vad_manifest, validate_qwen_config_shape, validate_registry,
+    ArtifactInstallMode, ConfigCompatibilityError, DeviceRequirement, DirectInstallConstraints,
+    InstallConstraints, QualificationPolicy, RegistryValidationError, RequiredInstallFile,
+    RuntimeRequirement, canonical_bundle_payload, model_registry, vad_manifest,
+    validate_qwen_config_shape, validate_registry,
 };
 use crate::asr::model_lookup::{
     DeviceSupport, InstallationQualification, ModelLookup, ModelLookupContext,
@@ -32,6 +34,14 @@ const QWEN_RUNTIME_FOR_TEST: RuntimeRequirement = RuntimeRequirement::QwenCandle
     target_os: "macos",
     target_arch: "aarch64",
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GoldenArchiveInstallContract {
+    max_scanned_entries: u64,
+    max_written_file_bytes: u64,
+    max_total_written_bytes: u64,
+    required_files: BTreeSet<String>,
+}
 
 #[test]
 fn shipping_registry_has_six_installable_models_and_one_vad() {
@@ -76,6 +86,149 @@ fn shipping_registry_has_six_installable_models_and_one_vad() {
     assert_eq!(vad.bundle.artifacts.len(), 1);
     assert_eq!(vad.bundle.required_paths, &["silero_vad.onnx"]);
     assert_artifact_contract(&vad.bundle.artifacts[0]);
+}
+
+#[test]
+fn sherpa_manifests_share_the_task1_trusted_native_build_identity() {
+    let pinned = crate::asr::pinned_sherpa_runtime_identity();
+    assert_eq!(pinned.version, "1.13.5");
+    assert_eq!(
+        pinned.git_commit,
+        "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5"
+    );
+    assert_eq!(
+        pinned.native_archive_sha256,
+        "339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44"
+    );
+    assert_eq!(pinned.build_id, "sherpa-onnx-v1.13.5-osx-arm64-static-lib");
+
+    for model in model_registry()
+        .models()
+        .iter()
+        .filter(|model| model.id != QWEN17_ID)
+    {
+        assert_eq!(
+            model.runtime,
+            RuntimeRequirement::SherpaOnnx {
+                crate_version: pinned.version,
+                git_commit: pinned.git_commit,
+                native_archive_sha256: pinned.native_archive_sha256,
+                build_id: pinned.build_id,
+                cargo_feature: "static",
+            }
+        );
+        let payload: serde_json::Value =
+            serde_json::from_str(&canonical_bundle_payload(model).unwrap()).unwrap();
+        assert_eq!(
+            payload["runtime_requirement"],
+            serde_json::json!({
+                "build_id": pinned.build_id,
+                "cargo_feature": "static",
+                "crate": "sherpa-onnx",
+                "git_commit": pinned.git_commit,
+                "native_archive_sha256": pinned.native_archive_sha256,
+                "version": pinned.version,
+            })
+        );
+    }
+    assert_eq!(
+        vad_manifest().runtime,
+        RuntimeRequirement::SherpaOnnx {
+            crate_version: pinned.version,
+            git_commit: pinned.git_commit,
+            native_archive_sha256: pinned.native_archive_sha256,
+            build_id: pinned.build_id,
+            cargo_feature: "static",
+        }
+    );
+}
+
+#[cfg(feature = "asr-runtime")]
+#[test]
+fn observed_sherpa_identity_carries_trusted_wrapper_build_metadata() {
+    let observed = crate::asr::verify_runtime_identity().unwrap();
+    let pinned = crate::asr::pinned_sherpa_runtime_identity();
+    assert_eq!(observed.version(), pinned.version);
+    assert_eq!(observed.observed_git_sha1(), "3dc7c569");
+    assert_eq!(observed.pinned_git_sha1(), pinned.git_commit);
+    assert_eq!(
+        observed.native_archive_sha256(),
+        pinned.native_archive_sha256
+    );
+    assert_eq!(observed.build_id(), pinned.build_id);
+    assert!(observed.matches_pinned(pinned));
+}
+
+#[cfg(feature = "asr-runtime")]
+#[test]
+fn runtime_identity_rejects_spoofed_native_build_attestation() {
+    let pinned = crate::asr::pinned_sherpa_runtime_identity();
+    assert_eq!(
+        crate::asr::verify_runtime_identity_values_with_build(
+            pinned.version,
+            "3dc7c569",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            pinned.build_id,
+            "1",
+        ),
+        Err(
+            crate::asr::RuntimeIdentityError::NativeArchiveSha256Mismatch {
+                observed: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                pinned: pinned.native_archive_sha256,
+            }
+        )
+    );
+    assert_eq!(
+        crate::asr::verify_runtime_identity_values_with_build(
+            pinned.version,
+            pinned.git_commit,
+            pinned.native_archive_sha256,
+            "spoofed-build",
+            "1",
+        ),
+        Err(crate::asr::RuntimeIdentityError::BuildIdMismatch {
+            observed: "spoofed-build".to_owned(),
+            pinned: pinned.build_id,
+        })
+    );
+    assert_eq!(
+        crate::asr::verify_runtime_identity_values_with_build(
+            pinned.version,
+            "3dc7c569",
+            pinned.native_archive_sha256,
+            pinned.build_id,
+            "0",
+        ),
+        Err(
+            crate::asr::RuntimeIdentityError::BuildAttestationUnverified {
+                observed: "0".to_owned(),
+            }
+        )
+    );
+}
+
+#[test]
+fn task1_shell_and_rust_build_attestation_contracts_match() {
+    let fetcher = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../scripts/fetch-sherpa-runtime.sh"
+    ));
+    let wrapper = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../scripts/with-sherpa-runtime.sh"
+    ));
+    let build_rs = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"));
+    for contract in [fetcher, wrapper, build_rs] {
+        assert!(
+            contract.contains("339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44")
+        );
+        assert!(contract.contains("sherpa-onnx-v1.13.5-osx-arm64-static-lib"));
+    }
+    assert!(fetcher.contains("schema=lifesub.sherpa-runtime-attestation.v1"));
+    assert!(wrapper.contains("LIFESUB_SHERPA_RUNTIME_ATTESTATION_FILE"));
+    assert!(build_rs.contains("cargo:rustc-env=LIFESUB_SHERPA_ARCHIVE_SHA256"));
+    assert!(build_rs.contains("cargo:rustc-env=LIFESUB_SHERPA_BUILD_ID"));
 }
 
 #[test]
@@ -157,6 +310,230 @@ fn registry_freezes_downloaded_archive_hashes_and_required_contents() {
             assert!(model.bundle.required_paths.contains(required_path));
         }
     }
+}
+
+#[test]
+fn install_constraints_freeze_exact_archive_and_direct_whitelists() {
+    let expected_archives = [
+        (
+            "sense-voice-small-int8-2024-07-17",
+            12,
+            239_233_841,
+            240_500_355,
+            7,
+        ),
+        ("whisper-tiny", 11, 114_505_801, 153_794_272, 7),
+        ("whisper-base", 11, 196_548_998, 293_277_543, 7),
+        ("whisper-small", 11, 559_127_829, 970_298_212, 7),
+        (
+            "qwen3-asr-0.6b-int8-2026-03-25",
+            27,
+            755_914_231,
+            1_000_089_273,
+            22,
+        ),
+    ];
+    let mut archive_file_count = 0;
+    for (model_id, entries, max_file, total, file_count) in expected_archives {
+        let model = model_registry().model(model_id).unwrap();
+        let InstallConstraints::Archive(constraints) = model.bundle.install_constraints else {
+            panic!("{model_id} did not expose archive constraints");
+        };
+        assert_eq!(constraints.max_scanned_entries, entries);
+        assert_eq!(constraints.max_written_file_bytes, max_file);
+        assert_eq!(constraints.max_total_written_bytes, total);
+        assert_eq!(constraints.required_files.len(), file_count);
+        archive_file_count += constraints.required_files.len();
+        assert_install_inventory_matches_required_paths(
+            model.bundle.required_paths,
+            constraints.required_files,
+        );
+    }
+    assert_eq!(archive_file_count, 50);
+
+    let qwen06 = model_registry()
+        .model("qwen3-asr-0.6b-int8-2026-03-25")
+        .unwrap();
+    let InstallConstraints::Archive(qwen06) = qwen06.bundle.install_constraints else {
+        unreachable!();
+    };
+    for expected in [
+        RequiredInstallFile {
+            path: "tokenizer/merges.txt",
+            bytes: 1_671_853,
+            sha256: "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        },
+        RequiredInstallFile {
+            path: "tokenizer/tokenizer_config.json",
+            bytes: 12_487,
+            sha256: "4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c",
+        },
+        RequiredInstallFile {
+            path: "tokenizer/vocab.json",
+            bytes: 2_776_833,
+            sha256: "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        },
+    ] {
+        assert!(qwen06.required_files.contains(&expected));
+    }
+
+    let qwen17 = model_registry().model(QWEN17_ID).unwrap();
+    let InstallConstraints::Direct(qwen17_constraints) = qwen17.bundle.install_constraints else {
+        panic!("Qwen 1.7B did not expose direct constraints");
+    };
+    assert_eq!(qwen17_constraints.required_files.len(), 5);
+    assert_eq!(qwen17_constraints.max_written_file_bytes, 4_220_320_824);
+    assert_eq!(qwen17_constraints.max_total_written_bytes, 4_710_022_180);
+    assert_install_inventory_matches_required_paths(
+        qwen17.bundle.required_paths,
+        qwen17_constraints.required_files,
+    );
+
+    let InstallConstraints::Direct(vad) = vad_manifest().bundle.install_constraints else {
+        panic!("VAD did not expose direct constraints");
+    };
+    assert_eq!(vad.required_files.len(), 1);
+    assert_eq!(vad.max_written_file_bytes, 643_854);
+    assert_eq!(vad.max_total_written_bytes, 643_854);
+}
+
+#[test]
+fn independent_golden_inventory_matches_manifest_bidirectionally() {
+    let mut golden = golden_archive_install_contracts();
+    let mut manifest_models = BTreeSet::new();
+    for model in model_registry().models() {
+        let InstallConstraints::Archive(constraints) = model.bundle.install_constraints else {
+            continue;
+        };
+        assert!(manifest_models.insert(model.id));
+        let expected = golden
+            .remove(model.id)
+            .unwrap_or_else(|| panic!("golden fixture omitted archive model {}", model.id));
+        assert_eq!(archive_contract_from_manifest(constraints), expected);
+    }
+    assert_eq!(manifest_models.len(), 5);
+    assert!(
+        golden.is_empty(),
+        "golden fixture has unknown models: {golden:?}"
+    );
+}
+
+#[test]
+fn cached_official_archives_match_manifest_and_golden_when_configured() {
+    let Some(cache) = std::env::var_os("LIFESUB_MODEL_ARCHIVE_CACHE") else {
+        return;
+    };
+    verify_cached_archive_contracts(Path::new(&cache)).unwrap();
+}
+
+#[test]
+fn install_constraints_are_explicitly_excluded_from_qwen17_jcs_v2() {
+    let qwen17 = model_registry().model(QWEN17_ID).unwrap();
+    let canonical = canonical_bundle_payload(qwen17).unwrap();
+    assert_eq!(qwen17.manifest_version, "2");
+    assert_eq!(qwen17.bundle.identity_sha256, QWEN17_BUNDLE_SHA256);
+    assert!(!canonical.contains("install_constraints"));
+    assert!(!canonical.contains("max_scanned_entries"));
+    assert!(!canonical.contains("max_total_written_bytes"));
+    assert_eq!(
+        hex::encode(Sha256::digest(canonical.as_bytes())),
+        QWEN17_BUNDLE_SHA256
+    );
+}
+
+#[test]
+fn validator_rejects_every_archive_install_constraint_field_drift() {
+    let source = model_registry().model("whisper-tiny").unwrap();
+    let InstallConstraints::Archive(canonical) = source.bundle.install_constraints else {
+        unreachable!();
+    };
+    let mut mutations = Vec::new();
+    let mut value = canonical;
+    value.max_scanned_entries -= 1;
+    mutations.push(value);
+    let mut value = canonical;
+    value.max_written_file_bytes += 1;
+    mutations.push(value);
+    let mut value = canonical;
+    value.max_total_written_bytes += 1;
+    mutations.push(value);
+
+    let mut files = canonical.required_files.to_vec();
+    files[0].path = "unsafe\\path";
+    let mut value = canonical;
+    value.required_files = Box::leak(files.into_boxed_slice());
+    mutations.push(value);
+    let mut files = canonical.required_files.to_vec();
+    files[0].bytes += 1;
+    let mut value = canonical;
+    value.required_files = Box::leak(files.into_boxed_slice());
+    mutations.push(value);
+    let mut files = canonical.required_files.to_vec();
+    files[0].sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut value = canonical;
+    value.required_files = Box::leak(files.into_boxed_slice());
+    mutations.push(value);
+
+    for constraints in mutations {
+        let mut model = *source;
+        model.bundle.install_constraints = InstallConstraints::Archive(constraints);
+        assert!(validate_single_model(model).is_err());
+    }
+}
+
+#[test]
+fn validator_rejects_every_direct_install_constraint_field_drift() {
+    let source = model_registry().model(QWEN17_ID).unwrap();
+    let InstallConstraints::Direct(canonical) = source.bundle.install_constraints else {
+        unreachable!();
+    };
+    let mut max_file = *source;
+    max_file.bundle.install_constraints = InstallConstraints::Direct(DirectInstallConstraints {
+        max_written_file_bytes: canonical.max_written_file_bytes + 1,
+        ..canonical
+    });
+    assert!(validate_single_model(max_file).is_err());
+    let mut total = *source;
+    total.bundle.install_constraints = InstallConstraints::Direct(DirectInstallConstraints {
+        max_total_written_bytes: canonical.max_total_written_bytes + 1,
+        ..canonical
+    });
+    assert!(validate_single_model(total).is_err());
+    let mut files = canonical.required_files.to_vec();
+    files[0].sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut inventory = *source;
+    inventory.bundle.install_constraints = InstallConstraints::Direct(DirectInstallConstraints {
+        required_files: Box::leak(files.into_boxed_slice()),
+        ..canonical
+    });
+    assert!(validate_single_model(inventory).is_err());
+    let mut files = canonical.required_files.to_vec();
+    files[0].path = "unsafe\\path";
+    let mut path = *source;
+    path.bundle.install_constraints = InstallConstraints::Direct(DirectInstallConstraints {
+        required_files: Box::leak(files.into_boxed_slice()),
+        ..canonical
+    });
+    assert!(validate_single_model(path).is_err());
+    let mut files = canonical.required_files.to_vec();
+    files[0].bytes += 1;
+    let mut bytes = *source;
+    bytes.bundle.install_constraints = InstallConstraints::Direct(DirectInstallConstraints {
+        required_files: Box::leak(files.into_boxed_slice()),
+        ..canonical
+    });
+    assert!(validate_single_model(bytes).is_err());
+
+    let vad_source = *vad_manifest();
+    let InstallConstraints::Direct(vad_constraints) = vad_source.bundle.install_constraints else {
+        unreachable!();
+    };
+    let mut vad = vad_source;
+    vad.bundle.install_constraints = InstallConstraints::Direct(DirectInstallConstraints {
+        max_total_written_bytes: vad_constraints.max_total_written_bytes + 1,
+        ..vad_constraints
+    });
+    assert_vad_error(vad, RegistryValidationError::InvalidManifestField);
 }
 
 #[test]
@@ -821,9 +1198,31 @@ fn validator_rejects_runtime_device_and_policy_drift() {
     runtime.runtime = RuntimeRequirement::SherpaOnnx {
         crate_version: "1.13.5",
         git_commit: "",
+        native_archive_sha256: "339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44",
+        build_id: "sherpa-onnx-v1.13.5-osx-arm64-static-lib",
         cargo_feature: "static",
     };
     assert_single_model_error(runtime, RegistryValidationError::InvalidManifestField);
+
+    let mut archive = *model_registry().model("whisper-tiny").unwrap();
+    archive.runtime = RuntimeRequirement::SherpaOnnx {
+        crate_version: "1.13.5",
+        git_commit: "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5",
+        native_archive_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        build_id: "sherpa-onnx-v1.13.5-osx-arm64-static-lib",
+        cargo_feature: "static",
+    };
+    assert_single_model_error(archive, RegistryValidationError::InvalidManifestField);
+
+    let mut build = *model_registry().model("whisper-tiny").unwrap();
+    build.runtime = RuntimeRequirement::SherpaOnnx {
+        crate_version: "1.13.5",
+        git_commit: "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5",
+        native_archive_sha256: "339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44",
+        build_id: "untrusted-build",
+        cargo_feature: "static",
+    };
+    assert_single_model_error(build, RegistryValidationError::InvalidManifestField);
 
     let mut device = *model_registry().model("whisper-tiny").unwrap();
     device.device = DeviceRequirement::AppleSiliconMetal {
@@ -1323,15 +1722,16 @@ fn verify_upstream_registry() -> Result<(), String> {
         let artifact = &model.bundle.artifacts[0];
         verify_github_release_api(&client, artifact)?;
         let mut downloaded = download_artifact(&client, artifact)?;
-        let actual_paths = archive_paths(&mut downloaded, artifact.required_path, model.provider)?;
-        let expected_paths = model
-            .bundle
-            .required_paths
-            .iter()
-            .map(|path| (*path).to_owned())
-            .collect::<BTreeSet<_>>();
-        if actual_paths != expected_paths {
-            return Err(format!("archive path drift for {}", model.id));
+        let InstallConstraints::Archive(constraints) = model.bundle.install_constraints else {
+            return Err(format!("archive model {} has direct constraints", model.id));
+        };
+        let observed =
+            inspect_archive_install_contract(&mut downloaded, artifact.required_path, constraints)?;
+        let golden = golden_archive_install_contracts()
+            .remove(model.id)
+            .ok_or_else(|| format!("golden fixture omitted {}", model.id))?;
+        if observed != golden || observed != archive_contract_from_manifest(constraints) {
+            return Err(format!("archive install contract drift for {}", model.id));
         }
     }
 
@@ -1775,35 +2175,126 @@ fn ensure_initial_url_host(artifact: &crate::asr::manifest::ArtifactFile) -> Res
     ensure_url_allowed(artifact.resolved_url, artifact.redirect_hosts)
 }
 
-fn archive_paths(
-    file: &mut tempfile::NamedTempFile,
-    expected_root: &str,
-    provider: AsrProviderKind,
-) -> Result<BTreeSet<String>, String> {
-    let decoder = bzip2::read::BzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
-    let mut paths = BTreeSet::new();
-    for entry in archive.entries().map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        if !entry.header().entry_type().is_file() {
+fn verify_cached_archive_contracts(cache: &Path) -> Result<(), String> {
+    let mut golden = golden_archive_install_contracts();
+    for model in model_registry().models() {
+        let InstallConstraints::Archive(constraints) = model.bundle.install_constraints else {
             continue;
-        }
-        let path = entry.path().map_err(|error| error.to_string())?;
-        let normalized = path
-            .strip_prefix(expected_root)
-            .map_err(|_| format!("archive entry escaped root: {}", path.display()))?
-            .to_string_lossy()
-            .trim_start_matches('/')
-            .to_owned();
-        let file_name = normalized.rsplit('/').next().unwrap_or_default();
-        let is_documentation = matches!(file_name, "README.md" | "LICENSE" | "export-onnx.py");
-        let is_optional_whisper_int8 =
-            provider == AsrProviderKind::Whisper && normalized.ends_with(".int8.onnx");
-        if !is_documentation && !is_optional_whisper_int8 {
-            paths.insert(normalized);
+        };
+        let artifact = &model.bundle.artifacts[0];
+        let path = cache.join(artifact.source_model);
+        let mut file = std::fs::File::open(&path)
+            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+        let observed =
+            inspect_archive_install_contract(&mut file, artifact.required_path, constraints)?;
+        let expected = golden
+            .remove(model.id)
+            .ok_or_else(|| format!("golden fixture omitted {}", model.id))?;
+        if observed != expected {
+            return Err(format!("cached archive contract drift for {}", model.id));
         }
     }
-    Ok(paths)
+    if !golden.is_empty() {
+        return Err(format!("unmatched golden archive contracts: {golden:?}"));
+    }
+    Ok(())
+}
+
+fn inspect_archive_install_contract(
+    file: &mut impl Read,
+    expected_root: &str,
+    constraints: crate::asr::manifest::ArchiveInstallConstraints,
+) -> Result<GoldenArchiveInstallContract, String> {
+    let decoder = bzip2::read::BzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let required = constraints
+        .required_files
+        .iter()
+        .map(|file| (file.path, file))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = HashSet::new();
+    let mut observed_required = BTreeSet::new();
+    let mut scanned = 0_u64;
+    let mut max_written = 0_u64;
+    let mut total_written = 0_u64;
+    for entry in archive.entries().map_err(|error| error.to_string())? {
+        let mut entry = entry.map_err(|error| error.to_string())?;
+        scanned = scanned
+            .checked_add(1)
+            .ok_or_else(|| "archive entry count overflow".to_owned())?;
+        if scanned > constraints.max_scanned_entries {
+            return Err("archive scanned-entry bound exceeded".to_owned());
+        }
+        let path = entry.path().map_err(|error| error.to_string())?;
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(format!("unsafe archive path: {}", path.display()));
+        }
+        let relative = path
+            .strip_prefix(expected_root)
+            .map_err(|_| format!("archive entry escaped root: {}", path.display()))?;
+        let normalized = relative
+            .to_str()
+            .ok_or_else(|| "non-UTF-8 archive path".to_owned())?
+            .to_owned();
+        if normalized.contains('\\') || normalized.chars().any(char::is_control) {
+            return Err(format!("unsafe archive path bytes: {normalized:?}"));
+        }
+        if !seen.insert(normalized.clone()) {
+            return Err(format!("duplicate archive path: {normalized}"));
+        }
+        let kind = entry.header().entry_type();
+        if kind.is_dir() {
+            continue;
+        }
+        if !kind.is_file() {
+            return Err(format!("special archive entry: {normalized}"));
+        }
+        let Some(expected) = required.get(normalized.as_str()) else {
+            continue;
+        };
+        if entry.size() != expected.bytes {
+            return Err(format!("archive file size drift: {normalized}"));
+        }
+        let mut hasher = Sha256::new();
+        let mut bytes = 0_u64;
+        let mut buffer = [0_u8; 128 * 1024];
+        loop {
+            let count = entry.read(&mut buffer).map_err(|error| error.to_string())?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+            bytes = bytes
+                .checked_add(u64::try_from(count).map_err(|error| error.to_string())?)
+                .ok_or_else(|| "archive file size overflow".to_owned())?;
+            if bytes > expected.bytes {
+                return Err(format!("archive file exceeded declared size: {normalized}"));
+            }
+        }
+        let sha256 = hex::encode(hasher.finalize());
+        if bytes != expected.bytes || sha256 != expected.sha256 {
+            return Err(format!("archive file identity drift: {normalized}"));
+        }
+        total_written = total_written
+            .checked_add(bytes)
+            .ok_or_else(|| "archive written total overflow".to_owned())?;
+        max_written = max_written.max(bytes);
+        observed_required.insert(format!("{normalized}\t{bytes}\t{sha256}"));
+    }
+    let observed = GoldenArchiveInstallContract {
+        max_scanned_entries: scanned,
+        max_written_file_bytes: max_written,
+        max_total_written_bytes: total_written,
+        required_files: observed_required,
+    };
+    if observed != archive_contract_from_manifest(constraints) {
+        return Err("archive required inventory or bounds drift".to_owned());
+    }
+    Ok(observed)
 }
 
 fn verify_qwen17_provider_metadata(_client: &reqwest::blocking::Client) -> Result<(), String> {
@@ -2011,6 +2502,96 @@ fn metadata_qwen_notice_rows(metadata: &serde_json::Value) -> BTreeSet<String> {
         }
     }
     rows
+}
+
+fn assert_install_inventory_matches_required_paths(
+    required_paths: &[&str],
+    required_files: &[RequiredInstallFile],
+) {
+    assert_eq!(required_paths.len(), required_files.len());
+    let paths = required_files
+        .iter()
+        .map(|file| file.path)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        required_paths.iter().copied().collect::<BTreeSet<_>>(),
+        paths
+    );
+    for file in required_files {
+        assert_normalized_relative_path(file.path);
+        assert!(file.bytes > 0);
+        assert_hex_sha256(file.sha256);
+    }
+}
+
+fn validate_single_model(
+    model: crate::asr::manifest::ModelManifest,
+) -> Result<(), RegistryValidationError> {
+    validate_registry(
+        &crate::asr::manifest::ModelRegistry::new(Box::leak(Box::new([model]))),
+        vad_manifest(),
+    )
+}
+
+fn golden_archive_install_contracts() -> BTreeMap<String, GoldenArchiveInstallContract> {
+    let fixture = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/models/sherpa-install-inventory-v1.tsv"
+    ));
+    let mut contracts = BTreeMap::new();
+    let mut file_count = 0;
+    for (index, line) in fixture.lines().enumerate() {
+        let columns = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 5, "invalid golden row {}", index + 1);
+        match columns[0] {
+            "archive" => {
+                let previous = contracts.insert(
+                    columns[1].to_owned(),
+                    GoldenArchiveInstallContract {
+                        max_scanned_entries: columns[2].parse().unwrap(),
+                        max_written_file_bytes: columns[3].parse().unwrap(),
+                        max_total_written_bytes: columns[4].parse().unwrap(),
+                        required_files: BTreeSet::new(),
+                    },
+                );
+                assert!(
+                    previous.is_none(),
+                    "duplicate golden archive {}",
+                    columns[1]
+                );
+            }
+            "file" => {
+                let contract = contracts
+                    .get_mut(columns[1])
+                    .unwrap_or_else(|| panic!("file row precedes archive row: {}", columns[1]));
+                let row = format!("{}\t{}\t{}", columns[2], columns[3], columns[4]);
+                assert!(
+                    contract.required_files.insert(row),
+                    "duplicate golden file row"
+                );
+                file_count += 1;
+            }
+            kind => panic!("unknown golden row type {kind}"),
+        }
+    }
+    assert_eq!(contracts.len(), 5);
+    assert_eq!(file_count, 50);
+    contracts
+}
+
+fn archive_contract_from_manifest(
+    constraints: crate::asr::manifest::ArchiveInstallConstraints,
+) -> GoldenArchiveInstallContract {
+    GoldenArchiveInstallContract {
+        max_scanned_entries: constraints.max_scanned_entries,
+        max_written_file_bytes: constraints.max_written_file_bytes,
+        max_total_written_bytes: constraints.max_total_written_bytes,
+        required_files: constraints
+            .required_files
+            .iter()
+            .map(|file| format!("{}\t{}\t{}", file.path, file.bytes, file.sha256))
+            .collect(),
+    }
 }
 
 fn artifact_with(

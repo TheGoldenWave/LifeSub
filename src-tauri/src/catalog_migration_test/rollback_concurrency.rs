@@ -15,10 +15,10 @@ fn migrates_real_v1_fixture_and_preserves_legacy_evidence() {
     drop(catalog);
 
     let mut connection = Connection::open(path).unwrap();
-    assert_eq!(user_version(&connection), 2);
+    assert_eq!(user_version(&connection), 3);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV2
+        SchemaKind::CurrentV3
     );
     let session: (String, String, String, String, Option<String>) = connection
         .query_row(
@@ -266,4 +266,34 @@ fn catalog_open_waits_for_brief_immediate_writer() {
     lock.commit().unwrap();
 
     assert!(result_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+}
+
+#[test]
+fn two_connections_concurrently_migrate_the_same_v2_fixture() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(V2_FIXTURE, &path).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let workers = (0..2)
+        .map(|_| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                let mut connection = Connection::open(path).unwrap();
+                barrier.wait();
+                migrations::migrate(&mut connection)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+
+    for worker in workers {
+        worker.join().unwrap().unwrap();
+    }
+    let mut connection = Connection::open(path).unwrap();
+    assert_eq!(user_version(&connection), 3);
+    assert_eq!(
+        migrations::classify(&mut connection).unwrap(),
+        SchemaKind::CurrentV3
+    );
 }

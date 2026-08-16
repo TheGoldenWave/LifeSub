@@ -329,9 +329,11 @@ impl Catalog {
                SELECT 1
                FROM asr_jobs j
                JOIN model_installations m ON m.model_id = j.model_id
+               JOIN chunks c ON c.id = j.chunk_id
                WHERE j.id = ?1
                  AND j.provider = ?2 AND j.model_id = ?3
                  AND j.manifest_version = ?4 AND j.archive_sha256 = ?5
+                 AND c.integrity_state = 'available'
                  AND m.provider = ?2 AND m.model_id = ?3
                  AND m.manifest_version = ?4 AND m.archive_sha256 = ?5
                  AND m.state = 'runtime_qualified'
@@ -380,6 +382,10 @@ impl Catalog {
              WHERE id = ?1 AND state = ?8
                AND provider = ?2 AND model_id = ?3
                AND manifest_version = ?4 AND archive_sha256 = ?5
+               AND EXISTS (
+                 SELECT 1 FROM chunks c
+                 WHERE c.id = asr_jobs.chunk_id AND c.integrity_state = 'available'
+               )
                AND EXISTS (
                  SELECT 1 FROM model_installations m
                  WHERE m.provider = ?2 AND m.model_id = ?3

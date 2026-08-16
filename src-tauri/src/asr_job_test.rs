@@ -443,6 +443,28 @@ fn cancelled_jobs_cannot_retry_and_model_ready_never_autoqueues() {
 }
 
 #[test]
+fn unavailable_audio_is_not_ready_to_retry_and_retry_leaves_job_unchanged() {
+    for integrity in ["missing", "corrupted"] {
+        let fixture = Fixture::new();
+        fixture.insert_job("blocked", "blocked_model", integrity, NOW);
+        fixture.install_ready_model();
+        let jobs = fixture.repository("boot-a");
+        let before = fixture.row("blocked");
+
+        assert!(!jobs.is_ready_to_retry("blocked", &ready_model()).unwrap());
+        assert!(matches!(
+            jobs.retry("blocked", &ready_model()),
+            Err(JobError::ModelNotReady)
+        ));
+
+        let after = fixture.row("blocked");
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.claim_generation, before.claim_generation);
+        assert_eq!(after.attempt_count, before.attempt_count);
+    }
+}
+
+#[test]
 fn recovery_honors_running_cancel_marker_and_failed_retry_is_explicit() {
     let fixture = Fixture::new();
     fixture.insert_job("running", "queued", "available", NOW);

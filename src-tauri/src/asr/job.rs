@@ -236,13 +236,6 @@ impl<'a, C: Clock> JobRepository<'a, C> {
 
     pub fn retry(&self, job_id: &str, readiness: &ModelReadiness) -> Result<i64, JobError> {
         self.ensure_owner()?;
-        if !self
-            .catalog
-            .asr_job_model_ready(job_id, &ready_model(readiness))
-            .map_err(JobError::Catalog)?
-        {
-            return Err(JobError::ModelNotReady);
-        }
         match self
             .catalog
             .retry_asr_job(

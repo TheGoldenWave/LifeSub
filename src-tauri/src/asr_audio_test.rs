@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::asr::audio::{
-    AudioPreparationError, SampleRange, WORK_SAMPLE_RATE_HZ, checked_sample_index,
-    decode_to_working_audio, resample_mono, sample_range_to_millis, sanitize_and_downmix,
-    work_range_to_original_frames,
+    AudioPreparationError, DecodeResourceBudget, MAX_DECODED_AUDIO_DURATION_SECONDS, SampleRange,
+    WORK_SAMPLE_RATE_HZ, checked_sample_index, decode_to_working_audio, resample_mono,
+    resampled_frame_count, reserve_f32_capacity, sample_range_to_millis, sanitize_and_downmix,
+    validate_declared_source_frames, work_range_to_original_frames,
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -50,7 +51,8 @@ fn every_declared_import_format_decodes_real_frames_to_finite_16khz_pcm() {
         "tone.flac",
         "tone.ogg",
     ] {
-        let audio = decode_to_working_audio(&fixture(name)).unwrap();
+        let audio = decode_to_working_audio(&fixture(name))
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
         assert_eq!(audio.sample_rate_hz, WORK_SAMPLE_RATE_HZ, "{name}");
         assert_eq!(audio.source_sample_rate_hz, 48_000, "{name}");
         assert!(audio.source_frames >= 24_000, "{name}");
@@ -142,5 +144,95 @@ fn half_open_time_mapping_uses_checked_floor_start_and_ceil_end() {
     assert_eq!(
         checked_sample_index(6, 5),
         Err(AudioPreparationError::IndexOutOfRange)
+    );
+}
+
+#[test]
+fn work_frame_mapping_clamps_ceil_end_to_the_real_source_tail() {
+    assert_eq!(
+        work_range_to_original_frames(SampleRange::new(0, 1).unwrap(), 48_000, 1),
+        Ok(SampleRange::new(0, 1).unwrap())
+    );
+
+    for (source_rate_hz, source_frames) in [
+        (44_100, 44_101_u64),
+        (48_000, 48_001_u64),
+        (8_000, 8_001_u64),
+    ] {
+        let work_frames =
+            (source_frames * u64::from(WORK_SAMPLE_RATE_HZ)).div_ceil(u64::from(source_rate_hz));
+        let tail = SampleRange::new(work_frames - 1, work_frames).unwrap();
+        let mapped = work_range_to_original_frames(tail, source_rate_hz, source_frames).unwrap();
+
+        assert_eq!(mapped.end, source_frames);
+        assert!(mapped.start < mapped.end);
+    }
+}
+
+#[test]
+fn declared_and_actual_decode_streams_are_bounded_without_allocating_pcm() {
+    let source_rate_hz = 8_000_u32;
+    let channels = 2_usize;
+    let max_frames = u64::from(source_rate_hz) * MAX_DECODED_AUDIO_DURATION_SECONDS;
+
+    assert_eq!(
+        validate_declared_source_frames(Some(max_frames + 1), source_rate_hz),
+        Err(AudioPreparationError::ResourceLimitExceeded)
+    );
+    assert_eq!(
+        validate_declared_source_frames(None, source_rate_hz),
+        Ok(())
+    );
+
+    let mut budget = DecodeResourceBudget::new(source_rate_hz, channels).unwrap();
+    let max_samples = usize::try_from(max_frames * channels as u64).unwrap();
+    assert_eq!(budget.accept_packet(max_frames, max_samples), Ok(()));
+    assert_eq!(
+        budget.accept_packet(1, channels),
+        Err(AudioPreparationError::ResourceLimitExceeded)
+    );
+}
+
+#[test]
+fn packet_shape_resample_bounds_and_allocation_failures_are_stable() {
+    assert_eq!(
+        DecodeResourceBudget::new(48_000, usize::MAX),
+        Err(AudioPreparationError::ResourceLimitExceeded)
+    );
+    let mut budget = DecodeResourceBudget::new(48_000, 2).unwrap();
+    assert_eq!(
+        budget.accept_packet(2, 3),
+        Err(AudioPreparationError::UnsupportedOrCorruptAudio)
+    );
+
+    let max_work_frames = u64::from(WORK_SAMPLE_RATE_HZ) * MAX_DECODED_AUDIO_DURATION_SECONDS;
+    assert_eq!(
+        resampled_frame_count(max_work_frames + 1, WORK_SAMPLE_RATE_HZ),
+        Err(AudioPreparationError::ResourceLimitExceeded)
+    );
+
+    let mut samples = Vec::new();
+    assert_eq!(
+        reserve_f32_capacity(&mut samples, usize::MAX),
+        Err(AudioPreparationError::AllocationFailed)
+    );
+    assert_eq!(
+        AudioPreparationError::ResourceLimitExceeded.code(),
+        "audio_resource_limit_exceeded"
+    );
+    assert_eq!(
+        AudioPreparationError::AllocationFailed.code(),
+        "audio_allocation_failed"
+    );
+}
+
+#[test]
+fn truncated_audio_remains_a_stable_corrupt_input_error() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(file.path(), b"RIFF\x10\0\0\0WAVEfmt ").unwrap();
+
+    assert_eq!(
+        decode_to_working_audio(file.path()),
+        Err(AudioPreparationError::UnsupportedOrCorruptAudio)
     );
 }

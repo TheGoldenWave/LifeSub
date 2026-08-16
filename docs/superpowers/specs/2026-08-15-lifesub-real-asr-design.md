@@ -456,6 +456,10 @@ struct ArtifactFile {
 
 实现前必须下载每个发布模型归档并冻结 SHA-256。Silero VAD 也作为独立 `provider = vad` 的 manifest 条目管理，包含版本、模型 hash 和运行参数。若上游同名资产发生变化，必须发布新的 manifest version 和 model ID；禁止在原 ID 下替换资产。
 
+Silero VAD 运行参数以 sherpa-onnx `1.13.5`、commit `3dc7c569f31ca2cd4a20ed6f7db780327e6714c5` 的源码头文件为唯一 canonical provenance：`sherpa-onnx/csrc/silero-vad-model-config.h` 定义 `threshold = 0.5`、`min_silence_duration = 0.5 s`、`min_speech_duration = 0.25 s`、`max_speech_duration = 20 s`、`window_size = 512` samples；`sherpa-onnx/csrc/vad-model-config.h` 定义 `sample_rate = 16000 Hz`、`num_threads = 1`、`provider = "cpu"`。静态 `VadManifest` 必须逐字段保存这些值和上述版本、commit、source header 路径；validator 必须拒绝非有限数、非法范围、空 provenance，以及任何偏离该 manifest version 冻结值的配置。
+
+Rust crate 的 `SileroVadModelConfig` 与 `VadModelConfig` 派生 `Default`，但该 `Default` 产生数值零值和空 provider，并不等于 C++ source defaults。运行时构造必须从已验证的 `VadManifest` 显式填充每个字段，禁止使用 `Default::default()`、struct update default 或零值占位。
+
 Receipt 必须快照 manifest version、单归档 hash 或 canonical bundle identity、所有必需模型文件 hash、逐文件来源/revision/provenance、compatibility Gate 版本和运行时 build ID。旧 Evidence 不依赖当前 manifest 解释模型身份。
 
 `model_source_json` 至少固定每个 artifact 的上游仓库/模型 ID、immutable revision、下载 URL、许可证与 provenance；若存在转换则另存转换工具仓库/commit/参数，未转换的 Qwen3-ASR 1.7B 明确记录 `conversion = none` 与 tokenizer 混合来源。VAD 开启时，Job 与 Receipt 必须同时快照 VAD model ID、manifest version、archive hash 和必需文件 hash；VAD 关闭时这些字段必须全部为空。
@@ -515,7 +519,7 @@ VAD 是三个 Provider 的共同时间轴。SenseVoice 与 Qwen3-ASR 不伪造�
 
 标准工作格式为 16 kHz `f32` 单声道。多声道按每帧算术平均下混，并在写入 Provider 前 clamp 到 `[-1, 1]`。重采样器必须暴露或补偿 delay；时间换算以原始解码 frame 索引为权威，开始时间向下取整、结束时间向上取整，并校验 `0 <= start < end <= duration`。
 
-VAD speech padding 为 200 ms。连续语音区间最大 25 秒；超过时优先在最小能量点切分，否则硬切，所有核心区间单调且不重叠。上下文 padding 不能扩大对外 Evidence 时间范围或产生重复 Segment。Provider 每完成一个最多 25 秒窗口后检查取消；同步 native inference 不宣称支持窗口内抢占。
+LifeSub 在 Task 7 音频分段编排中为检测出的核心语音区间添加 200 ms inference-context padding。连续核心语音区间的编排窗口最大 25 秒；超过时优先在最小能量点切分，否则硬切。`200 ms` padding 和 `25 s` hard split 都不是 Silero model config，不能覆盖 manifest 中的 `max_speech_duration = 20 s`，也不能作为参数传给 sherpa-onnx VAD。所有核心区间单调且不重叠；上下文 padding 不能扩大对外 Evidence 时间范围或产生重复 Segment。Provider 每完成一个最多 25 秒窗口后检查取消；同步 native inference 不宣称支持窗口内抢占。
 
 音频解码优先使用纯 Rust、可打包方案。实现计划必须先用所有声明格式的 fixture 验证解码库覆盖率；不支持的格式从 UI allowlist 移除，不能继续宣称支持后在 ASR 阶段失败。
 

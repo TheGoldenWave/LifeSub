@@ -151,7 +151,8 @@ ui --> user: 展示真实转写和来源
 
 - 线程数为整数，范围 `1..=max(1, logical_cpu_count)`，默认不超过 4。
 - SenseVoice 支持 auto、zh、en、ja、ko、yue；Whisper 与 Qwen3-ASR 语言目录由模型 manifest 声明。
-- VAD 默认开启，阈值使用版本化默认值；高级参数不在首版开放。
+- VAD 默认开启；V0.2 将 sherpa-onnx `1.13.5`（commit `3dc7c569f31ca2cd4a20ed6f7db780327e6714c5`）源码默认值冻结为版本化 manifest：`threshold = 0.5`、`min_silence_duration = 0.5 s`、`min_speech_duration = 0.25 s`、`max_speech_duration = 20 s`、`window_size = 512` samples、`sample_rate = 16000 Hz`、`num_threads = 1`、`provider = "cpu"`。来源为 `sherpa-onnx/csrc/silero-vad-model-config.h` 与 `sherpa-onnx/csrc/vad-model-config.h`；高级参数不在首版开放。
+- LifeSub 的 `200 ms` speech padding 与最长 `25 s` 窗口/硬切策略属于音频分段编排，不属于 Silero VAD model config，也不得写入 VAD manifest 冒充上游默认值。
 - SenseVoice ITN 默认开启；Whisper task 默认 `transcribe`。
 
 ### 5.2 模型管理
@@ -335,6 +336,10 @@ ui --> user: 展示真实转写和来源
 - 自动 Provider fallback、Provider 竞速或自动质量选择。
 - Windows/Linux 发布包。
 
+**后续独立里程碑**:
+
+- 设备资格检测、低频缓存试跑、用户可控的 `仅本地 | 自动选择 | 仅云端 | 指定 Provider` 策略和云端 ASR 回退，见 `../../superpowers/specs/2026-08-16-lifesub-asr-device-qualification-cloud-fallback-design.md`。该里程碑不得改变本 V0.2 的 local-only 验收边界。
+
 ## 8. 非功能约束
 
 - **性能**: M1/16GB 基线仅适用于 SenseVoice、Whisper、Qwen3-ASR 0.6B 与通用 UI 响应，不适用于 Qwen3-ASR 1.7B；1.7B 的正式基线是当前 M4/24GB，并必须满足 300 秒 RTF `<= 1.0` 与峰值 RSS `<= 6 GiB`。所有推理均不在 UI 主线程同步执行。
@@ -378,6 +383,8 @@ ui --> user: 展示真实转写和来源
 
 - 产品简报：`../../context/product-initiated/lifesub-real-asr-v0.2/10_brief/product-brief.md`
 - 技术设计：`../../superpowers/specs/2026-08-15-lifesub-real-asr-design.md`
+- 后续设备检测与云端回退设计：`../../superpowers/specs/2026-08-16-lifesub-asr-device-qualification-cloud-fallback-design.md`
+- 后续实施计划：`../../superpowers/plans/2026-08-16-lifesub-asr-device-qualification-cloud-fallback.md`
 - 上位架构：`../../superpowers/specs/2026-08-15-lifesub-evidence-platform-design.md`
 - 进度追踪：`.artifacts/process.md`
 - 决策与风险：`.artifacts/notes.md`

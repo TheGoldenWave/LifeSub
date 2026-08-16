@@ -366,7 +366,7 @@ git commit -m "feat: harden immutable audio imports"
 
 - [ ] **Step 1: Write failing manifest contract tests**
 
-Require unique immutable IDs, supported languages, SPDX/license provenance, runtime identity, `qualification_policy` and an explicit installable artifact bundle. Every `ArtifactFile` requires `artifact_id`, source repository/model, provider API endpoint or immutable normalized HTTPS URL, immutable revision, exact byte size, 64-character SHA-256, normalized non-overlapping required path, required flag, direct/extract mode, SPDX, provenance and exact redirect allowlist. Assert RFC 8785 JCS canonical payload v1 and SHA-256 identity excluding the identity field itself, with artifacts sorted by bytewise UTF-8 ID. Compare serialization byte-for-byte with `tests/fixtures/models/qwen17-bundle-v1.json` and assert its golden SHA. Assert every shipping model/VAD has an explicit policy: sherpa-backed entries use `structural_with_pinned_runtime`, only Qwen 1.7B uses `runtime_smoke_required`; no null/TODO/zero-hash placeholder or unhandled policy enters the registry.
+Require unique immutable IDs, supported languages, SPDX/license provenance, runtime identity, `qualification_policy` and an explicit installable artifact bundle. Every `ArtifactFile` requires `artifact_id`, source repository/model, provider API endpoint or immutable normalized HTTPS URL, immutable revision, exact byte size, 64-character SHA-256, normalized non-overlapping required path, required flag, direct/extract mode, SPDX, provenance and exact redirect allowlist. Assert RFC 8785 JCS canonical payload v1 and SHA-256 identity excluding the identity field itself, with artifacts sorted by bytewise UTF-8 ID. Compare serialization byte-for-byte with `tests/fixtures/models/qwen17-bundle-v1.json` and assert its golden SHA. Assert every shipping model/VAD has an explicit policy: sherpa-backed entries use `structural_with_pinned_runtime`, only Qwen 1.7B uses `runtime_smoke_required`; no null/TODO/zero-hash placeholder or unhandled policy enters the registry. For VAD, assert every `VadManifest` field below, the exact sherpa-onnx version/commit/source-header provenance, and the eight canonical source defaults. Add a separate mutation test for `threshold`, `min_silence_duration_seconds`, `min_speech_duration_seconds`, `max_speech_duration_seconds`, `window_size_samples`, `sample_rate_hz`, `num_threads`, and `provider`; separately mutate the sherpa version, commit, and each source-header path. Also reject NaN/infinity, invalid ranges, empty provenance, a malformed artifact hash, and a required-files list that is not exactly the pinned `silero_vad.onnx` identity.
 
 The RED tests must also prove the exact 1.7B runtime contract: crate version 0.2.2, Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`, discovered Candle Metal feature wiring, original config requiring top-level `thinker_config`, and rejection of a config containing only top-level `audio_config/text_config`. They must prove the four-row ModelLookup matrix: unsupported device `true/false/false`, compatible uninstalled `true/true/false`, `installed_unqualified` `true/true/false`, and `runtime_qualified` `true/true/true`, each with stable reason codes.
 
@@ -415,6 +415,8 @@ size 643,854; sha256 9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cb
 
 Expected ASR archive contents are the model directory, token file, ONNX model file(s), and upstream test WAVs named by the sherpa release; inspect and record exact required relative paths before writing the registry. The VAD asset is the single file `silero_vad.onnx`. The manifest test re-download helper must verify URL, size, SHA-256, and required paths against the registry.
 
+Freeze the VAD config from sherpa-onnx `1.13.5`, commit `3dc7c569f31ca2cd4a20ed6f7db780327e6714c5`. Canonical provenance is `sherpa-onnx/csrc/silero-vad-model-config.h` for `threshold = 0.5`, `min_silence_duration = 0.5`, `min_speech_duration = 0.25`, `max_speech_duration = 20`, and `window_size = 512`; and `sherpa-onnx/csrc/vad-model-config.h` for `sample_rate = 16000`, `num_threads = 1`, and `provider = "cpu"`.
+
 Required executable model files are:
 
 ```text
@@ -443,9 +445,30 @@ pub struct ModelManifest {
     pub qualification_policy: QualificationPolicy,
     pub source: ModelSource,
 }
+
+pub struct VadManifest {
+    pub id: &'static str,
+    pub manifest_version: &'static str,
+    pub download_url: &'static str,
+    pub archive_size_bytes: u64,
+    pub archive_sha256: &'static str,
+    pub required_files: &'static [RequiredFile],
+    pub sherpa_onnx_version: &'static str,
+    pub sherpa_onnx_commit: &'static str,
+    pub silero_config_source_header: &'static str,
+    pub vad_config_source_header: &'static str,
+    pub threshold: f32,
+    pub min_silence_duration_seconds: f32,
+    pub min_speech_duration_seconds: f32,
+    pub max_speech_duration_seconds: f32,
+    pub window_size_samples: i32,
+    pub sample_rate_hz: i32,
+    pub num_threads: i32,
+    pub provider: &'static str,
+}
 ```
 
-Implement `ModelLookup` for the registry. For the existing persistence field named `archive_sha256`, store a single archive hash for legacy bundles and the canonical manifest SHA-256 for multi-file bundles. Use a new model ID or manifest version if any artifact, source revision, runtime identity or compatibility rule changes.
+Implement `ModelLookup` for the registry. For the existing persistence field named `archive_sha256`, store a single archive hash for legacy bundles and the canonical manifest SHA-256 for multi-file bundles. `VadManifest::validate()` must require the exact asset URL, `643854` byte size, 64-character pinned SHA-256, and exactly one required file named `silero_vad.onnx`; require non-empty exact version/commit/header provenance; reject non-finite numeric values; require threshold in `(0, 1]`, positive durations, `max_speech_duration_seconds >= min_speech_duration_seconds`, and positive window/sample/thread values; then compare every frozen scalar with named canonical constants, using `f32::to_bits()` for exact float equality. Use a new model ID or manifest version if any artifact, source revision, runtime identity, compatibility rule, provenance, or frozen VAD parameter changes. `200 ms` LifeSub padding and `25 s` orchestration hard split are deliberately absent from `VadManifest`.
 
 - [ ] **Step 5: Pin the runtime and add notices**
 
@@ -543,6 +566,7 @@ git commit -m "feat: add recoverable ASR model installs"
 - Create: `src-tauri/src/asr/audio.rs`
 - Create: `src-tauri/src/asr/vad.rs`
 - Create: `src-tauri/src/asr_audio_test.rs`
+- Create: `src-tauri/src/asr_vad_test.rs`
 - Create/Modify: `tests/fixtures/asr/*`
 - Modify: `src-tauri/src/lib.rs`
 
@@ -558,7 +582,7 @@ assert!(segments.iter().all(|s| 0 <= s.start_ms && s.start_ms < s.end_ms));
 assert!(segments.iter().all(|s| s.end_ms <= decoded.duration_ms));
 ```
 
-Test 16 kHz output, arithmetic-mean downmix, clamp, resampler delay compensation, 200 ms VAD padding, 25-second maximum windows, and hard-split fallback.
+Keep decode/timing cases in `asr_audio_test.rs`. In `asr_vad_test.rs`, test the exact validated manifest-to-sherpa field mapping under `asr-runtime`, plus 200 ms LifeSub padding, 25-second maximum orchestration windows, and hard-split fallback. Assert that padding and hard-split constants are not fields in `VadManifest`, do not replace `max_speech_duration_seconds = 20`, and do not alter the config passed to sherpa-onnx.
 
 - [ ] **Step 3: Implement decoding and timing**
 
@@ -566,7 +590,7 @@ Decode with Symphonia, downmix to `f32`, resample with Rubato, retain original f
 
 - [ ] **Step 4: Implement VAD boundary orchestration**
 
-Wrap the pinned sherpa VAD when `asr-runtime` is enabled. Provide a deterministic fake detector for fast tests. Evidence ranges use non-overlapping core intervals, not padded inference context.
+Wrap the pinned sherpa VAD when `asr-runtime` is enabled. Construct `SileroVadModelConfig` and `VadModelConfig` by explicitly assigning every validated `VadManifest` field: model path, threshold, all three durations, window size, sample rate, thread count, and provider. Do not use `Default::default()`, `..Default::default()`, or zero/empty placeholders because the Rust wrapper's derived defaults are not the canonical C++ source defaults. Provide a deterministic fake detector for fast tests. Apply LifeSub's 200 ms padding and 25-second energy-aware/hard-split policy only after VAD detection as Task 7 orchestration; Evidence ranges use non-overlapping core intervals, not padded inference context.
 
 - [ ] **Step 5: Run tests and update the import allowlist**
 
@@ -574,14 +598,15 @@ Run:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_audio
-cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime asr_audio
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features asr_vad
+cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime asr_vad
 npm test -- --run src/App.test.tsx
 ```
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src-tauri/src/asr/audio.rs src-tauri/src/asr/vad.rs src-tauri/src/asr_audio_test.rs src-tauri/src/lib.rs tests/fixtures/asr src/App.tsx src/App.test.tsx docs/prd/lifesub-real-asr-v0.2/PRD.md
+git add src-tauri/src/asr/audio.rs src-tauri/src/asr/vad.rs src-tauri/src/asr_audio_test.rs src-tauri/src/asr_vad_test.rs src-tauri/src/lib.rs tests/fixtures/asr src/App.tsx src/App.test.tsx docs/prd/lifesub-real-asr-v0.2/PRD.md
 git commit -m "feat: prepare timestamped ASR audio"
 ```
 
@@ -1173,3 +1198,9 @@ After this evidence/docs commit, run `scripts/verify-asr-gate.sh --verify-existi
 - [ ] Real fixture CER/WER, phrase, and timing thresholds pass with saved evidence.
 - [ ] UI responsiveness, cancellation, restart recovery, desktop/mobile layout, and error states pass.
 - [ ] Static sherpa runtime, pinned Candle/Metal runtime, `otool`/symbol and asset-resolution checks, signatures, packaged/DMG smoke for both Qwen sizes, licenses, docs, and no-secret/no-model-weight checks pass.
+
+---
+
+## Post-V0.2 Milestone
+
+After every V0.2 completion audit item passes, execute `docs/superpowers/plans/2026-08-16-lifesub-asr-device-qualification-cloud-fallback.md`. It adds cached static/device trials and user-controlled cloud fallback without weakening this plan's local-only V0.2 Gate.

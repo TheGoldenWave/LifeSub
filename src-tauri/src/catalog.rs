@@ -12,6 +12,7 @@ use crate::domain::{
 
 mod anchored_vfs;
 mod chunks;
+mod job_snapshot;
 pub(crate) mod jobs;
 pub(crate) mod migrations;
 mod models;

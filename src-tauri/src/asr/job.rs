@@ -1,7 +1,8 @@
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::asr::settings::{AsrProviderOptions, AsrSettings};
 use crate::catalog::Catalog;
 use crate::catalog::PublicationError;
 #[cfg(test)]
@@ -11,7 +12,9 @@ use crate::catalog::jobs::{
     CancelResult, EnqueueCommitError, JobCatalog, JobCatalogError, ReadyModel, RetryResult,
 };
 use crate::domain::AsrErrorCode;
-use crate::domain::{ProviderReceipt, TranscriptRevision, TranscriptSegmentPublication};
+use crate::domain::{
+    AsrProviderKind, AudioSource, ProviderReceipt, TranscriptRevision, TranscriptSegmentPublication,
+};
 use crate::service::{JobOwnershipCapability, RuntimeOwnershipError};
 
 const LEASE_SECONDS: i64 = 30;
@@ -35,6 +38,124 @@ pub struct ClaimToken {
     pub job_id: String,
     pub claimed_by: String,
     pub claim_generation: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStage {
+    Preparing,
+    Transcribing,
+}
+
+impl ExecutionStage {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Transcribing => "transcribing",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredFileSnapshot {
+    pub path: String,
+    #[serde(rename = "bytes")]
+    pub byte_length: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ChunkExecutionSnapshot {
+    pub id: String,
+    pub source: AudioSource,
+    pub relative_path: String,
+    pub sha256: String,
+    pub byte_length: u64,
+    pub session_offset_ms: i64,
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ModelExecutionSnapshot {
+    pub provider: AsrProviderKind,
+    pub model_id: String,
+    pub manifest_version: String,
+    pub bundle_identity: String,
+    pub required_file_hashes_json: String,
+    pub required_files: Vec<RequiredFileSnapshot>,
+    pub model_source_json: String,
+    pub source: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct VadExecutionSnapshot {
+    pub model_id: String,
+    pub manifest_version: String,
+    pub bundle_identity: String,
+    pub required_file_hashes_json: String,
+    pub required_files: Vec<RequiredFileSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ExecutionParametersSnapshot {
+    pub json: String,
+    pub settings: AsrSettings,
+    pub language: crate::domain::AsrLanguage,
+    pub num_threads: u16,
+    pub options: AsrProviderOptions,
+}
+
+impl ExecutionParametersSnapshot {
+    pub(crate) fn from_settings(json: String, settings: AsrSettings) -> Self {
+        Self {
+            json,
+            language: settings.language.clone(),
+            num_threads: settings.num_threads,
+            options: settings.options.clone(),
+            settings,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ExecutionSnapshot {
+    pub job_id: String,
+    pub session_id: String,
+    pub chunk: ChunkExecutionSnapshot,
+    pub model: ModelExecutionSnapshot,
+    pub parameters: ExecutionParametersSnapshot,
+    pub vad: Option<VadExecutionSnapshot>,
+}
+
+#[derive(Debug)]
+pub enum SnapshotError {
+    Ownership(RuntimeOwnershipError),
+    Catalog(rusqlite::Error),
+    OwnershipLost,
+    StageMismatch,
+    CancelRequested,
+    LeaseExpired,
+    InputUnavailable,
+    InvalidSnapshot(&'static str),
+}
+
+impl PartialEq for SnapshotError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::OwnershipLost, Self::OwnershipLost)
+            | (Self::StageMismatch, Self::StageMismatch)
+            | (Self::CancelRequested, Self::CancelRequested)
+            | (Self::LeaseExpired, Self::LeaseExpired)
+            | (Self::InputUnavailable, Self::InputUnavailable) => true,
+            (Self::Catalog(left), Self::Catalog(right)) => left.to_string() == right.to_string(),
+            (Self::InvalidSnapshot(left), Self::InvalidSnapshot(right)) => left == right,
+            (Self::Ownership(left), Self::Ownership(right)) => {
+                ownership_error_name(left) == ownership_error_name(right)
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -243,6 +364,15 @@ impl<'a, C: Clock> JobRepository<'a, C> {
             .map_err(map_catalog_error)
     }
 
+    pub(crate) fn load_execution_snapshot(
+        &self,
+        token: &ClaimToken,
+        stage: ExecutionStage,
+    ) -> Result<ExecutionSnapshot, SnapshotError> {
+        self.jobs
+            .load_execution_snapshot(token, stage, &canonical_time(self.clock.now()))
+    }
+
     pub(crate) fn renew(&self, token: &ClaimToken) -> Result<(), JobError> {
         let now = self.clock.now();
         let result = self
@@ -385,6 +515,14 @@ impl<'a, C: Clock> JobRepository<'a, C> {
 }
 
 impl<C: Clock> JobCoordinator<'_, C> {
+    pub fn load_execution_snapshot(
+        &self,
+        token: &ClaimToken,
+        stage: ExecutionStage,
+    ) -> Result<ExecutionSnapshot, SnapshotError> {
+        self.repository.load_execution_snapshot(token, stage)
+    }
+
     pub fn publish(
         &self,
         token: &ClaimToken,
@@ -567,6 +705,15 @@ fn ready_model(readiness: &ModelReadiness) -> ReadyModel<'_> {
 
 fn canonical_time(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn ownership_error_name(error: &RuntimeOwnershipError) -> &'static str {
+    match error {
+        RuntimeOwnershipError::AlreadyOwned => "already_owned",
+        RuntimeOwnershipError::CatalogMismatch => "catalog_mismatch",
+        RuntimeOwnershipError::UnsafePath => "unsafe_path",
+        RuntimeOwnershipError::Io(_) => "io",
+    }
 }
 
 fn owned(changed: usize) -> Result<(), JobError> {

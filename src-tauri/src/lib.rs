@@ -12,6 +12,8 @@ use tauri::Manager;
 #[cfg(test)]
 mod asr_audio_test;
 #[cfg(test)]
+mod asr_job_snapshot_test;
+#[cfg(test)]
 mod asr_job_test;
 #[cfg(test)]
 mod asr_manifest_test;

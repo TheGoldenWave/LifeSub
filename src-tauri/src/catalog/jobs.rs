@@ -2,7 +2,10 @@ use chrono::DateTime;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
 
-use crate::asr::job::{ClaimToken, EnqueueJob, EnqueueOutcome, InputValidation};
+use crate::asr::job::{
+    ClaimToken, EnqueueJob, EnqueueOutcome, ExecutionSnapshot, ExecutionStage, InputValidation,
+    SnapshotError,
+};
 use crate::catalog::PublicationError;
 #[cfg(test)]
 use crate::catalog::PublicationFailurePoint;
@@ -75,6 +78,19 @@ impl<'a> JobCatalog<'a> {
         self.catalog
             .validate_asr_input(session_id, chunk_id, input_sha256)
             .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn load_execution_snapshot(
+        &self,
+        token: &ClaimToken,
+        stage: ExecutionStage,
+        now: &str,
+    ) -> Result<ExecutionSnapshot, SnapshotError> {
+        self.ensure().map_err(|error| match error {
+            JobCatalogError::Ownership(error) => SnapshotError::Ownership(error),
+            JobCatalogError::Catalog(error) => SnapshotError::Catalog(error),
+        })?;
+        self.catalog.load_execution_snapshot(token, stage, now)
     }
 
     pub(crate) fn renew(

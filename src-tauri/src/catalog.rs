@@ -11,6 +11,7 @@ use crate::domain::{
 };
 
 mod chunks;
+pub(crate) mod jobs;
 pub(crate) mod migrations;
 mod models;
 

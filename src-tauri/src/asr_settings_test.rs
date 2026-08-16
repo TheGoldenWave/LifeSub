@@ -296,6 +296,10 @@ fn all_asr_error_codes_have_stable_serde_strings() {
         (AsrErrorCode::TranscriptionFailed, "transcription_failed"),
         (AsrErrorCode::Cancelled, "cancelled"),
         (AsrErrorCode::RecoveryRequired, "recovery_required"),
+        (
+            AsrErrorCode::RecoveryRetryExhausted,
+            "recovery_retry_exhausted",
+        ),
         (AsrErrorCode::ReceiptInvalid, "receipt_invalid"),
     ];
 

@@ -77,6 +77,7 @@ pub enum AsrErrorCode {
     TranscriptionFailed,
     Cancelled,
     RecoveryRequired,
+    RecoveryRetryExhausted,
     ReceiptInvalid,
 }
 

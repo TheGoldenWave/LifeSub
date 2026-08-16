@@ -182,6 +182,44 @@ fn catalog_fixtures_have_frozen_bytes() {
 }
 
 #[test]
+fn task9_reuses_v2_job_schema_without_migration_or_version_drift() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(V2_FIXTURE, &path).unwrap();
+    let mut connection = Connection::open(&path).unwrap();
+    let job_sql_before = schema_sql(&connection, "asr_jobs");
+    let job_columns_before: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('asr_jobs') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+
+    assert_eq!(user_version(&connection), 2);
+    for required in [
+        "attempt_count",
+        "claim_generation",
+        "max_attempts",
+        "available_at",
+        "claimed_by",
+        "lease_expires_at",
+        "cancel_requested_at",
+    ] {
+        assert!(job_columns_before.iter().any(|column| column == required));
+    }
+
+    migrations::migrate(&mut connection).unwrap();
+
+    assert_eq!(user_version(&connection), 3);
+    assert_eq!(schema_sql(&connection, "asr_jobs"), job_sql_before);
+    assert_eq!(
+        migrations::classify(&mut connection).unwrap(),
+        SchemaKind::CurrentV3
+    );
+}
+
+#[test]
 fn v2_to_v3_failure_rolls_back_original_bytes_and_version() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("catalog.sqlite3");

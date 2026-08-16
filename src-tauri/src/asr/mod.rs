@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod job;
 pub mod manifest;
 pub mod model_lookup;
 pub mod model_manager;

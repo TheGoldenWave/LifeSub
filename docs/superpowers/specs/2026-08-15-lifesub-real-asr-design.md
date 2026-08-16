@@ -519,7 +519,15 @@ VAD 是三个 Provider 的共同时间轴。SenseVoice 与 Qwen3-ASR 不伪造�
 
 标准工作格式为 16 kHz `f32` 单声道。多声道按每帧算术平均下混，并在写入 Provider 前 clamp 到 `[-1, 1]`。重采样器必须暴露或补偿 delay；时间换算以原始解码 frame 索引为权威，开始时间向下取整、结束时间向上取整，并校验 `0 <= start < end <= duration`。
 
-LifeSub 在 Task 7 音频分段编排中为检测出的核心语音区间添加 200 ms inference-context padding。连续核心语音区间的编排窗口最大 25 秒；超过时优先在最小能量点切分，否则硬切。`200 ms` padding 和 `25 s` hard split 都不是 Silero model config，不能覆盖 manifest 中的 `max_speech_duration = 20 s`，也不能作为参数传给 sherpa-onnx VAD。所有核心区间单调且不重叠；上下文 padding 不能扩大对外 Evidence 时间范围或产生重复 Segment。Provider 每完成一个最多 25 秒窗口后检查取消；同步 native inference 不宣称支持窗口内抢占。
+LifeSub 在 Task 7 音频分段编排中为检测出的核心语音区间添加 200 ms inference-context padding。`200 ms` padding 和 `25 s` hard split 都不是 Silero model config，不能覆盖 manifest 中的 `max_speech_duration = 20 s`，也不能作为参数传给 sherpa-onnx VAD。Provider 每完成一个最多 25 秒窗口后检查取消；同步 native inference 不宣称支持窗口内抢占。
+
+切分只在标准 16 kHz `f32` 单声道工作样本上执行，并固定以下整数常量：`SAMPLE_RATE = 16_000`、`PADDING = 3_200`、`MAX_PROVIDER_WINDOW = 400_000`、`ENERGY_FRAME = 320`、`ENERGY_HALF_FRAME = 160`、`SPLIT_SEARCH_RADIUS = 32_000` samples。所有范围都是 `u64` 半开区间 `[start, end)`；验证 `0 <= start < end <= total_samples` 后才允许转换为平台索引。加减、毫秒换算和索引转换使用 checked arithmetic；任何 overflow、越界或不能表示为 `usize` 都返回稳定音频准备错误，禁止 wrap、截断或用饱和运算掩盖无效输入。
+
+编排前必须整体验证 detector core 集合：集合至少包含一个 core；每个 core 满足 `0 <= start < end <= total_samples`；输入顺序按 `start` 严格递增；相邻项满足 `previous.end <= next.start`。乱序、空 core、越界或 overlap 返回稳定音频准备错误。`previous.end < next.start` 的 gap 合法；`previous.end == next.start` 的相邻 detector cores 也不合并，两者分别形成独立 Evidence utterance。验证通过后，对每个 VAD core 独立执行以下循环。令本轮 `cursor` 初始为 `core.start`，`inference_start = max(0, cursor - PADDING)`，`padded_core_end = min(total_samples, core.end + PADDING)`。若 `padded_core_end - inference_start <= MAX_PROVIDER_WINDOW`，发出尾段 core `[cursor, core.end)` 和 inference `[inference_start, padded_core_end)` 后结束该 core。否则最晚安全边界精确定义为 `latest_safe = inference_start + MAX_PROVIDER_WINDOW - PADDING`；这些运算必须 checked，并断言 `cursor < latest_safe < core.end`。
+
+非尾段以 `latest_safe` 作为目标 boundary。概念搜索区间为目标前后各 `SPLIT_SEARCH_RADIUS`，随后与 `(cursor, latest_safe]`、当前 core，以及完整 320-sample energy frame 可读取的范围求交；安全裁剪会自然去掉目标右侧所有超限候选。候选 boundary 必须位于绝对工作样本网格 `candidate % ENERGY_FRAME == 0`，能量 frame 为 `[candidate - ENERGY_HALF_FRAME, candidate + ENERGY_HALF_FRAME)`。按样本顺序用 `f64` 累加 320 个 `f32` 样本平方并除以 320 得到 mean-square energy；纯 boundary selector 从已过滤候选中选择数值最低者，bitwise-equal 值取 sample index 最小者，空候选输入则返回 `latest_safe` 作为硬切 fallback。选定 `boundary` 后发出 core `[cursor, boundary)` 与 inference `[inference_start, boundary + PADDING)`，验证 inference 长度 `<= 400_000`，再令 `cursor = boundary`；`boundary > cursor` 的前置断言保证每轮严格进度。重复直到尾段发出。
+
+同一长 core 的输出 core ranges 因 cursor 传递而严格相邻、无空段、无间隙、无重叠，并精确覆盖原 core；左右 padding 允许 Provider 输入互相重叠，但不得改变对外 Evidence core range 或生成重复 Segment。VAD 关闭时只构造一个 Evidence core `[0, total_samples)`；同一循环可产生多个内部 Provider windows，但 revision 对外仍发布覆盖完整音频的单一 utterance，不把内部 window 当作新的 Evidence 边界。
 
 音频解码优先使用纯 Rust、可打包方案。实现计划必须先用所有声明格式的 fixture 验证解码库覆盖率；不支持的格式从 UI allowlist 移除，不能继续宣称支持后在 ASR 阶段失败。
 
@@ -647,7 +655,7 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 
 - 本地 HTTP fixture 模拟下载中断、错误 hash 和重试。
 - 各声明音频格式的解码和重采样。
-- 长连续语音的 25 秒切窗、时间单调性和边界校验。
+- detector core 集合验证与长连续语音/VAD-off 长音频的确定性切窗：乱序、空 core、越界和 overlap 拒绝；gap 允许；相邻 detector cores 不合并且各自形成 Evidence utterance；精确常量、padded Provider window `<= 400,000` samples、20 ms 绝对候选网格、320-sample mean-square、最低能量、同值取最早、boundary selector 空候选硬切、长 core 子区间精确覆盖、尾段边界裁剪、checked overflow 和循环严格进度。
 - 使用真实 SenseVoice 模型转写固定中文 WAV。
 - 使用真实 Whisper 模型转写固定英文或中英混合 WAV。
 - 同一 Audio Chunk 使用两个 Provider 生成两个 revision。

@@ -156,7 +156,10 @@ ui --> user: 展示真实转写和来源
 - Qwen3-ASR 0.6B 的 sherpa `OfflineQwen3ASRModelConfig` 没有 language 字段，因此 V0.2 只允许 `auto`；显式语言必须在 Settings/Core 边界返回 `invalid_provider_parameter`，也不得写入 `hotwords`。
 - Qwen3-ASR 1.7B 的 Candle adapter 可把 `auto` 映射为 `TranscribeOptions.language = None`，并把 manifest 支持的具体语言映射为 crate 接受的规范英文语言名；未知代码或模型不支持的语言返回 `invalid_provider_parameter`。
 - VAD 默认开启；V0.2 将 sherpa-onnx `1.13.5`（commit `3dc7c569f31ca2cd4a20ed6f7db780327e6714c5`）源码默认值冻结为版本化 manifest：`threshold = 0.5`、`min_silence_duration = 0.5 s`、`min_speech_duration = 0.25 s`、`max_speech_duration = 20 s`、`window_size = 512` samples、`sample_rate = 16000 Hz`、`num_threads = 1`、`provider = "cpu"`。来源为 `sherpa-onnx/csrc/silero-vad-model-config.h` 与 `sherpa-onnx/csrc/vad-model-config.h`；高级参数不在首版开放。
-- LifeSub 的 `200 ms` speech padding 与最长 `25 s` 窗口/硬切策略属于音频分段编排，不属于 Silero VAD model config，也不得写入 VAD manifest 冒充上游默认值。
+- LifeSub 的 `200 ms` speech padding 与最长 `25 s` 窗口/硬切策略属于音频分段编排，不属于 Silero VAD model config，也不得写入 VAD manifest 冒充上游默认值。该上限按送入 Provider 的已 padding 窗口计算：在 16 kHz 单声道工作样本上分别固定为 `3,200` 与 `400,000` samples，任何窗口加上实际左右 padding 后都不得超过 `400,000` samples。
+- 进入编排器的 detector core 集合必须至少包含一个非空 core，按 `start` 排序，全部位于音频范围内且互不重叠；乱序、空 core、越界或 overlap 必须拒绝。core 之间允许有 gap；恰好相邻的 detector cores 不合并，分别保留为独立 Evidence utterance。
+- 长核心语音区间按半开样本范围 `[start, end)` 确定性切分。每轮先判断剩余 core 加实际边界 padding 是否已能完整放入一个 Provider 窗口；能放入即作为尾段，否则以当前窗口允许的最晚安全 core boundary 为目标，在其前后 `2 s` 搜索区间经安全边界裁剪后，仅检查绝对 20 ms 网格上的候选。候选使用以边界为中心的 20 ms mean-square energy，最低能量胜出，完全相同则取最早边界；没有候选时在最晚安全 boundary 硬切。所有样本算术必须 checked，候选必须严格推进 cursor，禁止空窗口、溢出或死循环。
+- padding 只作为 inference context。VAD core 及长 core 切分后的相邻 core evidence ranges 必须无缝覆盖原 core、单调且不重叠，不能因左右 padding 扩大 Evidence 时间范围。VAD 关闭时 Evidence 仍是覆盖完整音频的单一 utterance；超过 25 秒的音频只在内部使用同一算法形成多个 Provider 窗口，不得据此伪造多个 Evidence utterance。
 - SenseVoice ITN 默认开启；Whisper task 默认 `transcribe`。
 
 ### 5.2 模型管理
@@ -382,6 +385,7 @@ ui --> user: 展示真实转写和来源
 - [ ] `model_downloads` 与版本化安装目录在下载中断、rename 后崩溃和数据库/文件系统不一致时可确定性 reconciliation。
 - [ ] 固定普通话 fixture 的 SenseVoice CER <= 20%；固定英语 fixture 的 Whisper WER <= 20%；中英混合关键短语召回率为 100%。
 - [ ] Segment 时间中位误差 <= 500 ms、最大误差 <= 1.5 s；所有时间范围单调、不重叠且位于音频时长内。
+- [ ] 长连续语音与 VAD-off 长音频的每个 Provider 输入窗口（含实际左右 `3,200` samples padding）均 `<= 400,000` samples；detector core 集合验证、gap、相邻 core 独立 Evidence、精确覆盖、最低能量选择、相同能量取最早、无候选硬切、尾段、checked overflow 和循环进度均由固定样本测试证明。
 - [ ] CER/WER、关键短语与时间误差按技术设计固定的 NFKC、tokenization 和 Segment 配对协议计算。
 - [ ] ASR 运行中 UI heartbeat P95 漂移 <= 250 ms；取消请求 500 ms 内可见。同步 native call 只能在调用前后与 Task 7 的最多 25 秒窗口之间检查 token，因此最坏取消完成延迟为当前单个 25 秒窗口加边界开销，不宣称窗口内抢占，也不得使用 30 秒作为另一个合同。
 - [ ] 前端单测、Rust 单测、真实模型集成测试、Playwright 验收、生产构建和 Tauri desktop 编译全部通过。

@@ -596,7 +596,19 @@ assert!(segments.iter().all(|s| 0 <= s.start_ms && s.start_ms < s.end_ms));
 assert!(segments.iter().all(|s| s.end_ms <= decoded.duration_ms));
 ```
 
-Keep decode/timing cases in `asr_audio_test.rs`. In `asr_vad_test.rs`, test the exact validated manifest-to-sherpa field mapping under `asr-runtime`, plus 200 ms LifeSub padding, 25-second maximum orchestration windows, and hard-split fallback. Assert that padding and hard-split constants are not fields in `VadManifest`, do not replace `max_speech_duration_seconds = 20`, and do not alter the config passed to sherpa-onnx.
+Keep decode/timing cases in `asr_audio_test.rs`. In `asr_vad_test.rs`, freeze the 16 kHz orchestration constants exactly: `PADDING = 3_200`, `MAX_PROVIDER_WINDOW = 400_000`, `ENERGY_FRAME = 320`, `ENERGY_HALF_FRAME = 160`, and `SPLIT_SEARCH_RADIUS = 32_000` samples. Use half-open `u64` ranges and add exact fixtures for:
+
+- with `total_samples = 500_000`, core `[0, 396_800)` emits inference `[0, 400_000)` without splitting, while `[0, 396_801)` requires more than one Provider window;
+- with `total_samples = 500_000`, nonzero core `[10_000, 403_600)` emits exact-fit inference `[6_800, 406_800)`, proving actual left and right padding total exactly `400_000` samples;
+- for a first-window target `latest_safe = 396_800`, a unique low-energy frame centered at `380_800` selects boundary `380_800`; equal-energy frames centered at `380_800` and `381_120` select `380_800`;
+- direct pure-unit calls to the boundary selector with an injected empty candidate list, and with all candidates removed by its filtering input, both returning the supplied `latest_safe`; this fallback need not be forced through an end-to-end detector fixture if valid production ranges always yield a grid candidate;
+- a multi-window long core proving emitted core ranges are nonempty, adjacent, monotonic, non-overlapping, make strict cursor progress, and exactly cover the input core while padded inference ranges may overlap;
+- a final tail whose right padding clamps at `total_samples` without creating an empty trailing window;
+- detector core validation rejecting an empty collection, empty range, out-of-bounds range, decreasing `start`, and overlap; accepting gaps; and keeping exactly adjacent detector cores distinct as separate Evidence utterances;
+- VAD-off long audio remaining one full-range Evidence utterance despite multiple internal Provider windows;
+- checked-add/subtract, duration conversion, invalid range and `usize` conversion failures returning errors without wrap or loop.
+
+Also test the exact validated manifest-to-sherpa field mapping under `asr-runtime`. Assert that padding and hard-split constants are not fields in `VadManifest`, do not replace `max_speech_duration_seconds = 20`, and do not alter the config passed to sherpa-onnx.
 
 - [ ] **Step 3: Implement decoding and timing**
 
@@ -604,7 +616,9 @@ Decode with Symphonia, downmix to `f32`, resample with Rubato, retain original f
 
 - [ ] **Step 4: Implement VAD boundary orchestration**
 
-Wrap the pinned sherpa VAD when `asr-runtime` is enabled. Construct `SileroVadModelConfig` and `VadModelConfig` by explicitly assigning every validated `VadManifest` field: model path, threshold, all three durations, window size, sample rate, thread count, and provider. Do not use `Default::default()`, `..Default::default()`, or zero/empty placeholders because the Rust wrapper's derived defaults are not the canonical C++ source defaults. Provide a deterministic fake detector for fast tests. Apply LifeSub's 200 ms padding and 25-second energy-aware/hard-split policy only after VAD detection as Task 7 orchestration; Evidence ranges use non-overlapping core intervals, not padded inference context.
+Wrap the pinned sherpa VAD when `asr-runtime` is enabled. Construct `SileroVadModelConfig` and `VadModelConfig` by explicitly assigning every validated `VadManifest` field: model path, threshold, all three durations, window size, sample rate, thread count, and provider. Do not use `Default::default()`, `..Default::default()`, or zero/empty placeholders because the Rust wrapper's derived defaults are not the canonical C++ source defaults. Provide a deterministic fake detector for fast tests.
+
+Apply LifeSub orchestration only after VAD detection. Validate the detector core collection before partitioning: it is nonempty, every core satisfies `0 <= start < end <= total_samples`, starts are strictly increasing, and `previous.end <= next.start`; reject every violation. Gaps are valid. Exactly adjacent detector cores remain distinct and each owns its own Evidence utterance. For each validated detector core, loop from `cursor = core.start`. First test whether `[max(0, cursor - 3_200), min(total_samples, core.end + 3_200))` fits in `400_000` samples; if so, emit it as the tail. Otherwise compute the checked `latest_safe = max(0, cursor - 3_200) + 400_000 - 3_200`. Search the target boundary's nominal `±32_000` sample interval after clamping candidates to `(cursor, latest_safe]`, the current core, and a complete centered 320-sample energy frame. Candidates are absolute multiples of 320; compute mean-square with ordered `f64` accumulation. Keep boundary selection as a pure helper over the filtered candidates: choose the lowest value, choose the earliest index on an exact tie, and return the supplied `latest_safe` for an empty input. Emit non-overlapping core `[cursor, boundary)` with padded inference context, assert the padded length is at most `400_000`, assign `cursor = boundary`, and repeat. Split pieces inside one long core are adjacent. Evidence ranges always use core intervals, never padding. With VAD disabled, expose one `[0, total_samples)` Evidence utterance while using the same loop only for internal Provider windows.
 
 - [ ] **Step 5: Run tests and update the import allowlist**
 

@@ -380,7 +380,11 @@ The completed Task 4 baseline spans the files listed above. Do not create anothe
 
 - [ ] **Step 1: Write failing manifest contract tests**
 
-Require unique immutable IDs, supported languages, SPDX/license provenance, runtime identity, `qualification_policy` and an explicit installable artifact bundle. Every `ArtifactFile` requires `artifact_id`, source repository/model, provider API endpoint or immutable normalized HTTPS URL, immutable revision, exact byte size, 64-character SHA-256, normalized non-overlapping required path, required flag, direct/extract mode, SPDX, provenance and exact redirect allowlist. Assert RFC 8785 JCS canonical payload schema v1 and SHA-256 identity excluding the identity field itself, with artifacts sorted by bytewise UTF-8 ID. Qwen 1.7B manifest version must be `2`; compare serialization byte-for-byte with `tests/fixtures/models/qwen17-bundle-v2.json` and assert SHA `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a`. Assert config/index allow only `[www.modelscope.cn]`, each large shard allows `[cdn-lfs-cn-1.modelscope.cn,www.modelscope.cn]`, every redirect hop checks the current artifact-specific list, and a bundle-wide union is rejected. Assert HF canonical endpoint has no query, `26fea…` post-discovery version 1 and `8279…` pre-discovery drafts are both rejected. Assert every shipping model/VAD has an explicit policy: sherpa-backed entries use `structural_with_pinned_runtime`, only Qwen 1.7B uses `runtime_smoke_required`; no null/TODO/zero-hash placeholder or unhandled policy enters the registry. For VAD, assert every `VadManifest` field below, the exact sherpa-onnx version/commit/source-header provenance, and the eight canonical source defaults. Add a separate mutation test for `threshold`, `min_silence_duration_seconds`, `min_speech_duration_seconds`, `max_speech_duration_seconds`, `window_size_samples`, `sample_rate_hz`, `num_threads`, and `provider`; separately mutate the sherpa version, commit, and each source-header path. Also reject NaN/infinity, invalid ranges, empty provenance, a malformed artifact hash, and a required-files list that is not exactly the pinned `silero_vad.onnx` identity.
+Require unique immutable IDs, supported languages, SPDX/license provenance, runtime identity, `qualification_policy` and an explicit installable artifact bundle. Every `ArtifactFile` requires `artifact_id`, source repository/model, provider API endpoint or immutable normalized HTTPS URL, immutable revision, exact byte size, 64-character SHA-256, normalized non-overlapping required path, required flag, direct/extract mode, SPDX, provenance and exact redirect allowlist. Each archive also requires `ArchiveInstallConstraints { max_scanned_entries, max_written_file_bytes, max_total_written_bytes, required_files }`; each `RequiredInstallFile` fixes normalized path, exact bytes and SHA-256. Direct Qwen 1.7B/VAD bundles require the equivalent exact installed-file inventory without an archive entry bound.
+
+Assert RFC 8785 JCS canonical payload schema v1 and SHA-256 identity excluding the identity field itself, with artifacts sorted by bytewise UTF-8 ID. Archive constraints, archive required inventories and direct max/count summaries are derived from already frozen artifact content and are explicitly excluded from the JCS payload; existing canonical `ArtifactFile` rows remain identity-bearing. Qwen 1.7B manifest version must remain `2`; compare serialization byte-for-byte with `tests/fixtures/models/qwen17-bundle-v2.json` and assert SHA `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a` before and after constraints are attached. Add exact drift tests that mutate every required path/bytes/hash and each entries/max/total bound and require registry validation failure; adding the derived constraints must not trigger a version bump. Future tests require a new manifest version/identity only when content identity fields change.
+
+Assert config/index allow only `[www.modelscope.cn]`, each large shard allows `[cdn-lfs-cn-1.modelscope.cn,www.modelscope.cn]`, every redirect hop checks the current artifact-specific list, and a bundle-wide union is rejected. Assert HF canonical endpoint has no query, `26fea…` post-discovery version 1 and `8279…` pre-discovery drafts are both rejected. Assert every shipping model/VAD has an explicit policy: sherpa-backed entries use `structural_with_pinned_runtime`, only Qwen 1.7B uses `runtime_smoke_required`; no null/TODO/zero-hash placeholder or unhandled policy enters the registry. For VAD, assert every `VadManifest` field below, the exact sherpa-onnx version/commit/source-header provenance, and the eight canonical source defaults. Add a separate mutation test for `threshold`, `min_silence_duration_seconds`, `min_speech_duration_seconds`, `max_speech_duration_seconds`, `window_size_samples`, `sample_rate_hz`, `num_threads`, and `provider`; separately mutate the sherpa version, commit, and each source-header path. Also reject NaN/infinity, invalid ranges, empty provenance, a malformed artifact hash, and a required-files list that is not exactly the pinned `silero_vad.onnx` identity.
 
 The RED tests must also prove the exact 1.7B runtime contract: crate version 0.2.2, Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`, discovered Candle Metal feature wiring, original config requiring top-level `thinker_config`, and rejection of a config containing only top-level `audio_config/text_config`. They must prove the four-row ModelLookup matrix: unsupported device `true/false/false`, compatible uninstalled `true/true/false`, `installed_unqualified` `true/true/false`, and `runtime_qualified` `true/true/true`, each with stable reason codes.
 
@@ -395,15 +399,15 @@ size 163,002,883; sha256 7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d
 
 Whisper Tiny
 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2
-size 116,204,861; compute and freeze sha256
+size 116,204,861; sha256 c46116994e539aa165266d96b325252728429c12535eb9d8b6a2b10f129e66b1
 
 Whisper Base
 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.tar.bz2
-size 207,557,382; compute and freeze sha256
+size 207,557,382; sha256 911b2083efd7c0dca2ac3b358b75222660dc09fb716d64fbfc417ba6c99ff3de
 
 Whisper Small
 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2
-size 639,387,718; compute and freeze sha256
+size 639,387,718; sha256 486a46afbb7ba798507190ffe02fea2dd726049af212e774537efac6afb210a6
 
 Qwen3-ASR 0.6B INT8
 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2
@@ -427,11 +431,23 @@ https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.on
 size 643,854; sha256 9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6
 ```
 
-Expected ASR archive contents are the model directory, token file, ONNX model file(s), and upstream test WAVs named by the sherpa release; inspect and record exact required relative paths before writing the registry. The VAD asset is the single file `silero_vad.onnx`. The manifest test re-download helper must verify URL, size, SHA-256, and required paths against the registry.
+Expected ASR archive contents are the model directory, token file, ONNX model file(s), and upstream test WAVs named by the sherpa release. Freeze the exact required path/bytes/SHA-256 rows from design section 8.1 into the registry; tests must compare the registry byte-for-byte with that table, not merely check path presence. The VAD asset is the single direct file `silero_vad.onnx`. The manifest re-download helper must verify URL, archive size/SHA-256, scan all archive entries, and reproduce the exact required inventory and bounds.
 
 Freeze the VAD config from sherpa-onnx `1.13.5`, commit `3dc7c569f31ca2cd4a20ed6f7db780327e6714c5`. Canonical provenance is `sherpa-onnx/csrc/silero-vad-model-config.h` for `threshold = 0.5`, `min_silence_duration = 0.5`, `min_speech_duration = 0.25`, `max_speech_duration = 20`, and `window_size = 512`; and `sherpa-onnx/csrc/vad-model-config.h` for `sample_rate = 16000`, `num_threads = 1`, and `provider = "cpu"`.
 
-Required executable model files are:
+The exact archive installation limits from verified immutable archives are:
+
+| Bundle | scanned entries | max written file bytes | total written required bytes |
+|---|---:|---:|---:|
+| SenseVoice | 12 | 239233841 | 240500355 |
+| Whisper Tiny | 11 | 114505801 | 153794272 |
+| Whisper Base | 11 | 196548998 | 293277543 |
+| Whisper Small | 11 | 559127829 | 970298212 |
+| Qwen3-ASR 0.6B | 27 | 755914231 | 1000089273 |
+
+Direct artifact constraints are Qwen3-ASR 1.7B: five required files, max `4220320824`, total `4710022180`; Silero VAD: one required file, max/total `643854`. Archive extraction writes only the exact design section 8.1 whitelist. It scans but skips README/LICENSE/export scripts and Whisper optional INT8 encoder/decoder files. Qwen3-ASR 0.6B requires the complete tokenizer set `tokenizer/merges.txt`, `tokenizer/tokenizer_config.json`, and `tokenizer/vocab.json`.
+
+Runtime-essential files within that larger exact installed inventory include:
 
 ```text
 SenseVoice: model.int8.onnx, tokens.txt
@@ -460,6 +476,19 @@ pub struct ModelManifest {
     pub source: ModelSource,
 }
 
+pub struct RequiredInstallFile {
+    pub path: &'static str,
+    pub bytes: u64,
+    pub sha256: &'static str,
+}
+
+pub struct ArchiveInstallConstraints {
+    pub max_scanned_entries: u64,
+    pub max_written_file_bytes: u64,
+    pub max_total_written_bytes: u64,
+    pub required_files: &'static [RequiredInstallFile],
+}
+
 pub struct VadManifest {
     pub id: &'static str,
     pub manifest_version: &'static str,
@@ -482,7 +511,9 @@ pub struct VadManifest {
 }
 ```
 
-Implement `ModelLookup` for the registry. For the existing persistence field named `archive_sha256`, store a single archive hash for legacy bundles and the canonical manifest SHA-256 for multi-file bundles. `VadManifest::validate()` must require the exact asset URL, `643854` byte size, 64-character pinned SHA-256, and exactly one required file named `silero_vad.onnx`; require non-empty exact version/commit/header provenance; reject non-finite numeric values; require threshold in `(0, 1]`, positive durations, `max_speech_duration_seconds >= min_speech_duration_seconds`, and positive window/sample/thread values; then compare every frozen scalar with named canonical constants, using `f32::to_bits()` for exact float equality. Use a new model ID or manifest version if any artifact, source revision, runtime identity, compatibility rule, provenance, or frozen VAD parameter changes. `200 ms` LifeSub padding and `25 s` orchestration hard split are deliberately absent from `VadManifest`.
+Implement `ModelLookup` for the registry. For the existing persistence field named `archive_sha256`, store a single archive hash for legacy bundles and the canonical manifest SHA-256 for multi-file bundles. `VadManifest::validate()` must require the exact asset URL, `643854` byte size, 64-character pinned SHA-256, and exactly one required file named `silero_vad.onnx`; require non-empty exact version/commit/header provenance; reject non-finite numeric values; require threshold in `(0, 1]`, positive durations, `max_speech_duration_seconds >= min_speech_duration_seconds`, and positive window/sample/thread values; then compare every frozen scalar with named canonical constants, using `f32::to_bits()` for exact float equality. `200 ms` LifeSub padding and `25 s` orchestration hard split are deliberately absent from `VadManifest`.
+
+The validator must exact-match every model/VAD against named canonical required inventories and constraints, including order-independent path uniqueness and exact bytes/hash values. Constraints are derived install-safety metadata and remain outside canonical JCS identity: keep all current manifest versions and the approved Qwen 1.7B `8a5c…` identity unchanged. Use a new model ID or manifest version only if artifact/source revision/runtime/compatibility/provenance/frozen VAD content identity changes; changing only a derived bound to match the same frozen content is validator maintenance, not an identity bump.
 
 - [ ] **Step 5: Pin the runtime and add notices**
 
@@ -515,20 +546,27 @@ git commit -m "feat: pin local ASR model manifests"
 - Create: `src-tauri/src/asr/model_manager.rs`
 - Create: `src-tauri/src/asr_model_manager_test.rs`
 - Modify: `src-tauri/src/catalog.rs`
+- Create/Modify: `src-tauri/src/catalog/models.rs`
 - Modify: `src-tauri/src/catalog/migrations.rs`
 - Modify: `src-tauri/src/catalog_migration_test.rs`
+- Modify: `src-tauri/src/service/runtime_lock.rs`
+- Modify: `src-tauri/src/lib.rs`
 - Test: `tests/fixtures/catalog/lifesub-v0.2.sqlite3`
 - Create: `tests/fixtures/catalog/lifesub-v0.3.sqlite3`
 
 - [ ] **Step 1: Write failing HTTP fixture tests**
 
-Cover interrupted single-file and five-file bundle downloads, restart/resume from persisted byte checkpoints, Range accepted/ignored, ETag or Last-Modified changes, incorrect content length, redirect to a disallowed host, one corrupt shard among otherwise valid artifacts, duplicate/escaping required paths, path traversal, symlink/hardlink archive entries, expanded-size limit, cancellation and explicit retry. Assert completed verified shards are reused only when their manifest source identity still matches.
+Cover interrupted single-file and five-file bundle downloads, bounded streaming checkpoint persistence during the actual transfer, restart/resume from persisted byte checkpoints, Range accepted/ignored, ETag or Last-Modified changes, incorrect content length, redirect to a disallowed host, one corrupt shard among otherwise valid artifacts, duplicate/escaping required paths, path traversal, symlink/hardlink/special archive entries, cancellation and explicit retry. Assert completed verified shards are reused only when their manifest source identity still matches, and re-hash every verified artifact immediately before install assembly to close the verify/install race.
 
-Cover disk preflight for the worst simultaneous footprint: remaining `.part` bytes + completed temporary artifacts + extracted/copied staging + complete final directory + safety margin, while retaining the current installed version. Cover DB-before-directory mismatch, incomplete bundle marker, structural compatibility failure, cancellation, and deletion while leased. Assert non-M4/<24GB/device-incompatible Qwen 1.7B rejects before a `model_downloads` row/network request; supported M4/24GB but uninstalled Qwen 1.7B is accepted for download.
+For every archive fixture, include safe non-whitelist README/script entries and Whisper optional INT8 entries, then assert the extractor scans them but does not create them. Assert every exact whitelist path is created once with its pinned bytes/hash; Qwen 0.6B must include all three tokenizer files. Mutate one path, declared size, content hash, scanned-entry count, per-file limit and total-written limit independently and require fail closed. Add over-limit tests that fail before writing the violating file and prove no partial installation/marker is published. Direct Qwen 1.7B and VAD tests use their exact five-file/one-file inventories and never enter archive extraction.
+
+Cover disk preflight with checked arithmetic and the exact formula `required_additional_free = remaining_part_bytes + peak_additional_assembly_bytes + 536870912`. Existing valid partial/verified temp bytes and the retained old installation are already reflected in filesystem available space and must not be counted again. Require staging/final on the same volume; atomic rename means `peak_additional_assembly_bytes` is one manifest required-inventory total, not staging plus final.
+
+Add exact Qwen3-ASR 1.7B examples: with no parts present, require `4710022180 + 4710022180 + 536870912 = 9956915272` additional bytes; with all five direct parts already verified, require `0 + 4710022180 + 536870912 = 5246893092` additional bytes, regardless of a retained old installation already on disk. Add regression tests proving completed direct temp files affect only `remaining_part_bytes`, compressed archive size is never multiplied by four, staging/final are not double-counted, overflow/metadata/cross-volume failure fails closed, and the network request is not started when preflight fails. Cover DB-before-directory mismatch, incomplete bundle marker, structural compatibility failure, cancellation, and deletion while leased. Assert non-M4/<24GB/device-incompatible Qwen 1.7B rejects before a `model_downloads` row/network request; supported M4/24GB but uninstalled Qwen 1.7B is accepted for download.
 
 Add policy matrix tests: every `structural_with_pinned_runtime` model/VAD with matching sherpa identity ends `runtime_qualified` in the structural publication transaction; mismatched runtime identity publishes no installation and returns `model_runtime_identity_mismatch`; Qwen 1.7B `runtime_smoke_required` ends only `installed_unqualified`; unknown policy fails closed.
 
-Add rename-success-before-DB crash tests for both policies. Reconciliation must re-hash all files and validate the structural marker. For `structural_with_pinned_runtime`, exact pinned sherpa identity atomically restores `runtime_qualified`; a wrong tag/commit/native archive/build identity creates no installation, records `model_runtime_identity_mismatch`, and quarantines the directory. For `runtime_smoke_required`, reconciliation restores only `installed_unqualified` and leaves Task 8 to qualify it. Assert neither path silently chooses the other policy.
+Add rename-success-before-DB crash tests for both policies. Reconciliation must enumerate final directory contents, reject files outside the whitelist, re-hash every required file against the manifest, and require the marker inventory to equal the manifest exact path/bytes/hash inventory; a self-consistent marker built from changed disk files must still fail. For `structural_with_pinned_runtime`, exact pinned sherpa identity atomically restores `runtime_qualified`; a wrong tag/commit/native archive/build identity creates no installation, records `model_runtime_identity_mismatch`, and quarantines the directory. For `runtime_smoke_required`, reconciliation restores only `installed_unqualified` and leaves Task 8 to qualify it. Assert neither path silently chooses the other policy. Add startup integration tests proving the canonical locked bootstrap scans all downloads, `.part` checkpoints, staging directories, unrecorded installs and Catalog rows without a caller-supplied plan.
 
 - [ ] **Step 2: Verify failure**
 
@@ -552,7 +590,13 @@ Install to:
 models/asr/<provider>/<model-id>/<manifest-version>-<bundle-identity>/
 ```
 
-Reject unsafe archive entries and unsafe/overlapping direct-install paths; assemble all artifacts in one staging directory; verify every file/hash and policy-specific structural contract; write an immutable structural marker with per-file provenance/runtime requirements; fsync and rename once. For `structural_with_pinned_runtime`, verify the exact sherpa 1.13.5 tag/commit/native archive/current build identity and publish `runtime_qualified` in the same SQLite transaction as the installation. For `runtime_smoke_required`, verify top-level `thinker_config`, shard index coverage and tokenizer static contract, then publish `installed_unqualified`; runtime initialization is forbidden in Task 6. Tests enumerate SenseVoice, all Whisper variants, Qwen 0.6B and Silero VAD to prove none remains unqualified. Reconcile per-file `.part` checkpoints, staging, unrecorded structural installs, incomplete markers, missing directories, and corrupt files without publishing a partial bundle.
+Before any network request, calculate `required_additional_free = remaining_part_bytes + peak_additional_assembly_bytes + 512 MiB` with checked arithmetic. Existing verified parts/completed direct temporary files and the retained old installation are already reflected in available space and are not added again. Keep staging and final on the same volume so atomic rename needs only one required-inventory total for `peak_additional_assembly_bytes`; do not add a second final copy. Do not use `compressed_size * 4`, a generic expansion factor or a global expanded-byte guess. Re-run preflight before install assembly if checkpoints changed.
+
+Reject unsafe archive entries and unsafe/overlapping direct-install paths. For archive artifacts, scan every entry against the manifest `max_scanned_entries`, reject unsafe/duplicate paths and special types even when the entry is not required, strip only the one expected archive-root prefix, and create files only for the exact required whitelist. Enforce declared per-file bytes while streaming and manifest `max_written_file_bytes`/`max_total_written_bytes` before and during writes; require every whitelist row exactly once and skip all other safe regular files. Re-hash the verified archive/direct artifact immediately before assembly, then verify every installed required file's exact bytes/hash and policy-specific structural contract.
+
+Write an immutable structural marker whose installed inventory is exactly the manifest whitelist path/bytes/hash plus per-file provenance/runtime requirements; fsync and rename once. Final directories may contain only required payload files, required directories and the defined marker files. For `structural_with_pinned_runtime`, verify the exact sherpa 1.13.5 tag/commit/native archive/current build identity and publish `runtime_qualified` in the same SQLite transaction as the installation. For `runtime_smoke_required`, verify top-level `thinker_config`, shard index coverage and tokenizer static contract, then publish `installed_unqualified`; runtime initialization is forbidden in Task 6. Tests enumerate SenseVoice, all Whisper variants, Qwen 0.6B and Silero VAD to prove none remains unqualified.
+
+Wire startup reconciliation into the canonical process-lock bootstrap. It must scan the download root, checkpoint rows/`.part` files, staging root, final install root and Catalog globally, derive the matching manifest plan from marker/model identity, and reconcile unrecorded installs, incomplete markers, missing directories, extra files and corrupt required files without publishing a partial bundle. Reconciliation trusts frozen manifest hashes, never marker self-reported hashes. Deletion failure restores the exact prior installation state and keeps Catalog/filesystem consistent.
 
 - [ ] **Step 6: Run model manager and migration tests**
 

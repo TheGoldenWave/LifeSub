@@ -390,7 +390,93 @@ Qwen3-ASR 1.7B 不使用转换后的 ONNX/MLX 资产。shipping manifest version
 
 每个 shipping artifact row 必须包含非空 `artifact_id/source_repository/source_model/source_endpoint/resolved_url/revision/bytes/sha256/required_path/license_spdx/provenance/redirect_hosts`，`required = true`，`install_mode = direct`。SPDX 不可用“upstream license”占位；Task 5 必须读取官方模型卡、仓库 license 与 file metadata，冻结准确 SPDX 或经审核的 `LicenseRef-*`，并写入第三方 notice。
 
-### 8.1 Canonical bundle payload v1
+### 8.1 Exact install inventory 与资源上限
+
+归档模型不能把归档中的所有 regular file 直接展开到安装目录。下载层先验证归档的精确 bytes/SHA-256；extractor 随后扫描每个 entry，包括最终不会写入的 entry，并对绝对路径、`..`、非 UTF-8、重复 normalized path、symlink、hardlink、device/FIFO 等特殊类型 fail closed。归档允许恰好一个已知顶层模型目录；去掉该前缀后的 normalized path 才与 whitelist 比较。只有下表 required path 可以写入 staging，其他安全 regular file 只读取 header/跳过 payload，不创建文件。由此明确排除 SenseVoice 的 README/LICENSE/export script、Qwen 的 README，以及 Whisper 的可选 `*-encoder.int8.onnx`/`*-decoder.int8.onnx`；Qwen3-ASR 0.6B 的 tokenizer 三件套则全部是 required。
+
+| 模型 | required path | exact bytes | SHA-256 |
+|---|---|---:|---|
+| `SenseVoice` | `model.int8.onnx` | 239233841 | `c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51` |
+| `SenseVoice` | `test_wavs/en.wav` | 228908 | `eb1eb008904465b74c304aad8342e8c7d3c6e61ffe9f66adcaca9cf0f76a93f4` |
+| `SenseVoice` | `test_wavs/ja.wav` | 230444 | `460bd8dccb0d2a5f4e29c628f837be4082d13defc64c3fc21dd1b6bb0e119095` |
+| `SenseVoice` | `test_wavs/ko.wav` | 147500 | `0dc797a5c81ed30fc339d91f3da718ab02854e17ffa37cb93c4c039ac5c6bb9c` |
+| `SenseVoice` | `test_wavs/yue.wav` | 164780 | `0960b2db54ae202071d250e6462fbf74a3c863f0e3e7f01273e4939c996875a0` |
+| `SenseVoice` | `test_wavs/zh.wav` | 178988 | `b77f1794fe374a0ba1ee1dc458bfaf9349496cbbfc32780c50ba3c5a7ad8e373` |
+| `SenseVoice` | `tokens.txt` | 315894 | `f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc` |
+| `Whisper Tiny` | `test_wavs/0.wav` | 212044 | `6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f` |
+| `Whisper Tiny` | `test_wavs/1.wav` | 534924 | `5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a` |
+| `Whisper Tiny` | `test_wavs/8k.wav` | 77244 | `f6f3c8b33e2534cdc154fe773ad2750f1f6a2ca5096179cdf037ae782456613e` |
+| `Whisper Tiny` | `test_wavs/trans.txt` | 449 | `b9ac44e7b794abb1a2d5faf0005e98a665971e7ac2ed15435832cc34edaa9100` |
+| `Whisper Tiny` | `tiny-decoder.onnx` | 114505801 | `e144c07dc6b55cece24392811f2d934b97013811f5e677d1315d341a0a74a25d` |
+| `Whisper Tiny` | `tiny-encoder.onnx` | 37647080 | `42c1d4cbf889632ba21ab6f0d4064c80209755f265ce5cd630db4a6793e7089c` |
+| `Whisper Tiny` | `tiny-tokens.txt` | 816730 | `b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126` |
+| `Whisper Base` | `base-decoder.onnx` | 196548998 | `8a12c3f6ad65bb5b86d7e6eccc302378f20f9fb2df6cb10747c62895da7ac194` |
+| `Whisper Base` | `base-encoder.onnx` | 95087154 | `5a6b87cb313993f6c9fefec9e7027556f6cb30becddf49655bee36c50ecc12d7` |
+| `Whisper Base` | `base-tokens.txt` | 816730 | `b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126` |
+| `Whisper Base` | `test_wavs/0.wav` | 212044 | `6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f` |
+| `Whisper Base` | `test_wavs/1.wav` | 534924 | `5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a` |
+| `Whisper Base` | `test_wavs/8k.wav` | 77244 | `f6f3c8b33e2534cdc154fe773ad2750f1f6a2ca5096179cdf037ae782456613e` |
+| `Whisper Base` | `test_wavs/trans.txt` | 449 | `b9ac44e7b794abb1a2d5faf0005e98a665971e7ac2ed15435832cc34edaa9100` |
+| `Whisper Small` | `small-decoder.onnx` | 559127829 | `a4165cca5c77e381938c0e111032a384901b1e434ae2ad948859035392d21d2c` |
+| `Whisper Small` | `small-encoder.onnx` | 409528992 | `119bd1e8ba0524baee1687f6b22bf0abd2fe539549cd000734edbca81c66751e` |
+| `Whisper Small` | `small-tokens.txt` | 816730 | `b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126` |
+| `Whisper Small` | `test_wavs/0.wav` | 212044 | `6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f` |
+| `Whisper Small` | `test_wavs/1.wav` | 534924 | `5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a` |
+| `Whisper Small` | `test_wavs/8k.wav` | 77244 | `f6f3c8b33e2534cdc154fe773ad2750f1f6a2ca5096179cdf037ae782456613e` |
+| `Whisper Small` | `test_wavs/trans.txt` | 449 | `b9ac44e7b794abb1a2d5faf0005e98a665971e7ac2ed15435832cc34edaa9100` |
+| `Qwen3-ASR 0.6B` | `conv_frontend.onnx` | 44148281 | `d22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e` |
+| `Qwen3-ASR 0.6B` | `decoder.int8.onnx` | 755914231 | `4f6885be5959ae26af3089d38ee7972c5fafbeeb1cf8d5e76eab6d8b61ca5771` |
+| `Qwen3-ASR 0.6B` | `encoder.int8.onnx` | 182491662 | `60748d3e6744a57c9c91e1b17424a6c2990567e8adceb0783940c03ed98fa9d9` |
+| `Qwen3-ASR 0.6B` | `test_wavs/ar1.wav` | 168044 | `700b3c274f2fedffbb6016f03c574adaad7aa0291acc1a1ba72f07112051073f` |
+| `Qwen3-ASR 0.6B` | `test_wavs/cantonese.wav` | 526444 | `ec832e035c13c670e0cf68dee0ca5dfae38bf2c583aab31e587441cb3eba3f3f` |
+| `Qwen3-ASR 0.6B` | `test_wavs/codeswitch.wav` | 549550 | `2def7fa41004d0a7d148d4afbf4c467c9d112d8b373996123e9a4c43d94957c7` |
+| `Qwen3-ASR 0.6B` | `test_wavs/de.wav` | 215084 | `80bb10c44085a7ce01a17abaf6a2095ed37e1695fca41cc0ea9733f1f24a749c` |
+| `Qwen3-ASR 0.6B` | `test_wavs/es1.wav` | 164844 | `4543f94738445a38306fb80bb0329ef5ca6d81ab1b6c3f15af1de1c3382f4b31` |
+| `Qwen3-ASR 0.6B` | `test_wavs/f1_noise.wav` | 1677606 | `7ae35f5d8f038e518f3abdeda5f78d71cb2f67c9ca29cb9a49a0b4d0702909bd` |
+| `Qwen3-ASR 0.6B` | `test_wavs/fast1.wav` | 1003794 | `b43bbd0bd982c3cc88081f64389bf29fe9e9a01287d44f0b15887bc49c2b352a` |
+| `Qwen3-ASR 0.6B` | `test_wavs/fr1.wav` | 191916 | `c6421b34feccbe7fdfaa8b641b8ecb7bcd7b9f2c237c7b82712c860be524db4e` |
+| `Qwen3-ASR 0.6B` | `test_wavs/ja1.wav` | 448100 | `d926ed0159a2d750d1ae7835e60a5cb5f8737629f7bb3de6cd111a3614d5dc67` |
+| `Qwen3-ASR 0.6B` | `test_wavs/noise1-en.wav` | 2831516 | `3664ef02fa664da93d94a1afc271bda31c0f8d07a9f3c74ac6cd1e5aabe8572c` |
+| `Qwen3-ASR 0.6B` | `test_wavs/noise2.wav` | 741186 | `33f85268f7fbad6b3152b9ab051edab1a85082fde66bccff61d7f5ef7b437e58` |
+| `Qwen3-ASR 0.6B` | `test_wavs/qiqiu1.wav` | 1631150 | `1b69a0fce35936979824c1751a11c285559a635aeb91160d1da3b00118321495` |
+| `Qwen3-ASR 0.6B` | `test_wavs/raokouling.wav` | 1831074 | `3cc59ec494f71135ff5761717e20597f0559b43f793dd72ae4924b86c5e038d8` |
+| `Qwen3-ASR 0.6B` | `test_wavs/rap1.wav` | 935868 | `ac6186d732b59c664776f84238f586d3e6c97adbc8b9f66e939ddcab5773cf3c` |
+| `Qwen3-ASR 0.6B` | `test_wavs/ru1.wav` | 152364 | `e48b22f32d4d1c38f0a94a58acfc43bb8f5b7fc3b0ac01ea49372040ca831acf` |
+| `Qwen3-ASR 0.6B` | `test_wavs/transcript.txt` | 5386 | `9cab82a507e1e5a7743336f2e40fabdaa1eb6181818d7a3768925abc03effd24` |
+| `Qwen3-ASR 0.6B` | `tokenizer/merges.txt` | 1671853 | `8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5` |
+| `Qwen3-ASR 0.6B` | `tokenizer/tokenizer_config.json` | 12487 | `4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c` |
+| `Qwen3-ASR 0.6B` | `tokenizer/vocab.json` | 2776833 | `ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910` |
+
+每个 bundle 还必须携带独立安装约束；archive 行的 `max_scanned_entries` 是验证归档中的全部 file+directory entry 数，written 限额只统计 exact whitelist regular files：
+
+| Bundle | mode | immutable archive/bundle identity | max_scanned_entries | max_written_file_bytes | max_total_written_bytes |
+|---|---|---|---:|---:|---:|
+| SenseVoice | archive | `7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e` | 12 | 239233841 | 240500355 |
+| Whisper Tiny | archive | `c46116994e539aa165266d96b325252728429c12535eb9d8b6a2b10f129e66b1` | 11 | 114505801 | 153794272 |
+| Whisper Base | archive | `911b2083efd7c0dca2ac3b358b75222660dc09fb716d64fbfc417ba6c99ff3de` | 11 | 196548998 | 293277543 |
+| Whisper Small | archive | `486a46afbb7ba798507190ffe02fea2dd726049af212e774537efac6afb210a6` | 11 | 559127829 | 970298212 |
+| Qwen3-ASR 0.6B | archive | `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96` | 27 | 755914231 | 1000089273 |
+| Qwen3-ASR 1.7B | direct | `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a` | N/A | 4220320824 | 4710022180 |
+| Silero VAD | direct | `9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6` | N/A | 643854 | 643854 |
+
+```rust
+struct RequiredInstallFile {
+    path: &'static str,
+    bytes: u64,
+    sha256: &'static str,
+}
+
+struct ArchiveInstallConstraints {
+    max_scanned_entries: u64,
+    max_written_file_bytes: u64,
+    max_total_written_bytes: u64,
+    required_files: &'static [RequiredInstallFile],
+}
+```
+
+`ArchiveInstallConstraints`、direct bundle 的 max/count summary 和归档 required inventory 是由已冻结 artifact bytes/hash 派生的安装安全元数据，明确排除在 RFC 8785 JCS payload 与 bundle identity 之外；Qwen3-ASR 1.7B 既有 canonical `ArtifactFile` rows（包括 path/bytes/hash）继续属于 JCS content identity。Task 5 增加派生约束时保持现有 manifest version 不变，Qwen3-ASR 1.7B 继续使用 version 2 与 `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a`。validator 必须逐模型/VAD精确比较 path/bytes/hash、entry/max/total；缺失、额外、重排导致歧义或任意数值漂移均失败。未来只有 source revision、artifact bytes/hash/path、runtime/compatibility 等 content identity 字段变化时才发布新 manifest version/identity；纯派生约束修正不得伪造一次 content identity 变化。
+
+### 8.2 Canonical bundle payload v1
 
 bundle identity 使用 RFC 8785 JSON Canonicalization Scheme（JCS）对 UTF-8 JSON payload 计算 SHA-256，payload 顶层固定为：
 
@@ -468,14 +554,15 @@ Receipt 必须快照 manifest version、单归档 hash 或 canonical bundle iden
 
 ```text
 检查 manifest
-  -> 以 sum(remaining temp bytes + staging bytes + final bytes + safety margin) 检查磁盘空间
+  -> 以 remaining_part_bytes + peak_additional_assembly_bytes
+     + 536870912 reserve 检查 additional free space
   -> 为每个 artifact 建立持久 checkpoint，下载到 downloads/<download-id>/<artifact>.part
   -> 使用 Range/ETag/Last-Modified 条件恢复；source identity 变化则丢弃旧 checkpoint
   -> 每个 artifact 完成后验证精确大小与 SHA-256
-  -> 解压型 artifact 安全解压，直装型 artifact 复制/rename 到 models/.staging/<uuid>/<required-path>
+  -> 解压型 artifact 扫描全部 entry 但只写 exact whitelist，直装型 artifact 复制/rename 到 models/.staging/<uuid>/<required-path>
   -> 验证全部必需文件、canonical bundle identity 与 structural compatibility Gate
   -> fsync 关键文件与目录
-  -> 写入包含逐文件 provenance/runtime requirement 的 immutable structural marker
+  -> 写入包含 exact whitelist path/bytes/hash、逐文件 provenance/runtime requirement 的 immutable structural marker
   -> atomic rename 到 models/asr/<provider>/<id>/<manifest>-<bundle-identity>/
   -> qualification_policy?
        structural_with_pinned_runtime:
@@ -495,9 +582,15 @@ Receipt 必须快照 manifest version、单归档 hash 或 canonical bundle iden
 - `structural_with_pinned_runtime`：额外验证当前 sherpa runtime identity 与 manifest 固定的 1.13.5 tag/commit/native archive/build identity 完全一致；匹配时在一个事务原子补登记 `runtime_qualified` 与 runtime identity。若不匹配，不登记 installation，记录稳定 `model_runtime_identity_mismatch`，并把该目录移入 quarantine；不得补成 `installed_unqualified` 或误标文件 corrupt。
 - `runtime_smoke_required`：结构验证通过后原子补登记 `installed_unqualified`，等待 Task 8 RuntimeQualifier；reconciliation 不运行 Candle/Metal smoke，也不直接补 `runtime_qualified`。
 
-数据库指向缺失目录时记录稳定 integrity error。qualification marker 与 DB state 不一致时 fail closed 并要求重新 qualification，不误标模型文件 corrupt。启动时把旧进程遗留的 active download 转为 `failed/recovery_required`，清理过期 `.part` 与 staging，保留最近一次 `runtime_qualified` 安装直到新版本正式 qualified。
+数据库指向缺失目录时记录稳定 integrity error。qualification marker 与 DB state 不一致时 fail closed 并要求重新 qualification，不误标模型文件 corrupt。启动时必须在持有 canonical process lock 后扫描 download root、全部 `.part`/checkpoint、staging root、最终安装 root 与 Catalog，而不是只 reconciliation 一个调用方传入的 plan；旧进程遗留的 active download 转为 `failed/recovery_required`，过期 `.part` 与 staging 按确定性规则清理，最近一次 `runtime_qualified` 安装保留到新版本正式 qualified。
 
-归档解压必须拒绝绝对路径、`..`、symlink、hardlink 和越界目标；直装 artifact 的 required path 也必须是规范化相对路径且不能互相覆盖。限制文件数量、单文件大小和总展开大小。空间检查同时覆盖未完成临时字节、已完成临时文件、staging、最终目录与保留的旧安装，不能假设 atomic rename 会释放 staging 空间。下载只跟随 HTTPS，重定向后的 host 必须位于每个 artifact allowlist。取消、网络失败、hash 错误、兼容性错误或解压失败都不能损坏已安装版本。删除模型使用逻辑锁，等待正在使用该模型的任务释放后再删除。
+archive extractor 使用第 8.1 节逐 bundle 的 `ArchiveInstallConstraints`，扫描全部 entry 并在读取 header 时执行 entry-count Gate；任何 entry count、required 单文件声明/实写 bytes 或 required 总实写 bytes 超限立即失败。非 whitelist 的安全 regular file 不写入，包括文档、脚本和 Whisper 可选 INT8；每个 whitelist 文件必须恰好出现一次，按声明 bytes 限流复制并在 staging 中重算 SHA-256。缺失、重复、额外写入、size/hash 漂移都禁止 publication。直装 Qwen3-ASR 1.7B 与 VAD 使用同样的 exact inventory 校验，但没有 archive entry count。
+
+磁盘预检读取模型根目录所在 volume 的 available bytes，并用 checked arithmetic 计算 `required_additional_free = remaining_part_bytes + peak_additional_assembly_bytes + 536870912`。`remaining_part_bytes` 是每个 artifact 的 `expected_bytes - valid_on_disk_part_bytes` 之和；direct artifact 已完整下载并验证时该项为 0。已存在的 verified parts/checkpoints、已完成 direct temporary files 和 retained old installation 都已经占用该 volume、因而已经反映在 available space 中，不得再次相加。
+
+staging 与 final directory 必须位于同一 volume，publication 使用同卷 atomic rename；因此 `peak_additional_assembly_bytes` 对当前 exact-whitelist installer 恰好是一份第 8.1 节 required inventory total。rename 不复制 payload，不再额外加入 final total。任何 metadata 读取失败、跨卷布局、overflow 或空间不足都在创建/继续网络请求前 fail closed。禁止 `compressed_size * 4`、staging+final 双份相加、重复加入旧安装、全局 16 GiB 上限或其他未绑定 manifest 的展开估算。
+
+structural marker 的 payload inventory 必须与 manifest exact whitelist 一致，逐项保存 path、exact bytes 与 SHA-256；final directory 除 marker 外不得存在 whitelist 外 regular file、link 或特殊文件。reconciliation 重新枚举目录并逐文件 hash，marker/manifest/disk 三方任一不一致即 quarantine 或标记 corrupt，不得用 marker 中自报的现场 hash 取代冻结 manifest hash。下载只跟随 HTTPS，重定向后的 host 必须位于每个 artifact allowlist。取消、网络失败、hash 错误、兼容性错误或解压失败都不能损坏已安装版本。删除模型使用逻辑锁，等待正在使用该模型的任务释放后再删除；目录删除与 Catalog 状态恢复必须保持 crash-safe，失败时恢复删除前精确状态而不是统一降级。
 
 ## 10. 不可变音频提交与校验
 

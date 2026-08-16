@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "source": "Synthetic signals generated with FFmpeg 8.1 lavfi; no third-party recording is embedded.",
+  "license_spdx": "CC0-1.0",
+  "generator": "FFmpeg 8.1",
+  "fixtures": [
+    {"file":"tone.wav","format":"wav","sha256":"bf4c160eaaaba3fb30b25969d425de93e569fe7cd5078de42294ccbfacd5c26c","bytes":48078,"sample_rate_hz":48000,"channels":1,"nominal_frames":24000},
+    {"file":"tone.mp3","format":"mp3","sha256":"734950c79684dd552f3a2ea6f23320ed07802caaaaf990cfd897ef96c7392d1f","bytes":8877,"sample_rate_hz":48000,"channels":1,"nominal_frames":24000},
+    {"file":"tone.m4a","format":"m4a","sha256":"d3a79e69f57bba2f84d8de7fa25fd2c95e9983bac3285b6d48acdc745e1a0cf2","bytes":9092,"sample_rate_hz":48000,"channels":1,"nominal_frames":24000},
+    {"file":"tone.aac","format":"aac","sha256":"f60bc4ac851981a44daece3595471e7970c3cb3212e83de817ff837b8deb5dd8","bytes":8360,"sample_rate_hz":48000,"channels":1,"nominal_frames":24000},
+    {"file":"tone.flac","format":"flac","sha256":"c154593fe610dcaf0d5bf39f96890ab4e3802c65b3c1396063342ef3994d3e18","bytes":15298,"sample_rate_hz":48000,"channels":1,"nominal_frames":24000},
+    {"file":"tone.ogg","format":"ogg","sha256":"8b61b74caf1f7f0a2b8a90ba44acbb7597dceaa4f60244a8d5b8390627a97c5b","bytes":5529,"sample_rate_hz":48000,"channels":2,"nominal_frames":24000},
+    {"file":"multichannel-3ch.wav","format":"wav","sha256":"9e2e2057c4354a30f4f8c74cc52cc49440cb4be5467f89e5f0daf73ca43da0bf","bytes":57714,"sample_rate_hz":48000,"channels":3,"nominal_frames":4800},
+    {"file":"impulse-48k.wav","format":"wav","sha256":"5cea76d9b903764a5b272c594bb02bd7745d3cb1e42b0510139f32e719a99493","bytes":192092,"sample_rate_hz":48000,"channels":1,"nominal_frames":48000}
+  ]
+}

@@ -1,8 +1,10 @@
+pub mod audio;
 pub mod manifest;
 pub mod model_lookup;
 pub mod model_manager;
 pub mod receipt;
 pub mod settings;
+pub mod vad;
 
 const PINNED_RUNTIME_VERSION: &str = "1.13.5";
 #[cfg(feature = "asr-runtime")]

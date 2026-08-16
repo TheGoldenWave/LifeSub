@@ -10,6 +10,8 @@ mod commands;
 use tauri::Manager;
 
 #[cfg(test)]
+mod asr_audio_test;
+#[cfg(test)]
 mod asr_manifest_test;
 #[cfg(test)]
 mod asr_model_manager_test;
@@ -17,6 +19,8 @@ mod asr_model_manager_test;
 mod asr_runtime_test;
 #[cfg(test)]
 mod asr_settings_test;
+#[cfg(test)]
+mod asr_vad_test;
 #[cfg(test)]
 mod catalog_migration_test;
 #[cfg(test)]

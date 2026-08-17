@@ -1,10 +1,14 @@
 ---
-stage: task-10-m1-approved-target-m2-m5
-last_updated: 2026-08-16
+stage: paused-task-10-direct-archive-toctou-fix-in-progress
+last_updated: 2026-08-17
 source: codex-goal
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
+
+- 暂停点：HEAD `0227371`。Task 10 的原子发布、enqueue、fenced snapshot、长期 Core ModelManager、anchored lease/download、Sherpa/VAD/Qwen 0.6/Qwen 1.7 fd-backed runtime 已提交；Direct/Archive install 的最终 identity-check→rename/remove TOCTOU 修复仍未提交、未完成 GREEN/双审。
+- 恢复第一步：只处理 `model_manager/{anchored_reconcile,archive,install,install_support,storage}.rs` 与对应 tests；完成 `move_expected_to_private(expected)` 原语和 barrier 测试，replacement path/inode/bytes 必须不变。当前 `git diff --check` 通过，不代表质量门通过。
+- 后续剩余：anchored delete/trash/qualification、fd-safe chunk decode + ASR pipeline、独立 ≤5 秒 heartbeat；Task 10 全部双审后才进入 Task 11。
 
 - 当前阶段：Task 8、9 已提交并双审放行；Task 10 M1 原子发布内核与 Core storage ownership baseline 已提交并通过独立复审，下一步完成 Task 10 M2-M5，再进入 Tasks 11-13。
 - 已确认方向：本地优先；SenseVoiceSmall、Whisper 与 Qwen3-ASR 0.6B 共用 sherpa-onnx 1.13.5；无 Python Sidecar；无云端 ASR。Qwen3-ASR 1.7B 仅在固定可执行资产和 Apple Silicon Gate 通过后启用。
@@ -21,3 +25,4 @@ source: codex-goal
 - 阶段退出条件：Tasks 10–13 各自完成 TDD、规格复审和质量复审；Rust 原子发布/迁移/Tool API/IPC/双 Tauri harness、前端 focused tests、生产构建和无 `console.log` 全部通过。Task 10 执行循环必须维持不超过 5 秒 heartbeat，ownership lost 时丢弃结果；Task 11 后第二 Tauri 进程只能连接 primary，不得打开 writable SQLite；Task 13 后导入与重转写只消费真实 Core Job/Operation，不合成 transcript。
 - MVP Gate：ASR V0.2 是基础里程碑；其后必须完成 native capture 与 DeepSeek Harness 真实录音到 `lifesub://` Evidence Ref 的完整闭环，才能标记 LifeSub 整体 MVP complete。
 - 阻塞项：无外部阻塞。Task 10 M2-M5 尚未完成；真实 Qwen 1.7B weights/device acceptance 属于 Task 14，不阻塞 Tasks 10-13。工作树仅保留两份未纳入本目标的 cloud-fallback 文档草稿，禁止清理。
+- 2026-08-17 流程优化：审查从双轮（规格+质量）合并为单轮合并审查，放行标准从 Critical=0+Important=0 简化为 Critical=0；测试从每次全量改为三层分级（Tier1 focused → Tier2 pre-commit → Tier3 全量）；文件行数限制从 300 放宽到 Rust 600/TS 400；新增 `scripts/check.sh` 和 `Makefile` 一键验证。详见主仓库 `AGENTS.md`、`.claude/contexts/dev.md`、`.claude/rules/common/coding-style.md`。

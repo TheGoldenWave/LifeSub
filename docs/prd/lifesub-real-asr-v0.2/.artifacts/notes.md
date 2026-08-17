@@ -54,3 +54,4 @@
 - 2026-08-16：文件 cleanup 即使先比较 dev/ino，identity check 与裸 `unlink` 之间仍有同名替换窗口。Evidence 与 Model startup reconciliation 的破坏性清理统一使用 no-replace 随机 tombstone 原子 rename，移动后再次核验 identity；失配时恢复原名并 fail closed。
 - 2026-08-16：Task 10 publication 成功事务必须同时 fence claimed_by、claim_generation、`state = transcribing`、cancel marker 与同一 `now` 下未过期 lease；只检查 generation 仍允许过期 worker 在 recovery 前发布。
 - 2026-08-16：Core startup fd-anchored 不等于 ModelManager 全生命周期安全。Task 10 M3 必须把 download/install/delete/qualification/provider lease 统一收口到 AnchoredFs capability，并让 provider 从已验证 fd 加载，禁止 production 模块继续直接 `root.join`。
+- 2026-08-17：流程优化——双审合并为单轮合并审查、测试改为三层分级、文件行数放宽至 600 行、新增 `scripts/check.sh` 一键验证。优化原因：双审串行导致每 Task 至少 2 轮沟通，全量 283+ tests 每次必跑耗时巨大，300 行限制在 Rust 模块中不切实际。新流程：`make check`（Tier2）作为日常预提交指令，`make check-full`（Tier3）仅在 Task 收尾时执行一次。

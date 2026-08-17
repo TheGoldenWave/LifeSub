@@ -1,15 +1,79 @@
 ---
 feature: lifesub-real-asr-v0.2
-handoff_date: 2026-08-16
+handoff_date: 2026-08-17
 branch: codex/lifesub-real-asr-v0.2
 worktree: /Users/goldenwave/.config/superpowers/worktrees/LifeSub/lifesub-real-asr-v0.2
-head_at_handoff: ce379ac
-status: tasks-8-9-approved-target-tasks-10-13
+head_at_handoff: 0227371
+status: paused-task-10-direct-archive-toctou-fix-in-progress
 ---
 
 # LifeSub V0.2 真实 ASR 开发 Handoff
 
-## 0. 2026-08-16 最新状态（优先于下方历史内容）
+## 0. 2026-08-17 暂停点（优先于下方历史内容）
+
+用户要求暂停。所有子 Agent 已停止；禁止清理、reset、checkout 或覆盖当前未提交代码。
+
+### 已完成并提交
+
+- Tasks 8、9 已完成、双审并提交。
+- Task 10 M1 原子 Receipt/Revision/Segments/FTS/Job publication 已双审并提交。
+- Core storage ownership 已完成 anchored SQLite VFS、Audio fd/tombstone、startup Model reconcile、不可拆 CoreRuntime，并通过多轮安全复审。
+- Task 10 enqueue/single-flight、fenced execution snapshot、ModelStorage/lease capability、CoreRuntime 长期唯一 ModelManager、Sherpa/VAD/Qwen 0.6/Qwen 1.7 fd-backed Provider、anchored download 均已双审并提交。
+
+最近提交：
+
+```text
+0227371 refactor: load Qwen ASR from anchored leases
+a8c7c37 refactor: anchor ASR model downloads and runtimes
+8ee54c6 fix: bind ASR snapshots to source contracts
+5681196 feat: load fenced ASR execution snapshots
+eeec3d8 refactor: keep model runtime under core ownership
+f6a134c feat: validate and enqueue ASR jobs
+f55e8e8 refactor: anchor ASR model execution leases
+d614754 docs: checkpoint atomic ASR publication
+bf0bde7 feat: anchor core storage and publish ASR evidence
+```
+
+### 当前未提交代码：Direct/Archive install，未放行
+
+文件仅限：
+
+```text
+src-tauri/src/asr/model_manager.rs
+src-tauri/src/asr/model_manager/anchored_reconcile.rs
+src-tauri/src/asr/model_manager/archive.rs
+src-tauri/src/asr/model_manager/install.rs
+src-tauri/src/asr/model_manager/install_support.rs
+src-tauri/src/asr/model_manager/storage.rs
+src-tauri/src/asr_model_manager_test.rs
+src-tauri/src/asr_model_manager_test/archive.rs
+src-tauri/src/asr_model_manager_test/support.rs
+src-tauri/src/asr_model_manager_test/install_anchored.rs
+```
+
+已完成但尚未最终验证的修复：staging 创建后立即 claim/reanchor、全阶段 held fd、marker/final no-replace、逐级 parent fsync、Linux `renameat2(RENAME_NOREPLACE)`。最后 reviewer 发现 identity-check 后到 rename/remove 的 TOCTOU；中断前已开始统一 `move_expected_to_private(expected)` 原语，mismatch 时 no-replace 恢复或保留 recovery tombstone，禁止删除未知 replacement。
+
+当前 `git diff --check` 通过，但这轮 GREEN、全量测试、规格复审和质量复审均未完成，禁止提交或宣称 Task 10 完成。
+
+### 精确恢复顺序
+
+1. 先读本节、`process.md` 与 `notes.md`；运行 `git status --short`，不得处理两份 cloud-fallback 草稿。
+2. 审计 `move_expected_to_private`、`claim_directory`、`remove_tree_if_identity`、`publish_directory_noreplace` 当前半成品。
+3. 完成 identity-check 后/rename 前 barrier 测试：replacement 的 path/inode/bytes 必须不变，owned staging 不得发布；恢复失败只保留 private recovery tombstone。
+4. 运行 Direct/Archive focused、ModelManager 全量、Clippy、fmt、diff；再做规格复审→质量复审，Critical=0、Important=0 后精确提交。
+5. 继续 Task 10：anchored delete/trash/qualification → fd-safe chunk decode/pipeline → 独立 ≤5 秒 heartbeat/cancel/ownership discard。
+6. Task 10 双审完成后才进入 Tasks 11–13；Task 14 真实模型 Gate仍不在当前范围。
+
+### 受保护未跟踪文件
+
+```text
+docs/superpowers/plans/2026-08-16-lifesub-asr-device-qualification-cloud-fallback.md
+docs/superpowers/specs/2026-08-16-lifesub-asr-device-qualification-cloud-fallback-design.md
+```
+
+以下旧内容仅作历史背景；冲突时以上述暂停点为准。
+
+## 0A. 2026-08-16 历史状态
 
 Task 8、9 已完成最终验证和双审。下一阶段先连续完成 Tasks 10–13，再进入 Task 14 真实模型 Gate。
 

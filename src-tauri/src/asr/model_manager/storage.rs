@@ -127,6 +127,172 @@ impl ModelStorage {
             }
         }
     }
+
+    pub(super) fn hold_verified_download_part(
+        &self,
+        nominal: &Path,
+        expected_len: u64,
+        expected_sha256: &str,
+    ) -> Result<VerifiedDownloadPart, ManagerError> {
+        match self {
+            #[cfg(test)]
+            Self::TestPath(_) => VerifiedDownloadPart::capture_path(
+                nominal,
+                expected_len,
+                expected_sha256.to_owned(),
+            ),
+            Self::Anchored(root) => {
+                let relative = nominal
+                    .strip_prefix(root.nominal_root())
+                    .map_err(|_| ManagerError::integrity("download part path mismatch"))?;
+                VerifiedDownloadPart::capture_anchored(
+                    root.clone(),
+                    relative.to_path_buf(),
+                    expected_len,
+                    expected_sha256.to_owned(),
+                )
+            }
+        }
+    }
+
+    pub(super) fn real_directory(&self, nominal: &Path) -> Result<bool, ManagerError> {
+        match self {
+            #[cfg(test)]
+            Self::TestPath(_) => super::fs_support::real_dir(nominal),
+            Self::Anchored(root) => {
+                let relative = nominal
+                    .strip_prefix(root.nominal_root())
+                    .map_err(|_| ManagerError::integrity("installation path mismatch"))?;
+                Ok(root.open_dir(relative)?.is_some())
+            }
+        }
+    }
+}
+
+pub(super) struct VerifiedDownloadPart {
+    file: File,
+    expected_len: u64,
+    expected_sha256: String,
+    anchored: Option<AnchoredVerifiedPart>,
+}
+
+struct AnchoredVerifiedPart {
+    root: Arc<AnchoredFs>,
+    relative: PathBuf,
+    identity: EntryStat,
+}
+
+impl VerifiedDownloadPart {
+    #[cfg(test)]
+    fn capture_path(
+        path: &Path,
+        expected_len: u64,
+        expected_sha256: String,
+    ) -> Result<Self, ManagerError> {
+        let file = File::open(path)?;
+        let held = Self {
+            file,
+            expected_len,
+            expected_sha256,
+            anchored: None,
+        };
+        held.validate_contents()?;
+        Ok(held)
+    }
+
+    fn capture_anchored(
+        root: Arc<AnchoredFs>,
+        relative: PathBuf,
+        expected_len: u64,
+        expected_sha256: String,
+    ) -> Result<Self, ManagerError> {
+        let file = root.open_regular(&relative, false)?;
+        let identity = EntryStat::from_fd(file.as_raw_fd())?;
+        let held = Self {
+            file,
+            expected_len,
+            expected_sha256,
+            anchored: Some(AnchoredVerifiedPart {
+                root,
+                relative,
+                identity,
+            }),
+        };
+        held.revalidate()?;
+        Ok(held)
+    }
+
+    pub(super) fn copy_to(&self, output: &mut File) -> Result<(), ManagerError> {
+        self.revalidate()?;
+        let mut offset = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = self.file.read_at(&mut buffer, offset)?;
+            if read == 0 {
+                break;
+            }
+            std::io::Write::write_all(output, &buffer[..read])?;
+            offset += read as u64;
+        }
+        output.sync_all()?;
+        self.revalidate()
+    }
+
+    pub(super) fn extract_tar_bz2_to(
+        &self,
+        storage: &AnchoredFs,
+        staging: &Path,
+        contract: &super::InstallContract,
+    ) -> Result<u64, ManagerError> {
+        self.revalidate()?;
+        let staging = storage.reanchor(staging)?;
+        let reader = self.file.try_clone()?;
+        let written = super::archive::extract_tar_bz2_from_held_files(reader, &staging, contract)?;
+        self.revalidate()?;
+        Ok(written)
+    }
+
+    fn revalidate(&self) -> Result<(), ManagerError> {
+        if let Some(anchored) = &self.anchored {
+            if EntryStat::from_fd(self.file.as_raw_fd())? != anchored.identity {
+                return Err(ManagerError::integrity(
+                    "verified download part identity changed",
+                ));
+            }
+            let current = anchored.root.open_regular(&anchored.relative, false)?;
+            if EntryStat::from_fd(current.as_raw_fd())? != anchored.identity {
+                return Err(ManagerError::integrity(
+                    "verified download part path no longer names the held inode",
+                ));
+            }
+        }
+        self.validate_contents()
+    }
+
+    fn validate_contents(&self) -> Result<(), ManagerError> {
+        if EntryStat::from_fd(self.file.as_raw_fd())?.len != self.expected_len {
+            return Err(ManagerError::integrity(
+                "verified artifact changed before install",
+            ));
+        }
+        let mut digest = Sha256::new();
+        let mut offset = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = self.file.read_at(&mut buffer, offset)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            offset += read as u64;
+        }
+        if hex::encode(digest.finalize()) != self.expected_sha256 {
+            return Err(ManagerError::integrity(
+                "verified artifact changed before install",
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub(super) struct DownloadPart {

@@ -2,6 +2,27 @@ use super::fs_support::*;
 use super::install::{MarkerInstalledFile, StructuralMarker};
 use super::*;
 
+pub(super) fn copy_and_hash<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<(u64, String), ManagerError> {
+    let mut digest = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; COPY_BUFFER_BYTES];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..read])?;
+        digest.update(&buffer[..read]);
+        total = total
+            .checked_add(read as u64)
+            .ok_or_else(|| ManagerError::structural("archive entry length overflow"))?;
+    }
+    Ok((total, hex::encode(digest.finalize())))
+}
+
 pub(super) fn create_parents(root: &Path, dst: &Path) -> Result<(), ManagerError> {
     let rel = dst
         .parent()

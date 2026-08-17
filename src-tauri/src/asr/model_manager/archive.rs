@@ -1,11 +1,116 @@
+use super::anchored_reconcile::AnchoredFs;
 use super::fs_support::*;
+use super::install_support::copy_and_hash;
 use super::*;
+
+struct PositionalFileReader {
+    file: File,
+    offset: u64,
+}
+
+impl Read for PositionalFileReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+
+        let read = self.file.read_at(buffer, self.offset)?;
+        self.offset = self
+            .offset
+            .checked_add(read as u64)
+            .ok_or_else(|| io::Error::other("archive read offset overflow"))?;
+        Ok(read)
+    }
+}
+
+pub(crate) fn extract_tar_bz2_from_held_files(
+    archive: File,
+    destination: &AnchoredFs,
+    contract: &InstallContract,
+) -> Result<u64, ManagerError> {
+    extract_tar_bz2_from_reader(
+        BzDecoder::new(PositionalFileReader {
+            file: archive,
+            offset: 0,
+        }),
+        destination,
+        contract,
+    )
+}
+
+fn extract_tar_bz2_from_reader<R: Read>(
+    reader: R,
+    destination: &AnchoredFs,
+    contract: &InstallContract,
+) -> Result<u64, ManagerError> {
+    let mut directories = HashSet::new();
+    let written = extract_archive(
+        tar::Archive::new(reader),
+        contract,
+        |relative, required, entry| {
+            let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+            destination.ensure_dir(parent)?;
+            for ancestor in parent.ancestors() {
+                directories.insert(ancestor.to_path_buf());
+            }
+            let mut file = match destination.open_regular_create_new(relative) {
+                Ok(file) => file,
+                Err(error) => match destination.file_len(relative) {
+                    Ok(Some(_)) | Err(_) => {
+                        return Err(ManagerError::structural("unsafe or existing staging file"));
+                    }
+                    Ok(None) => return Err(error),
+                },
+            };
+            let (copied, sha256) = copy_and_hash(entry, &mut file)?;
+            file.sync_all()?;
+            if sha256 != required.sha256 {
+                return Err(ManagerError::integrity(
+                    "archive required file hash differs from manifest",
+                ));
+            }
+            Ok(copied)
+        },
+    )?;
+    let mut directories = directories.into_iter().collect::<Vec<_>>();
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        destination.sync_dir(&directory)?;
+    }
+    destination.sync_dir(Path::new(""))?;
+    Ok(written)
+}
 
 pub(crate) fn extract_tar_bz2_safely(
     archive_path: &Path,
     destination: &Path,
     contract: &InstallContract,
 ) -> Result<u64, ManagerError> {
+    let archive = tar::Archive::new(BzDecoder::new(File::open(archive_path)?));
+    extract_archive(archive, contract, |relative, required, entry| {
+        let output = destination.join(relative);
+        create_parents(destination, &output)?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&output)?;
+        let copied = io::copy(entry, &mut file)?;
+        file.sync_all()?;
+        if sha256_file(&output)? != required.sha256 {
+            return Err(ManagerError::integrity(
+                "archive required file hash differs from manifest",
+            ));
+        }
+        Ok(copied)
+    })
+}
+
+fn extract_archive<R: Read, W>(
+    mut archive: tar::Archive<R>,
+    contract: &InstallContract,
+    mut write_required: W,
+) -> Result<u64, ManagerError>
+where
+    W: FnMut(&Path, &RequiredInstalledFile, &mut tar::Entry<'_, R>) -> Result<u64, ManagerError>,
+{
     let InstallContract::Archive {
         archive_root,
         max_scanned_entries,
@@ -23,7 +128,6 @@ pub(crate) fn extract_tar_bz2_safely(
         .iter()
         .map(|f| (PathBuf::from(&f.path), f))
         .collect::<BTreeMap<_, _>>();
-    let mut archive = tar::Archive::new(BzDecoder::new(File::open(archive_path)?));
     let mut seen = HashSet::new();
     let mut written_paths = HashSet::new();
     let mut scanned = 0u64;
@@ -93,20 +197,8 @@ pub(crate) fn extract_tar_bz2_safely(
                 "duplicate normalized required path",
             ));
         }
-        let output = destination.join(rel);
-        create_parents(destination, &output)?;
-        let mut f = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&output)?;
-        if io::copy(&mut entry, &mut f)? != size {
+        if write_required(rel, req, &mut entry)? != size {
             return Err(ManagerError::integrity("archive entry length mismatch"));
-        }
-        f.sync_all()?;
-        if sha256_file(&output)? != req.sha256 {
-            return Err(ManagerError::integrity(
-                "archive required file hash differs from manifest",
-            ));
         }
     }
     if scanned != *max_scanned_entries

@@ -219,6 +219,87 @@ fn archive_contract_drift_fails_closed_for_each_bound_and_required_field() {
     }
 }
 
+#[test]
+fn anchored_archive_extraction_uses_held_source_and_staging_inodes_after_path_swaps() {
+    let directory = TempDir::new().unwrap();
+    let archive_path = directory.path().join("archive.tar.bz2");
+    let staging_path = directory.path().join("staging");
+    let held_archive_path = directory.path().join("held-archive.tar.bz2");
+    let held_staging_path = directory.path().join("held-staging");
+    let (bytes, contract) = exact_small_archive();
+    fs::write(&archive_path, bytes).unwrap();
+    fs::create_dir(&staging_path).unwrap();
+    let archive = fs::File::open(&archive_path).unwrap();
+    let staging = fs::File::open(&staging_path).unwrap();
+
+    fs::rename(&archive_path, &held_archive_path).unwrap();
+    fs::write(&archive_path, b"replacement archive").unwrap();
+    fs::rename(&staging_path, &held_staging_path).unwrap();
+    fs::create_dir(&staging_path).unwrap();
+
+    let written = extract_tar_bz2_from_held_files_for_test(archive, staging, &contract).unwrap();
+
+    assert_eq!(written, 5);
+    assert_eq!(
+        fs::read(held_staging_path.join("model.onnx")).unwrap(),
+        b"abc"
+    );
+    assert_eq!(
+        fs::read(held_staging_path.join("tokens.txt")).unwrap(),
+        b"de"
+    );
+    assert_eq!(fs::read_dir(staging_path).unwrap().count(), 0);
+}
+
+#[test]
+fn anchored_archive_extraction_rejects_existing_files_without_replacement() {
+    let directory = TempDir::new().unwrap();
+    let archive_path = directory.path().join("archive.tar.bz2");
+    let staging_path = directory.path().join("staging");
+    let (bytes, contract) = exact_small_archive();
+    fs::write(&archive_path, bytes).unwrap();
+    fs::create_dir(&staging_path).unwrap();
+    fs::write(staging_path.join("model.onnx"), b"sentinel").unwrap();
+
+    let error = extract_tar_bz2_from_held_files_for_test(
+        fs::File::open(archive_path).unwrap(),
+        fs::File::open(&staging_path).unwrap(),
+        &contract,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "model_structural_incompatible");
+    assert_eq!(
+        fs::read(staging_path.join("model.onnx")).unwrap(),
+        b"sentinel"
+    );
+}
+
+#[test]
+fn anchored_archive_extraction_rejects_symlinked_staging_ancestor() {
+    let directory = TempDir::new().unwrap();
+    let archive_path = directory.path().join("archive.tar.bz2");
+    let staging_path = directory.path().join("staging");
+    let outside = directory.path().join("outside");
+    let model = b"abc".as_slice();
+    let bytes = compressed_tar(&[("root/nested/model.onnx", tar::EntryType::Regular, model)]);
+    let contract = archive_contract(1, 3, 3, &[("nested/model.onnx", model)]);
+    fs::write(&archive_path, bytes).unwrap();
+    fs::create_dir(&staging_path).unwrap();
+    fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, staging_path.join("nested")).unwrap();
+
+    let error = extract_tar_bz2_from_held_files_for_test(
+        fs::File::open(archive_path).unwrap(),
+        fs::File::open(&staging_path).unwrap(),
+        &contract,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "model_structural_incompatible");
+    assert!(!outside.join("model.onnx").exists());
+}
+
 fn response(url: &str, body: &[u8]) -> Result<DownloadResponse, ManagerError> {
     Ok(DownloadResponse {
         status: 200,

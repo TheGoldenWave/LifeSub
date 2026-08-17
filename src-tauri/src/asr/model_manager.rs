@@ -40,6 +40,11 @@ mod reconcile;
 mod storage;
 mod types;
 
+#[cfg(test)]
+pub(crate) use anchored_reconcile::{
+    clear_ensure_dir_sync_trace_for_test, set_before_install_marker_publish_for_test,
+    set_before_install_stage_claim_for_test, take_ensure_dir_sync_trace_for_test,
+};
 pub(crate) use types::DeleteMarkerFault;
 #[cfg(test)]
 pub(crate) use types::InstallFault;
@@ -621,6 +626,15 @@ pub(crate) fn safe_relative_path(value: &str) -> Result<PathBuf, ManagerError> {
 }
 
 pub(crate) use archive::extract_tar_bz2_safely;
+#[cfg(test)]
+pub(crate) fn extract_tar_bz2_from_held_files_for_test(
+    archive: File,
+    destination: File,
+    contract: &InstallContract,
+) -> Result<u64, ManagerError> {
+    let storage = anchored_reconcile::AnchoredFs::new(PathBuf::new(), destination);
+    archive::extract_tar_bz2_from_held_files(archive, &storage, contract)
+}
 #[cfg(test)]
 pub(crate) use install_support::validate_required_inventory_for_test;
 

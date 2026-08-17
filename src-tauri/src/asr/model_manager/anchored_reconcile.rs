@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -17,6 +17,13 @@ use super::*;
 thread_local! {
     static BEFORE_REMOVE_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    static BEFORE_INSTALL_STAGE_CLAIM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+    static BEFORE_INSTALL_MARKER_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+    static ENSURE_DIR_SYNC_TRACE: std::cell::RefCell<Vec<String>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
 }
 
 #[derive(Debug)]
@@ -80,10 +87,14 @@ impl AnchoredFs {
 
     pub(super) fn ensure_dir(&self, relative: &Path) -> Result<File, ManagerError> {
         let mut current = self.root.try_clone()?;
+        let mut current_path = PathBuf::new();
         for component in relative.components() {
             let name = component_name(component.as_os_str())?;
             match open_dir_at(current.as_raw_fd(), &name) {
-                Ok(next) => current = next,
+                Ok(next) => {
+                    current = next;
+                    current_path.push(component.as_os_str());
+                }
                 Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
                     let result =
                         unsafe { libc::mkdirat(current.as_raw_fd(), name.as_ptr(), 0o700) };
@@ -92,15 +103,20 @@ impl AnchoredFs {
                     {
                         return Err(io::Error::last_os_error().into());
                     }
+                    current.sync_all()?;
+                    trace_directory_sync(&current_path);
                     current = open_dir_at(current.as_raw_fd(), &name).map_err(map_unsafe_entry)?;
+                    current_path.push(component.as_os_str());
                 }
                 Err(error) => return Err(map_unsafe_entry(error)),
             }
         }
+        current.sync_all()?;
+        trace_directory_sync(&current_path);
         Ok(current)
     }
 
-    fn remove_tree(&self, relative: &Path) -> Result<(), ManagerError> {
+    pub(super) fn remove_tree(&self, relative: &Path) -> Result<(), ManagerError> {
         let Some((parent, name)) = self.parent_and_name(relative)? else {
             return Err(ManagerError::structural("cannot remove anchored root"));
         };
@@ -217,6 +233,39 @@ impl AnchoredFs {
         Ok(file)
     }
 
+    pub(super) fn open_regular_create_new(&self, relative: &Path) -> Result<File, ManagerError> {
+        let Some((parent, name)) = self.parent_and_name(relative)? else {
+            return Err(ManagerError::structural("expected regular file"));
+        };
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(map_unsafe_entry(io::Error::last_os_error()));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        if !file_stat(file.as_raw_fd())?.is_file() {
+            return Err(ManagerError::structural("expected regular file"));
+        }
+        Ok(file)
+    }
+
+    pub(super) fn write_new_synced(
+        &self,
+        relative: &Path,
+        bytes: &[u8],
+    ) -> Result<(), ManagerError> {
+        let mut file = self.open_regular_create_new(relative)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
     pub(super) fn available_space(&self) -> Result<u64, ManagerError> {
         let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
         let result = unsafe { libc::fstatfs(self.root.as_raw_fd(), stats.as_mut_ptr()) };
@@ -248,21 +297,21 @@ impl AnchoredFs {
         Ok(())
     }
 
-    fn entries(&self, relative: &Path) -> Result<Option<Vec<OsString>>, ManagerError> {
+    pub(super) fn entries(&self, relative: &Path) -> Result<Option<Vec<OsString>>, ManagerError> {
         let Some(dir) = self.open_dir(relative)? else {
             return Ok(None);
         };
         Ok(Some(read_dir_names(&dir)?))
     }
 
-    fn entry_stat(&self, relative: &Path) -> Result<EntryStat, ManagerError> {
+    pub(super) fn entry_stat(&self, relative: &Path) -> Result<EntryStat, ManagerError> {
         let Some((parent, name)) = self.parent_and_name(relative)? else {
             return file_stat(self.root.as_raw_fd());
         };
         stat_at(parent.as_raw_fd(), &name)
     }
 
-    fn rename(&self, source: &Path, destination: &Path) -> Result<(), ManagerError> {
+    pub(super) fn rename(&self, source: &Path, destination: &Path) -> Result<(), ManagerError> {
         let Some((source_parent, source_name)) = self.parent_and_name(source)? else {
             return Err(ManagerError::structural("cannot rename anchored root"));
         };
@@ -286,7 +335,136 @@ impl AnchoredFs {
         Ok(())
     }
 
-    fn sync_dir(&self, relative: &Path) -> Result<(), ManagerError> {
+    pub(super) fn rename_noreplace(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), ManagerError> {
+        let Some((source_parent, source_name)) = self.parent_and_name(source)? else {
+            return Err(ManagerError::structural("cannot rename anchored root"));
+        };
+        let Some((destination_parent, destination_name)) = self.parent_and_name(destination)?
+        else {
+            return Err(ManagerError::structural("cannot rename to anchored root"));
+        };
+        #[cfg(test)]
+        BEFORE_INSTALL_MARKER_PUBLISH.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        rename_noreplace_cross(
+            source_parent.as_raw_fd(),
+            &source_name,
+            destination_parent.as_raw_fd(),
+            &destination_name,
+        )
+        .map_err(|error| {
+            if stat_at(destination_parent.as_raw_fd(), &destination_name).is_ok() {
+                ManagerError::new(
+                    "model_install_conflict",
+                    "immutable destination already exists",
+                )
+            } else {
+                error
+            }
+        })?;
+        destination_parent.sync_all()?;
+        source_parent.sync_all()?;
+        Ok(())
+    }
+
+    pub(super) fn claim_directory(
+        &self,
+        source: &Path,
+        expected: EntryStat,
+    ) -> Result<(PathBuf, AnchoredFs, EntryStat), ManagerError> {
+        let Some((parent, source_name)) = self.parent_and_name(source)? else {
+            return Err(ManagerError::structural("cannot claim anchored root"));
+        };
+        let claim_name = move_expected_to_private(
+            parent.as_raw_fd(),
+            &source_name,
+            expected,
+            ".lifesub-stage-",
+        )?;
+        parent.sync_all()?;
+        let claim = source
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(OsStr::from_bytes(claim_name.to_bytes()));
+        let staging = self.reanchor(&claim)?;
+        let identity = staging.root_identity()?;
+        if !identity.same_object(expected) {
+            return Err(ManagerError::structural(
+                "claimed staging directory identity mismatch",
+            ));
+        }
+        Ok((claim, staging, identity))
+    }
+
+    pub(super) fn remove_tree_if_identity(
+        &self,
+        relative: &Path,
+        expected: EntryStat,
+    ) -> Result<bool, ManagerError> {
+        let Some((parent, name)) = self.parent_and_name(relative)? else {
+            return Err(ManagerError::structural("cannot remove anchored root"));
+        };
+        let private =
+            match move_expected_to_private(parent.as_raw_fd(), &name, expected, ".lifesub-remove-")
+            {
+                Ok(private) => private,
+                Err(error) if is_not_found(&error) => return Ok(false),
+                Err(error) => return Err(error),
+            };
+        remove_verified_entry_at(parent.as_raw_fd(), &private, expected)?;
+        parent.sync_all()?;
+        Ok(true)
+    }
+
+    pub(super) fn publish_directory_noreplace(
+        &self,
+        source: &Path,
+        expected: EntryStat,
+        destination: &Path,
+    ) -> Result<(), ManagerError> {
+        let Some((source_parent, source_name)) = self.parent_and_name(source)? else {
+            return Err(ManagerError::structural("cannot publish anchored root"));
+        };
+        let claimed_name = move_expected_to_private(
+            source_parent.as_raw_fd(),
+            &source_name,
+            expected,
+            ".lifesub-publish-",
+        )?;
+        source_parent.sync_all()?;
+        let Some((destination_parent, destination_name)) = self.parent_and_name(destination)?
+        else {
+            return Err(ManagerError::structural("cannot publish to anchored root"));
+        };
+        if let Err(error) = rename_noreplace_cross(
+            source_parent.as_raw_fd(),
+            &claimed_name,
+            destination_parent.as_raw_fd(),
+            &destination_name,
+        ) {
+            if error.code() == "model_io_failed"
+                && stat_at(destination_parent.as_raw_fd(), &destination_name).is_ok()
+            {
+                return Err(ManagerError::new(
+                    "model_install_conflict",
+                    "immutable install directory already exists",
+                ));
+            }
+            return Err(error);
+        }
+        destination_parent.sync_all()?;
+        source_parent.sync_all()?;
+        Ok(())
+    }
+
+    pub(super) fn sync_dir(&self, relative: &Path) -> Result<(), ManagerError> {
         if let Some(dir) = self.open_dir(relative)? {
             dir.sync_all()?;
         }
@@ -305,6 +483,35 @@ impl AnchoredFs {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn set_before_install_stage_claim_for_test(hook: impl FnOnce() + 'static) {
+    BEFORE_INSTALL_STAGE_CLAIM.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_before_install_marker_publish_for_test(hook: impl FnOnce() + 'static) {
+    BEFORE_INSTALL_MARKER_PUBLISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_ensure_dir_sync_trace_for_test() {
+    ENSURE_DIR_SYNC_TRACE.with(|trace| trace.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn take_ensure_dir_sync_trace_for_test() -> Vec<String> {
+    ENSURE_DIR_SYNC_TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()))
+}
+
+fn trace_directory_sync(_path: &Path) {
+    #[cfg(test)]
+    ENSURE_DIR_SYNC_TRACE.with(|trace| {
+        trace
+            .borrow_mut()
+            .push(_path.to_string_lossy().into_owned());
+    });
+}
+
 impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
     fn anchored_fs(&self) -> Result<AnchoredFs, ManagerError> {
         self.storage
@@ -314,6 +521,15 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
                 root: storage.root.clone(),
             })
             .ok_or_else(|| ManagerError::structural("anchored data directory is missing"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ensure_anchored_directory_for_test(
+        &self,
+        relative: &Path,
+    ) -> Result<(), ManagerError> {
+        self.anchored_fs()?.ensure_dir(relative)?;
+        Ok(())
     }
 }
 
@@ -737,7 +953,7 @@ pub(super) fn validate_installation_anchored(
     Ok(())
 }
 
-fn installed_records_anchored(
+pub(super) fn installed_records_anchored(
     fs: &AnchoredFs,
     root: &Path,
 ) -> Result<Vec<MarkerInstalledFile>, ManagerError> {
@@ -781,7 +997,7 @@ fn installed_records_anchored(
     Ok(output)
 }
 
-fn validate_qwen_anchored(fs: &AnchoredFs, root: &Path) -> Result<(), ManagerError> {
+pub(super) fn validate_qwen_anchored(fs: &AnchoredFs, root: &Path) -> Result<(), ManagerError> {
     let config: serde_json::Value =
         serde_json::from_slice(&fs.read_regular(&root.join("config.json"))?)
             .map_err(|_| ManagerError::structural("invalid Qwen config"))?;
@@ -985,19 +1201,126 @@ fn remove_entry_at(parent: RawFd, name: &CStr) -> Result<(), ManagerError> {
     unlink_at(parent, &tombstone, libc::AT_REMOVEDIR)
 }
 
+fn move_expected_to_private(
+    parent: RawFd,
+    source: &CStr,
+    expected: EntryStat,
+    private_prefix: &str,
+) -> Result<CString, ManagerError> {
+    if !stat_at(parent, source)?.same_object(expected) {
+        return Err(ManagerError::structural(
+            "anchored entry identity changed before private move",
+        ));
+    }
+    #[cfg(test)]
+    BEFORE_INSTALL_STAGE_CLAIM.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+    let private = component_name(OsStr::new(&format!(
+        "{private_prefix}{}",
+        uuid::Uuid::new_v4().simple()
+    )))?;
+    rename_noreplace(parent, source, &private)?;
+    let actual = stat_at(parent, &private)?;
+    if actual.same_object(expected) {
+        return Ok(private);
+    }
+    match stat_at(parent, source) {
+        Err(error) if is_not_found(&error) => {
+            if rename_noreplace(parent, &private, source).is_ok() {
+                return Err(ManagerError::structural(
+                    "anchored entry identity changed before private move",
+                ));
+            }
+        }
+        Ok(_) | Err(_) => {}
+    }
+    Err(ManagerError::new(
+        "recovery_required",
+        "unexpected anchored entry retained under private recovery name",
+    ))
+}
+
+fn remove_verified_entry_at(
+    parent: RawFd,
+    name: &CStr,
+    expected: EntryStat,
+) -> Result<(), ManagerError> {
+    let actual = stat_at(parent, name)?;
+    if !actual.same_object(expected) {
+        return Err(ManagerError::new(
+            "recovery_required",
+            "private recovery entry identity changed before cleanup",
+        ));
+    }
+    if actual.is_file() {
+        return unlink_at(parent, name, 0);
+    }
+    if !actual.is_dir() {
+        return Err(ManagerError::structural(
+            "refusing to remove link or special private entry",
+        ));
+    }
+    let directory = open_dir_at(parent, name).map_err(map_unsafe_entry)?;
+    if !file_stat(directory.as_raw_fd())?.same_object(expected) {
+        return Err(ManagerError::new(
+            "recovery_required",
+            "private recovery directory identity changed before cleanup",
+        ));
+    }
+    for child in read_dir_names(&directory)? {
+        let child = component_name(&child)?;
+        let child_identity = stat_at(directory.as_raw_fd(), &child)?;
+        let private_child = move_expected_to_private(
+            directory.as_raw_fd(),
+            &child,
+            child_identity,
+            ".lifesub-remove-",
+        )?;
+        remove_verified_entry_at(directory.as_raw_fd(), &private_child, child_identity)?;
+    }
+    directory.sync_all()?;
+    drop(directory);
+    unlink_at(parent, name, libc::AT_REMOVEDIR)
+}
+
 fn rename_noreplace(parent: RawFd, source: &CStr, destination: &CStr) -> Result<(), ManagerError> {
+    rename_noreplace_cross(parent, source, parent, destination)
+}
+
+fn rename_noreplace_cross(
+    source_parent: RawFd,
+    source: &CStr,
+    destination_parent: RawFd,
+    destination: &CStr,
+) -> Result<(), ManagerError> {
     #[cfg(target_os = "macos")]
     let result = unsafe {
         libc::renameatx_np(
-            parent,
+            source_parent,
             source.as_ptr(),
-            parent,
+            destination_parent,
             destination.as_ptr(),
             libc::RENAME_EXCL,
         )
     };
-    #[cfg(not(target_os = "macos"))]
-    let result = unsafe { libc::renameat(parent, source.as_ptr(), parent, destination.as_ptr()) };
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            source_parent,
+            source.as_ptr(),
+            destination_parent,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        ) as i32
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    return Err(ManagerError::structural(
+        "atomic no-replace rename is unsupported on this platform",
+    ));
     if result != 0 {
         Err(io::Error::last_os_error().into())
     } else {
@@ -1077,7 +1400,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::*;
-    use super::{BEFORE_REMOVE_RENAME, recovery_code};
+    use super::{AnchoredFs, BEFORE_INSTALL_STAGE_CLAIM, BEFORE_REMOVE_RENAME, recovery_code};
 
     #[test]
     fn anchored_reconcile_stays_on_held_root_after_entry_swap() {
@@ -1192,6 +1515,43 @@ mod tests {
             b"replacement"
         );
         assert_eq!(fs::read(held.join("original")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn expected_identity_cleanup_restores_post_check_replacement_unchanged() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = TempDir::new().unwrap();
+        let original = root.path().join("owned");
+        let displaced = root.path().join("displaced");
+        fs::create_dir(&original).unwrap();
+        fs::write(original.join("owned"), b"owned").unwrap();
+        let storage = AnchoredFs::new(root.path().to_path_buf(), File::open(root.path()).unwrap());
+        let expected = storage.entry_stat(Path::new("owned")).unwrap();
+        let original_for_hook = original.clone();
+        let displaced_for_hook = displaced.clone();
+        let replacement_inode = std::rc::Rc::new(std::cell::Cell::new(0));
+        let replacement_inode_for_hook = replacement_inode.clone();
+        BEFORE_INSTALL_STAGE_CLAIM.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&original_for_hook, &displaced_for_hook).unwrap();
+                fs::create_dir(&original_for_hook).unwrap();
+                fs::write(original_for_hook.join("sentinel"), b"replacement").unwrap();
+                replacement_inode_for_hook.set(fs::metadata(&original_for_hook).unwrap().ino());
+            }));
+        });
+
+        let error = storage
+            .remove_tree_if_identity(Path::new("owned"), expected)
+            .unwrap_err();
+
+        assert_eq!(error.code(), "model_structural_incompatible");
+        assert_eq!(fs::read(original.join("sentinel")).unwrap(), b"replacement");
+        assert_eq!(
+            fs::metadata(&original).unwrap().ino(),
+            replacement_inode.get()
+        );
+        assert_eq!(fs::read(displaced.join("owned")).unwrap(), b"owned");
     }
 
     #[test]

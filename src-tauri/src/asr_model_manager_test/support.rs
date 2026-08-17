@@ -17,7 +17,8 @@ use crate::asr::model_manager::{
     DeviceRequirement, DownloadRequest, DownloadResponse, FullSherpaRuntimeIdentity, HttpTransport,
     InstallContract, InstallFault, InstallMode, ManagerError, ModelCatalog, ModelInstallPlan,
     ModelManager, QualificationPolicy, RequiredInstalledFile, ReqwestTransport, StoredInstallation,
-    checked_required_additional_free, extract_tar_bz2_safely, validate_required_inventory_for_test,
+    checked_required_additional_free, extract_tar_bz2_from_held_files_for_test,
+    extract_tar_bz2_safely, validate_required_inventory_for_test,
 };
 use crate::catalog::Catalog;
 use crate::service::CoreRuntime;

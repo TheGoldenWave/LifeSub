@@ -150,7 +150,7 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
         let i = match self.install_verified_download(p, id) {
             Ok(v) => v,
             Err(e) => {
-                if real_dir(&self.install_dir(p))? {
+                if self.storage.real_directory(&self.install_dir(p))? {
                     return self.recover_post_rename(p, id, e);
                 }
                 self.catalog
@@ -201,6 +201,9 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
     ) -> Result<StoredInstallation, ManagerError> {
         validate_component("download_id", id)?;
         validate_plan(p)?;
+        if let Some(fs) = self.storage.anchored_fs() {
+            return self.install_verified_anchored(fs.as_ref(), p, id);
+        }
         for a in &p.artifacts {
             let path = self
                 .download_dir(id)
@@ -319,6 +322,164 @@ impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
             .to_owned(),
             runtime_identity_json: runtime,
         })
+    }
+
+    fn install_verified_anchored(
+        &self,
+        fs: &anchored_reconcile::AnchoredFs,
+        p: &ModelInstallPlan,
+        id: &str,
+    ) -> Result<StoredInstallation, ManagerError> {
+        let mut parts = Vec::with_capacity(p.artifacts.len());
+        for artifact in &p.artifacts {
+            let nominal = self
+                .download_dir(id)
+                .join(format!("{}.part", artifact.artifact_id));
+            let checkpoint = self
+                .catalog
+                .checkpoint(id, &artifact.artifact_id)?
+                .ok_or_else(|| ManagerError::integrity("verified checkpoint missing"))?;
+            if checkpoint.source_identity != source_identity(artifact)
+                || checkpoint.expected_bytes != artifact.expected_bytes
+                || checkpoint.downloaded_bytes != artifact.expected_bytes
+                || checkpoint.temp_path != nominal
+                || checkpoint.verified_sha256.as_deref() != Some(&artifact.expected_sha256)
+                || checkpoint.state != "verified"
+            {
+                return Err(ManagerError::integrity(
+                    "verified artifact source identity mismatch",
+                ));
+            }
+            parts.push(self.storage.hold_verified_download_part(
+                &nominal,
+                artifact.expected_bytes,
+                &artifact.expected_sha256,
+            )?);
+        }
+        let staging =
+            PathBuf::from("staging").join(format!("{}-{}-{id}", p.model_id, p.manifest_version));
+        if fs.open_dir(&staging)?.is_some() {
+            fs.remove_tree(&staging)?;
+        }
+        fs.ensure_dir(&staging)?;
+        let staging_identity = fs.entry_stat(&staging)?;
+        let (staging_claim, staging_fs, staging_identity) =
+            fs.claim_directory(&staging, staging_identity)?;
+        #[cfg(test)]
+        if self.install_fault == Some(InstallFault::Assembly) {
+            fs.remove_tree_if_identity(&staging_claim, staging_identity)?;
+            return Err(ManagerError::new(
+                "model_install_failed",
+                "injected assembly failure",
+            ));
+        }
+        let result = (|| {
+            match &p.install_contract {
+                InstallContract::Direct { .. } => {
+                    for (artifact, part) in p.artifacts.iter().zip(parts.iter()) {
+                        let destination = safe_relative_path(&artifact.required_path)?;
+                        staging_fs
+                            .ensure_dir(destination.parent().unwrap_or_else(|| Path::new("")))?;
+                        let mut output = staging_fs.open_regular_create_new(&destination)?;
+                        part.copy_to(&mut output)?;
+                    }
+                }
+                InstallContract::Archive { .. } => {
+                    let archive = parts.first().ok_or_else(|| {
+                        ManagerError::integrity("verified archive artifact missing")
+                    })?;
+                    archive.extract_tar_bz2_to(&staging_fs, Path::new(""), &p.install_contract)?;
+                }
+            }
+            let files = anchored_reconcile::installed_records_anchored(&staging_fs, Path::new(""))?;
+            validate_inventory(p, &files)?;
+            match p.qualification_policy {
+                QualificationPolicy::StructuralWithPinnedRuntime => {
+                    if !matches!(
+                        (p.sherpa_runtime.as_ref(), self.observed_sherpa_runtime.as_ref()),
+                        (Some(expected), Some(actual)) if expected.matches(actual)
+                    ) {
+                        return Err(ManagerError::new(
+                            "model_runtime_identity_mismatch",
+                            "pinned sherpa identity missing",
+                        ));
+                    }
+                }
+                QualificationPolicy::RuntimeSmokeRequired => {
+                    anchored_reconcile::validate_qwen_anchored(&staging_fs, Path::new(""))?;
+                }
+            }
+            let runtime = p
+                .sherpa_runtime
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| ManagerError::structural(error.to_string()))?;
+            let marker = StructuralMarker::from_plan(p, runtime.clone(), files);
+            let marker_bytes = serde_json::to_vec_pretty(&marker)
+                .map_err(|error| ManagerError::structural(error.to_string()))?;
+            let marker_tmp = PathBuf::from(format!("{STRUCTURAL_MARKER}.tmp"));
+            staging_fs.write_new_synced(&marker_tmp, &marker_bytes)?;
+            staging_fs.rename_noreplace(&marker_tmp, Path::new(STRUCTURAL_MARKER))?;
+            staging_fs.sync_dir(Path::new(""))?;
+            let final_relative = self.storage.relative_install_path(&self.install_dir(p))?;
+            fs.ensure_dir(final_relative.parent().unwrap_or_else(|| Path::new("")))?;
+            #[cfg(test)]
+            if self.install_fault == Some(InstallFault::Rename) {
+                return Err(ManagerError::new(
+                    "model_install_failed",
+                    "injected rename failure",
+                ));
+            }
+            if fs.open_dir(&final_relative)?.is_some() {
+                return Err(ManagerError::new(
+                    "model_install_conflict",
+                    "immutable install directory already exists",
+                ));
+            }
+            fs.publish_directory_noreplace(&staging_claim, staging_identity, &final_relative)?;
+            Ok(StoredInstallation {
+                model_id: p.model_id.clone(),
+                provider: p.provider.clone(),
+                manifest_version: p.manifest_version.clone(),
+                bundle_identity: p.bundle_identity.clone(),
+                install_dir: self.install_dir(p),
+                state: match p.qualification_policy {
+                    QualificationPolicy::StructuralWithPinnedRuntime => "runtime_qualified",
+                    QualificationPolicy::RuntimeSmokeRequired => "installed_unqualified",
+                }
+                .to_owned(),
+                runtime_identity_json: runtime,
+            })
+        })();
+        if result.is_err()
+            && fs
+                .entry_stat(&staging_claim)
+                .is_ok_and(|actual| actual.same_object(staging_identity))
+            && !result
+                .as_ref()
+                .is_err_and(|error| error.code() == "model_install_conflict")
+        {
+            if result
+                .as_ref()
+                .is_err_and(|error| error.code() == "model_runtime_identity_mismatch")
+            {
+                fs.ensure_dir(Path::new("quarantine"))?;
+                fs.rename(
+                    &staging_claim,
+                    &PathBuf::from("quarantine").join(format!(
+                        "{}-{}-runtime-identity-mismatch-{}",
+                        p.model_id,
+                        p.manifest_version,
+                        uuid::Uuid::new_v4().simple()
+                    )),
+                )?;
+                fs.sync_dir(Path::new("quarantine"))?;
+            } else {
+                fs.remove_tree_if_identity(&staging_claim, staging_identity)?;
+            }
+        }
+        result
     }
     pub(super) fn preflight_disk(
         &self,

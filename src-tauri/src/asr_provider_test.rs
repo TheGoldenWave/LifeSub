@@ -632,24 +632,114 @@ fn qwen06_tokenizer_uses_a_private_alias_directory_backed_by_held_file_fds() {
 }
 
 #[test]
-fn qwen17_verified_factory_keeps_nominal_install_dir_until_candle_fd_support_exists() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut provider_request = request(QWEN17);
-    provider_request.install_dir = directory.path().to_path_buf();
-    let native = crate::asr::qwen3_asr::native_request(
-        &provider_request,
-        crate::asr::manifest::model_registry()
-            .model(QWEN17)
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(native.install_dir, directory.path());
-    assert!(
-        native
-            .required_files
-            .iter()
-            .all(|path| path.starts_with(directory.path()))
+fn qwen17_candle_load_uses_one_private_alias_backed_by_all_held_file_fds() {
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_test_lease(QWEN17, &nominal_root);
+    let backend = FakeBackendFactory::default();
+
+    let provider = ProviderFactory::new(backend.clone())
+        .create_fd_anchored_for_test(lease, ProviderSelection::for_test(QWEN17))
+        .unwrap();
+    let native = backend.constructed.lock().unwrap()[0].clone();
+
+    assert_ne!(native.install_dir, nominal_root);
+    assert_eq!(
+        fs::metadata(&native.install_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
     );
+    for path in &native.required_files {
+        assert!(path.starts_with(&native.install_dir));
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert_eq!(
+            fs::read(path).unwrap(),
+            format!("held:{QWEN17}:{name}").as_bytes()
+        );
+    }
+
+    let alias = native.install_dir.clone();
+    drop(provider);
+    assert!(!alias.exists());
+}
+
+#[test]
+fn qwen17_any_required_file_swap_during_candle_construction_fails_closed() {
+    #[derive(Clone)]
+    struct SwappingFactory {
+        target: PathBuf,
+    }
+
+    impl NativeBackendFactory for SwappingFactory {
+        fn create(&self, request: &NativeRequest) -> Result<Box<dyn NativeBackend>, ProviderError> {
+            assert!(
+                request
+                    .required_files
+                    .iter()
+                    .all(|path| fs::read(path).unwrap().starts_with(b"held:"))
+            );
+            fs::rename(&self.target, self.target.with_extension("held")).unwrap();
+            fs::write(&self.target, b"replacement").unwrap();
+            Ok(Box::new(FakeBackend {
+                calls: Arc::new(Mutex::new(0)),
+                transcribe_failure: None,
+                cancel_during_call: None,
+            }))
+        }
+    }
+
+    let manifest = crate::asr::manifest::model_registry()
+        .model(QWEN17)
+        .unwrap();
+    for required in manifest.bundle.required_paths {
+        let parent = tempfile::tempdir().unwrap();
+        let nominal_root = parent.path().join("data");
+        fs::create_dir_all(&nominal_root).unwrap();
+        let lease = anchored_test_lease(QWEN17, &nominal_root);
+        let target = nominal_root
+            .join("models/asr/test/model/bundle")
+            .join(required);
+
+        let error = ProviderFactory::new(SwappingFactory { target })
+            .create_fd_anchored_for_test(lease, ProviderSelection::for_test(QWEN17))
+            .unwrap_err();
+
+        assert_eq!(error.code(), AsrErrorCode::ModelIntegrityFailed);
+    }
+}
+
+#[test]
+fn qwen17_root_swap_never_redirects_candle_to_replacement_files() {
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    let held_root = parent.path().join("held-data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_test_lease(QWEN17, &nominal_root);
+    fs::rename(&nominal_root, &held_root).unwrap();
+    let replacement_dir = nominal_root.join("models/asr/test/model/bundle");
+    fs::create_dir_all(&replacement_dir).unwrap();
+    let manifest = crate::asr::manifest::model_registry()
+        .model(QWEN17)
+        .unwrap();
+    for required in manifest.bundle.required_paths {
+        fs::write(replacement_dir.join(required), b"replacement").unwrap();
+    }
+    let backend = FakeBackendFactory::default();
+
+    let _provider = ProviderFactory::new(backend.clone())
+        .create_fd_anchored_for_test(lease, ProviderSelection::for_test(QWEN17))
+        .unwrap();
+    let native = backend.constructed.lock().unwrap()[0].clone();
+
+    assert!(native.required_files.iter().all(|path| {
+        let bytes = fs::read(path).unwrap();
+        bytes.starts_with(b"held:")
+    }));
 }
 
 #[test]

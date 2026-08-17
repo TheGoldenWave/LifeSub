@@ -19,6 +19,8 @@ const QWEN06_TOKENIZER_FILES: &[&str] = &[
     "tokenizer/tokenizer_config.json",
     "tokenizer/vocab.json",
 ];
+const QWEN17_MODEL_ID: &str = "qwen3-asr-1.7b";
+const QWEN17_ALIAS_PREFIX: &str = "lifesub-qwen17-model-XXXXXX";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendKind {
@@ -530,12 +532,9 @@ struct PrivateAliasDirectory {
 }
 
 impl PrivateAliasDirectory {
-    fn for_qwen06_tokenizer(
-        installation: &ExecutableInstallationLease,
-        execution_files: &mut Vec<File>,
-    ) -> Result<Self, ProviderError> {
+    fn new(prefix: &str) -> Result<Self, ProviderError> {
         let mut template = std::env::temp_dir()
-            .join("lifesub-qwen06-tokenizer-XXXXXX")
+            .join(prefix)
             .as_os_str()
             .as_bytes()
             .to_vec();
@@ -549,7 +548,7 @@ impl PrivateAliasDirectory {
         }
         let path = PathBuf::from(
             CString::from_vec_with_nul(template)
-                .map_err(|_| ProviderError::invalid("invalid tokenizer alias path"))?
+                .map_err(|_| ProviderError::invalid("invalid execution alias path"))?
                 .to_string_lossy()
                 .into_owned(),
         );
@@ -560,6 +559,14 @@ impl PrivateAliasDirectory {
                 error.to_string(),
             )
         })?;
+        Ok(alias)
+    }
+
+    fn for_qwen06_tokenizer(
+        installation: &ExecutableInstallationLease,
+        execution_files: &mut Vec<File>,
+    ) -> Result<Self, ProviderError> {
+        let alias = Self::new("lifesub-qwen06-tokenizer-XXXXXX")?;
         for relative in QWEN06_TOKENIZER_FILES {
             let (file, fd_path) = installation
                 .open_execution_path(std::path::Path::new(relative))
@@ -567,6 +574,43 @@ impl PrivateAliasDirectory {
             let name = std::path::Path::new(relative)
                 .file_name()
                 .ok_or_else(|| ProviderError::invalid("invalid tokenizer file name"))?;
+            symlink(&fd_path, alias.path.join(name)).map_err(|error| {
+                ProviderError::new(
+                    AsrErrorCode::ProviderInitializationFailed,
+                    error.to_string(),
+                )
+            })?;
+            execution_files.push(file);
+        }
+        Ok(alias)
+    }
+
+    fn for_qwen17_model(
+        installation: &ExecutableInstallationLease,
+        required_files: &[PathBuf],
+        execution_files: &mut Vec<File>,
+    ) -> Result<Self, ProviderError> {
+        let alias = Self::new(QWEN17_ALIAS_PREFIX)?;
+        for nominal in required_files {
+            let relative = nominal
+                .strip_prefix(installation.install_dir())
+                .map_err(|_| {
+                    ProviderError::new(
+                        AsrErrorCode::ModelIntegrityFailed,
+                        "Qwen execution path escaped the verified installation",
+                    )
+                })?;
+            let name = relative.file_name().ok_or_else(|| {
+                ProviderError::invalid("Qwen required file has no fixed file name")
+            })?;
+            if relative.parent() != Some(std::path::Path::new("")) {
+                return Err(ProviderError::invalid(
+                    "Qwen required files must remain at the model root",
+                ));
+            }
+            let (file, fd_path) = installation
+                .open_execution_path(relative)
+                .map_err(provider_storage_error)?;
             symlink(&fd_path, alias.path.join(name)).map_err(|error| {
                 ProviderError::new(
                     AsrErrorCode::ProviderInitializationFailed,
@@ -668,6 +712,24 @@ impl<F: NativeBackendFactory> ProviderFactory<F> {
         installation: ExecutableInstallationLease,
         selection: ProviderSelection,
     ) -> Result<Provider, ProviderError> {
+        self.create_verified_inner(installation, selection, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_fd_anchored_for_test(
+        &self,
+        installation: ExecutableInstallationLease,
+        selection: ProviderSelection,
+    ) -> Result<Provider, ProviderError> {
+        self.create_verified_inner(installation, selection, false)
+    }
+
+    fn create_verified_inner(
+        &self,
+        installation: ExecutableInstallationLease,
+        selection: ProviderSelection,
+        verify_qwen_qualification: bool,
+    ) -> Result<Provider, ProviderError> {
         let plan = installation.plan();
         let manifest = model_registry()
             .model(&plan.model_id)
@@ -678,7 +740,9 @@ impl<F: NativeBackendFactory> ProviderFactory<F> {
             "cpu"
         };
         let device = DeviceIdentity::from_profile(installation.device(), backend);
-        if matches!(manifest.runtime, RuntimeRequirement::QwenCandleMetal { .. }) {
+        if verify_qwen_qualification
+            && matches!(manifest.runtime, RuntimeRequirement::QwenCandleMetal { .. })
+        {
             let current = DeviceIdentity::current();
             if current != device || !current.is_qwen17_device() {
                 return Err(ProviderError::new(
@@ -715,11 +779,6 @@ impl<F: NativeBackendFactory> ProviderFactory<F> {
                 device,
             },
         };
-        if matches!(manifest.runtime, RuntimeRequirement::QwenCandleMetal { .. }) {
-            let mut provider = self.create(request)?;
-            provider.execution_lease = Some(installation);
-            return Ok(provider);
-        }
         installation
             .revalidate_execution_boundary()
             .map_err(provider_storage_error)?;
@@ -731,37 +790,57 @@ impl<F: NativeBackendFactory> ProviderFactory<F> {
         let mut native = native_request(&request, manifest)?;
         let mut execution_files = Vec::with_capacity(native.required_files.len());
         let mut execution_aliases = Vec::new();
-        let execution_paths = native
-            .required_files
-            .iter()
-            .enumerate()
-            .map(|(index, nominal)| {
-                if manifest.id == QWEN06_MODEL_ID && index == 3 {
-                    let alias = PrivateAliasDirectory::for_qwen06_tokenizer(
-                        &installation,
-                        &mut execution_files,
-                    )?;
-                    let path = alias.path.clone();
-                    execution_aliases.push(alias);
-                    return Ok(path);
-                }
-                let relative = nominal
-                    .strip_prefix(installation.install_dir())
-                    .map_err(|_| {
-                        ProviderError::new(
-                            AsrErrorCode::ModelIntegrityFailed,
-                            "native execution path escaped the verified installation",
-                        )
-                    })?;
-                let (file, path) = installation
-                    .open_execution_path(relative)
-                    .map_err(provider_storage_error)?;
-                execution_files.push(file);
-                Ok(path)
-            })
-            .collect::<Result<Vec<_>, ProviderError>>()?;
-        native.install_dir = installation.install_dir().to_path_buf();
-        native.required_files = execution_paths;
+        if manifest.id == QWEN17_MODEL_ID {
+            let alias = PrivateAliasDirectory::for_qwen17_model(
+                &installation,
+                &native.required_files,
+                &mut execution_files,
+            )?;
+            native.install_dir = alias.path.clone();
+            native.required_files = native
+                .required_files
+                .iter()
+                .map(|path| {
+                    alias
+                        .path
+                        .join(path.file_name().expect("validated Qwen file name"))
+                })
+                .collect();
+            execution_aliases.push(alias);
+        } else {
+            let execution_paths = native
+                .required_files
+                .iter()
+                .enumerate()
+                .map(|(index, nominal)| {
+                    if manifest.id == QWEN06_MODEL_ID && index == 3 {
+                        let alias = PrivateAliasDirectory::for_qwen06_tokenizer(
+                            &installation,
+                            &mut execution_files,
+                        )?;
+                        let path = alias.path.clone();
+                        execution_aliases.push(alias);
+                        return Ok(path);
+                    }
+                    let relative =
+                        nominal
+                            .strip_prefix(installation.install_dir())
+                            .map_err(|_| {
+                                ProviderError::new(
+                                    AsrErrorCode::ModelIntegrityFailed,
+                                    "native execution path escaped the verified installation",
+                                )
+                            })?;
+                    let (file, path) = installation
+                        .open_execution_path(relative)
+                        .map_err(provider_storage_error)?;
+                    execution_files.push(file);
+                    Ok(path)
+                })
+                .collect::<Result<Vec<_>, ProviderError>>()?;
+            native.install_dir = installation.install_dir().to_path_buf();
+            native.required_files = execution_paths;
+        }
         let backend = self
             .backends
             .create(&native)

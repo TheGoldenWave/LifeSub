@@ -1,4 +1,16 @@
+import { useState } from 'react'
 import { Modal } from './Modal'
+import { RecordingSettings } from './RecordingSettings'
+import { AsrSettings } from './AsrSettings'
+import { ModelManager } from './ModelManager'
+import { AboutTab } from './AboutTab'
+
+const TABS = [
+  { id: 'recording', label: '录音设置' },
+  { id: 'asr', label: 'ASR 设置' },
+  { id: 'models', label: '模型' },
+  { id: 'about', label: '关于' },
+]
 
 interface SettingsModalProps {
   open: boolean
@@ -6,19 +18,27 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
+  const [activeTab, setActiveTab] = useState('recording')
+
   return (
     <Modal open={open} onClose={onClose} title="设置">
       <div className="settings-layout">
         <nav className="settings-nav">
-          <button className="settings-nav__item settings-nav__item--active">录音设置</button>
-          <button className="settings-nav__item">ASR 设置</button>
-          <button className="settings-nav__item">模型</button>
-          <button className="settings-nav__item">关于</button>
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              className={`settings-nav__item ${tab.id === activeTab ? 'settings-nav__item--active' : ''}`}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              {tab.label}
+            </button>
+          ))}
         </nav>
         <div className="settings-content">
-          <span className="eyebrow">RECORDING</span>
-          <h1>录音设置</h1>
-          <p>设置将在后续 Task 中实现完整交互。</p>
+          {activeTab === 'recording' && <RecordingSettings />}
+          {activeTab === 'asr' && <AsrSettings />}
+          {activeTab === 'models' && <ModelManager />}
+          {activeTab === 'about' && <AboutTab />}
         </div>
       </div>
     </Modal>

@@ -280,3 +280,151 @@ impl<'de> Deserialize<'de> for TranscriptTimeRange {
             .map_err(|_| D::Error::custom("invalid transcript time range"))
     }
 }
+
+// ── New types for Task 13.5 ──────────────────────────────────────────────
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CaptureNote {
+    pub id: String,
+    pub session_id: String,
+    pub content: String,
+    pub timestamp_ms: i64,
+    pub tag: String,
+    pub segment_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DictionaryCategory {
+    pub id: String,
+    pub name: String,
+    pub scope: String,
+    pub entry_count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DictionaryEntry {
+    pub id: String,
+    pub category_id: String,
+    pub term: String,
+    pub pinyin: String,
+    pub aliases: String,
+    pub note: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Voiceprint {
+    pub id: String,
+    pub name: String,
+    pub embedding_path: String,
+    pub dictionary_entry_id: Option<String>,
+    pub sample_count: i64,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StatsSnapshot {
+    pub hourly_slots: Vec<HourlySlot>,
+    pub week_sessions: i64,
+    pub week_minutes: i64,
+    pub month_sessions: i64,
+    pub month_minutes: i64,
+    pub total_sessions: i64,
+    pub total_minutes: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HourlySlot {
+    pub hour: i64,
+    pub minutes: i64,
+    pub session_id: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AsrConfig {
+    pub provider: String,
+    pub language: String,
+    pub auto_transcribe: bool,
+    pub threads: i64,
+    pub vad_enabled: bool,
+    pub vad_min_speech_ms: i64,
+    pub vad_silence_ms: i64,
+    pub itn_enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecordingConfig {
+    pub capture_mode: String,
+    pub im_detection_enabled: bool,
+    pub im_apps: Vec<String>,
+    pub detection_delay_secs: i64,
+    pub recovery_delay_secs: i64,
+    pub sample_rate: i64,
+    pub storage_path: String,
+}
+
+impl CaptureNote {
+    pub fn new(
+        session_id: String,
+        content: String,
+        timestamp_ms: i64,
+        tag: String,
+        segment_id: Option<String>,
+    ) -> Self {
+        Self {
+            id: format!("note_{}", uuid::Uuid::new_v4().simple()),
+            session_id,
+            content,
+            timestamp_ms,
+            tag,
+            segment_id,
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+impl DictionaryCategory {
+    pub fn new(name: String, scope: String) -> Self {
+        Self {
+            id: format!("dcat_{}", uuid::Uuid::new_v4().simple()),
+            name,
+            scope,
+            entry_count: 0,
+        }
+    }
+}
+
+impl DictionaryEntry {
+    pub fn new(
+        category_id: String,
+        term: String,
+        pinyin: String,
+        aliases: String,
+        note: String,
+    ) -> Self {
+        Self {
+            id: format!("dent_{}", uuid::Uuid::new_v4().simple()),
+            category_id,
+            term,
+            pinyin,
+            aliases,
+            note,
+            enabled: true,
+        }
+    }
+}
+
+impl Voiceprint {
+    pub fn new(name: String, embedding_path: String, dictionary_entry_id: Option<String>) -> Self {
+        Self {
+            id: format!("vp_{}", uuid::Uuid::new_v4().simple()),
+            name,
+            embedding_path,
+            dictionary_entry_id,
+            sample_count: 1,
+            updated_at: Utc::now().to_rfc3339(),
+        }
+    }
+}

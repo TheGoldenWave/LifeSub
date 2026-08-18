@@ -5,7 +5,7 @@ fn creates_complete_v3_schema_for_fresh_catalog() {
     let mut connection = Connection::open_in_memory().unwrap();
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 4);
+    assert_eq!(user_version(&connection), 5);
     for table in [
         "asr_settings",
         "model_installations",

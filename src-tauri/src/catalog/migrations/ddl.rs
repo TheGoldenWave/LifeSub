@@ -1,4 +1,4 @@
-pub(super) const CURRENT_VERSION: i64 = 4;
+pub(super) const CURRENT_VERSION: i64 = 5;
 pub(super) const FTS_TABLE: &str = "segment_search";
 pub(super) const FTS_SHADOWS: [&str; 5] = [
     "segment_search_config",
@@ -57,6 +57,29 @@ pub(super) const V4_TABLES: [&str; 15] = [
     "segments",
     "sessions",
     "tool_requests",
+];
+
+pub(super) const V5_TABLES: [&str; 20] = [
+    "asr_jobs",
+    "asr_settings",
+    "chunks",
+    "dictionary_categories",
+    "dictionary_entries",
+    "model_download_artifacts",
+    "model_downloads",
+    "model_installations",
+    "notes",
+    "open_intent_ledger",
+    "operations",
+    "provider_receipts",
+    "revision_receipts",
+    "revisions",
+    "segment_search",
+    "segments",
+    "sessions",
+    "settings",
+    "tool_requests",
+    "voiceprints",
 ];
 
 pub(super) const LEGACY_SCHEMA: &str = "
@@ -207,5 +230,50 @@ CREATE TABLE open_intent_ledger (
   uncertain_at TEXT,
   diagnostic_id TEXT,
   created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);";
+
+pub(super) const V5_SCHEMA: &str = "
+CREATE TABLE notes (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  content TEXT NOT NULL,
+  timestamp_ms INTEGER NOT NULL,
+  tag TEXT NOT NULL,
+  segment_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX notes_session ON notes(session_id, timestamp_ms);
+
+CREATE TABLE dictionary_categories (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  entry_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE dictionary_entries (
+  id TEXT PRIMARY KEY,
+  category_id TEXT NOT NULL REFERENCES dictionary_categories(id) ON DELETE CASCADE,
+  term TEXT NOT NULL,
+  pinyin TEXT NOT NULL DEFAULT '',
+  aliases TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL CHECK(enabled IN (0, 1))
+);
+CREATE INDEX dictionary_entries_category ON dictionary_entries(category_id);
+
+CREATE TABLE voiceprints (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  embedding_path TEXT NOT NULL,
+  dictionary_entry_id TEXT REFERENCES dictionary_entries(id),
+  sample_count INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE settings (
+  key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );";

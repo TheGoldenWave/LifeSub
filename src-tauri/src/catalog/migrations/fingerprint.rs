@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::ddl::{
     ASR_SCHEMA, CURRENT_VERSION, FRESH_BASE_SCHEMA, FTS_SHADOW_SCHEMA, FTS_SHADOWS, FTS_TABLE,
     LEGACY_SCHEMA, MODEL_MANAGER_V3_SCHEMA, TOOL_API_V4_SCHEMA, V1_TABLES, V2_TABLES, V3_TABLES,
-    V4_TABLES,
+    V4_TABLES, V5_SCHEMA, V5_TABLES,
 };
 use super::{SchemaKind, migration_error};
 
@@ -24,8 +24,10 @@ pub(super) fn classify_locked(connection: &Connection) -> rusqlite::Result<Schem
         2 => Err(migration_error("corrupt v2 catalog schema")),
         3 if is_v3(connection)? => Ok(SchemaKind::CurrentV3),
         3 => Err(migration_error("corrupt v3 catalog schema")),
-        CURRENT_VERSION if is_v4(connection)? => Ok(SchemaKind::CurrentV4),
-        CURRENT_VERSION => Err(migration_error("corrupt v4 catalog schema")),
+        4 if is_v4(connection)? => Ok(SchemaKind::CurrentV4),
+        4 => Err(migration_error("corrupt v4 catalog schema")),
+        CURRENT_VERSION if is_v5(connection)? => Ok(SchemaKind::CurrentV5),
+        CURRENT_VERSION => Err(migration_error("corrupt v5 catalog schema")),
         other => Err(migration_error(&format!(
             "incompatible catalog version {other}"
         ))),
@@ -207,6 +209,93 @@ pub(super) fn is_v4(connection: &Connection) -> rusqlite::Result<bool> {
         (MODEL_MANAGER_V3_SCHEMA, "model_download_artifacts_state"),
         (TOOL_API_V4_SCHEMA, "operations_principal"),
         (TOOL_API_V4_SCHEMA, "tool_requests_operation"),
+    ] {
+        let expected = statement_named(schema, index)?;
+        let Some(actual) = schema_sql_optional(connection, index)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(super) fn is_v5(connection: &Connection) -> rusqlite::Result<bool> {
+    let expected_indexes = names(&[
+        "asr_jobs_claimable",
+        "asr_jobs_one_active_fingerprint",
+        "dictionary_entries_category",
+        "model_download_artifacts_state",
+        "model_downloads_one_active_model",
+        "notes_session",
+        "operations_principal",
+        "tool_requests_operation",
+    ]);
+    if all_tables(connection)? != table_names_with_fts_shadows(&V5_TABLES)
+        || !fts_is_trigram(connection)?
+        || !fts_shadows_are_exact(connection)?
+        || named_indexes(connection)? != expected_indexes
+        || !auxiliary_objects(connection)?.is_empty()
+        || !base_tables_are_exact(connection)?
+    {
+        return Ok(false);
+    }
+    for table in [
+        "asr_settings",
+        "model_downloads",
+        "asr_jobs",
+        "provider_receipts",
+        "revision_receipts",
+    ] {
+        let expected = statement_named(ASR_SCHEMA, table)?;
+        if normalize_sql(&schema_sql(connection, table)?) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for table in ["model_installations", "model_download_artifacts"] {
+        let expected = statement_named(MODEL_MANAGER_V3_SCHEMA, table)?;
+        if normalize_sql(&schema_sql(connection, table)?) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for table in ["tool_requests", "operations", "open_intent_ledger"] {
+        let expected = statement_named(TOOL_API_V4_SCHEMA, table)?;
+        if normalize_sql(&schema_sql(connection, table)?) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for table in [
+        "notes",
+        "dictionary_categories",
+        "dictionary_entries",
+        "voiceprints",
+        "settings",
+    ] {
+        let expected = statement_named(V5_SCHEMA, table)?;
+        if normalize_sql(&schema_sql(connection, table)?) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for index in [
+        "model_downloads_one_active_model",
+        "asr_jobs_one_active_fingerprint",
+        "asr_jobs_claimable",
+    ] {
+        let expected = statement_named(ASR_SCHEMA, index)?;
+        let Some(actual) = schema_sql_optional(connection, index)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for (schema, index) in [
+        (MODEL_MANAGER_V3_SCHEMA, "model_download_artifacts_state"),
+        (TOOL_API_V4_SCHEMA, "operations_principal"),
+        (TOOL_API_V4_SCHEMA, "tool_requests_operation"),
+        (V5_SCHEMA, "notes_session"),
+        (V5_SCHEMA, "dictionary_entries_category"),
     ] {
         let expected = statement_named(schema, index)?;
         let Some(actual) = schema_sql_optional(connection, index)? else {

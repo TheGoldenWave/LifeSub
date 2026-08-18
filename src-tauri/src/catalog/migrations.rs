@@ -4,9 +4,9 @@ use rusqlite::{Connection, Error, TransactionBehavior, ffi};
 
 use self::ddl::{
     ASR_SCHEMA, CURRENT_VERSION, FRESH_BASE_SCHEMA, LEGACY_ALTERS, MODEL_MANAGER_V3_SCHEMA,
-    TOOL_API_V4_SCHEMA,
+    TOOL_API_V4_SCHEMA, V5_SCHEMA,
 };
-use self::fingerprint::{classify_locked, is_v2, is_v3, is_v4};
+use self::fingerprint::{classify_locked, is_v2, is_v3, is_v4, is_v5};
 
 mod ddl;
 mod fingerprint;
@@ -20,6 +20,7 @@ pub(crate) enum SchemaKind {
     CurrentV2,
     CurrentV3,
     CurrentV4,
+    CurrentV5,
     Unknown,
 }
 
@@ -69,19 +70,19 @@ where
     let kind = classify_locked(&transaction)?;
     classification_hook()?;
     match kind {
-        SchemaKind::CurrentV4 => return transaction.commit(),
+        SchemaKind::CurrentV5 => return transaction.commit(),
         SchemaKind::Unknown => return Err(migration_error("unknown or corrupt catalog schema")),
         SchemaKind::Fresh
         | SchemaKind::LegacyV1
         | SchemaKind::CurrentV2
-        | SchemaKind::CurrentV3 => {}
+        | SchemaKind::CurrentV3
+        | SchemaKind::CurrentV4 => {}
     }
     match kind {
         SchemaKind::Fresh => transaction.execute_batch(FRESH_BASE_SCHEMA)?,
         SchemaKind::LegacyV1 => transaction.execute_batch(LEGACY_ALTERS)?,
-        SchemaKind::CurrentV2 => {}
-        SchemaKind::CurrentV3 => {}
-        SchemaKind::CurrentV4 | SchemaKind::Unknown => unreachable!(),
+        SchemaKind::CurrentV2 | SchemaKind::CurrentV3 | SchemaKind::CurrentV4 => {}
+        SchemaKind::CurrentV5 | SchemaKind::Unknown => unreachable!(),
     }
     if matches!(kind, SchemaKind::Fresh | SchemaKind::LegacyV1) {
         transaction.execute_batch(ASR_SCHEMA)?;
@@ -115,6 +116,21 @@ where
         if !is_v4(&transaction)? {
             return Err(migration_error(
                 "migration produced invalid v4 catalog schema",
+            ));
+        }
+    }
+    if matches!(
+        kind,
+        SchemaKind::Fresh
+            | SchemaKind::LegacyV1
+            | SchemaKind::CurrentV2
+            | SchemaKind::CurrentV3
+            | SchemaKind::CurrentV4
+    ) {
+        transaction.execute_batch(V5_SCHEMA)?;
+        if !is_v5(&transaction)? {
+            return Err(migration_error(
+                "migration produced invalid v5 catalog schema",
             ));
         }
     }

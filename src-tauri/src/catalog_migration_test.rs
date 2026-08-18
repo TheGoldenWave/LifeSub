@@ -88,7 +88,7 @@ fn fresh_catalog_uses_v3_model_install_contract() {
 
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 4);
+    assert_eq!(user_version(&connection), 5);
     assert_columns(
         &connection,
         "model_download_artifacts",
@@ -138,7 +138,7 @@ fn migrates_immutable_v2_without_blind_runtime_qualification() {
 
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 4);
+    assert_eq!(user_version(&connection), 5);
     let state: String = connection
         .query_row(
             "SELECT state FROM model_installations WHERE model_id = 'legacy-ready-model'",
@@ -149,27 +149,33 @@ fn migrates_immutable_v2_without_blind_runtime_qualification() {
     assert_eq!(state, "installed_unqualified");
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV4
+        SchemaKind::CurrentV5
     );
 }
 
 #[test]
-fn immutable_v3_fixture_reopens_idempotently() {
+fn immutable_v4_fixture_upgrades_to_v5_and_reopens_idempotently() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("catalog.sqlite3");
     fs::copy(V4_FIXTURE, &path).unwrap();
-    let before = fs::read(&path).unwrap();
 
     let mut connection = Connection::open(&path).unwrap();
     migrations::migrate(&mut connection).unwrap();
-    assert_eq!(user_version(&connection), 4);
+    assert_eq!(user_version(&connection), 5);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV4
+        SchemaKind::CurrentV5
     );
     drop(connection);
 
-    assert_eq!(fs::read(path).unwrap(), before);
+    // V4→V5 migration changes the file, so reopen and verify it stays V5
+    let mut reopened = Connection::open(&path).unwrap();
+    migrations::migrate(&mut reopened).unwrap();
+    assert_eq!(user_version(&reopened), 5);
+    assert_eq!(
+        migrations::classify(&mut reopened).unwrap(),
+        SchemaKind::CurrentV5
+    );
 }
 
 #[test]
@@ -220,11 +226,11 @@ fn task9_reuses_v2_job_schema_without_migration_or_version_drift() {
 
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 4);
+    assert_eq!(user_version(&connection), 5);
     assert_eq!(schema_sql(&connection, "asr_jobs"), job_sql_before);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV4
+        SchemaKind::CurrentV5
     );
 }
 

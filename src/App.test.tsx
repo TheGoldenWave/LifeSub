@@ -3,53 +3,66 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import App from './App'
 
-describe('LifeSub desktop experience', () => {
-  it('moves a capture session through recording controls', async () => {
-    const user = userEvent.setup()
+describe('LifeSub navigation', () => {
+  it('renders sidebar with all navigation items', () => {
     render(<App />)
-
-    await user.click(screen.getByRole('button', { name: '开始记录' }))
-    expect(screen.getByText('正在记录')).toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: '暂停' }))
-    expect(screen.getByText('已暂停')).toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: '继续' }))
-    await user.click(screen.getByRole('button', { name: '停止' }))
-    expect(screen.getByText('记录已封存')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '录音' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '时间线' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '导入音频' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '词典' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '设置' })).toBeInTheDocument()
   })
 
-  it('filters transcript evidence by keyword', async () => {
-    const user = userEvent.setup()
+  it('defaults to live capture page', () => {
     render(<App />)
-
-    await user.type(screen.getByRole('searchbox', { name: '搜索转写' }), '证据链')
-
-    expect(screen.getByText(/证据链必须保留原始转写/)).toBeInTheDocument()
-    expect(screen.queryByText(/先确认首版范围/)).not.toBeInTheDocument()
+    expect(screen.getByText('实时录音与转写')).toBeInTheDocument()
   })
 
-  it('creates a manual revision without hiding the original', async () => {
+  it('switches pages via sidebar', async () => {
     const user = userEvent.setup()
     render(<App />)
-
-    await user.click(screen.getByRole('button', { name: '创建修订' }))
-    await user.clear(screen.getByRole('textbox', { name: '修订文本' }))
-    await user.type(screen.getByRole('textbox', { name: '修订文本' }), '首版重点是可靠、可定位的声音证据。')
-    await user.click(screen.getByRole('button', { name: '保存修订' }))
-
-    expect(screen.getAllByText('人工修订 · r2')).toHaveLength(2)
-    expect(screen.getByRole('button', { name: '查看原始 r1' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '时间线' }))
+    expect(screen.getAllByText('LifeSub 首版范围讨论').length).toBeGreaterThanOrEqual(1)
   })
 
-  it('shows local-first provider and privacy settings', async () => {
+  it('navigates to dictionary page', async () => {
     const user = userEvent.setup()
     render(<App />)
+    await user.click(screen.getByRole('button', { name: '词典' }))
+    expect(screen.getByText('常用词库 · ASR 辅助修正')).toBeInTheDocument()
+  })
 
+  it('opens settings modal', async () => {
+    const user = userEvent.setup()
+    render(<App />)
     await user.click(screen.getByRole('button', { name: '设置' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getAllByText('录音设置').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('ASR 设置')).toBeInTheDocument()
+  })
 
-    expect(screen.getByRole('heading', { name: '设置' })).toBeInTheDocument()
-    expect(screen.getByText('本地演示 ASR')).toBeInTheDocument()
-    expect(screen.getByText('云端处理默认关闭')).toBeInTheDocument()
+  it('closes settings modal on Esc', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(screen.getByRole('button', { name: '设置' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('closes settings modal on overlay click', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(screen.getByRole('button', { name: '设置' }))
+    const overlay = screen.getByRole('dialog')
+    await user.click(overlay)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('shows import audio notice', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(screen.getByRole('button', { name: '导入音频' }))
+    expect(screen.getByText(/导入音频功能将在时间线页面中可用/)).toBeInTheDocument()
   })
 })

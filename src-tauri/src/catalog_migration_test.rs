@@ -23,8 +23,13 @@ const V3_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../tests/fixtures/catalog/lifesub-v0.3.sqlite3"
 );
+const V4_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tests/fixtures/catalog/lifesub-v0.4.sqlite3"
+);
 const V2_FIXTURE_SHA256: &str = "e2956f8a5c0531e8b444519c8e11e2de5952f6b4b4ec391c3321e9f60e6e4639";
 const V3_FIXTURE_SHA256: &str = "79f8ec380b1555691e9bc4fd79bd743213b275270d35a61e791c0f278d970de2";
+const V4_FIXTURE_SHA256: &str = "75c5782564ebf499ac3b3439267bbf3012100efa2e86b1bb91f3e256ac587445";
 
 type ColumnContract<'a> = (&'a str, &'a str, bool, Option<&'a str>, i64);
 type ForeignKeyContract = (String, String, String, String, String, String);
@@ -83,7 +88,7 @@ fn fresh_catalog_uses_v3_model_install_contract() {
 
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 3);
+    assert_eq!(user_version(&connection), 4);
     assert_columns(
         &connection,
         "model_download_artifacts",
@@ -133,7 +138,7 @@ fn migrates_immutable_v2_without_blind_runtime_qualification() {
 
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 3);
+    assert_eq!(user_version(&connection), 4);
     let state: String = connection
         .query_row(
             "SELECT state FROM model_installations WHERE model_id = 'legacy-ready-model'",
@@ -144,7 +149,7 @@ fn migrates_immutable_v2_without_blind_runtime_qualification() {
     assert_eq!(state, "installed_unqualified");
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV3
+        SchemaKind::CurrentV4
     );
 }
 
@@ -152,15 +157,15 @@ fn migrates_immutable_v2_without_blind_runtime_qualification() {
 fn immutable_v3_fixture_reopens_idempotently() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("catalog.sqlite3");
-    fs::copy(V3_FIXTURE, &path).unwrap();
+    fs::copy(V4_FIXTURE, &path).unwrap();
     let before = fs::read(&path).unwrap();
 
     let mut connection = Connection::open(&path).unwrap();
     migrations::migrate(&mut connection).unwrap();
-    assert_eq!(user_version(&connection), 3);
+    assert_eq!(user_version(&connection), 4);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV3
+        SchemaKind::CurrentV4
     );
     drop(connection);
 
@@ -178,6 +183,10 @@ fn catalog_fixtures_have_frozen_bytes() {
     assert_eq!(
         hex::encode(Sha256::digest(fs::read(V3_FIXTURE).unwrap())),
         V3_FIXTURE_SHA256
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(fs::read(V4_FIXTURE).unwrap())),
+        V4_FIXTURE_SHA256
     );
 }
 
@@ -211,11 +220,11 @@ fn task9_reuses_v2_job_schema_without_migration_or_version_drift() {
 
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 3);
+    assert_eq!(user_version(&connection), 4);
     assert_eq!(schema_sql(&connection, "asr_jobs"), job_sql_before);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV3
+        SchemaKind::CurrentV4
     );
 }
 

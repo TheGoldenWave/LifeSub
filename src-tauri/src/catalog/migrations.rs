@@ -4,8 +4,9 @@ use rusqlite::{Connection, Error, TransactionBehavior, ffi};
 
 use self::ddl::{
     ASR_SCHEMA, CURRENT_VERSION, FRESH_BASE_SCHEMA, LEGACY_ALTERS, MODEL_MANAGER_V3_SCHEMA,
+    TOOL_API_V4_SCHEMA,
 };
-use self::fingerprint::{classify_locked, is_v2, is_v3};
+use self::fingerprint::{classify_locked, is_v2, is_v3, is_v4};
 
 mod ddl;
 mod fingerprint;
@@ -18,6 +19,7 @@ pub(crate) enum SchemaKind {
     LegacyV1,
     CurrentV2,
     CurrentV3,
+    CurrentV4,
     Unknown,
 }
 
@@ -67,30 +69,54 @@ where
     let kind = classify_locked(&transaction)?;
     classification_hook()?;
     match kind {
-        SchemaKind::CurrentV3 => return transaction.commit(),
+        SchemaKind::CurrentV4 => return transaction.commit(),
         SchemaKind::Unknown => return Err(migration_error("unknown or corrupt catalog schema")),
-        SchemaKind::Fresh | SchemaKind::LegacyV1 | SchemaKind::CurrentV2 => {}
+        SchemaKind::Fresh
+        | SchemaKind::LegacyV1
+        | SchemaKind::CurrentV2
+        | SchemaKind::CurrentV3 => {}
     }
     match kind {
         SchemaKind::Fresh => transaction.execute_batch(FRESH_BASE_SCHEMA)?,
         SchemaKind::LegacyV1 => transaction.execute_batch(LEGACY_ALTERS)?,
         SchemaKind::CurrentV2 => {}
-        SchemaKind::CurrentV3 | SchemaKind::Unknown => unreachable!(),
+        SchemaKind::CurrentV3 => {}
+        SchemaKind::CurrentV4 | SchemaKind::Unknown => unreachable!(),
     }
     if matches!(kind, SchemaKind::Fresh | SchemaKind::LegacyV1) {
         transaction.execute_batch(ASR_SCHEMA)?;
     }
-    if !is_v2(&transaction)? {
+    if matches!(
+        kind,
+        SchemaKind::Fresh | SchemaKind::LegacyV1 | SchemaKind::CurrentV2
+    ) && !is_v2(&transaction)?
+    {
         return Err(migration_error(
             "migration produced invalid v2 catalog schema",
         ));
     }
-    transaction.execute_batch(MODEL_MANAGER_V3_SCHEMA)?;
-    ddl_hook()?;
-    if !is_v3(&transaction)? {
-        return Err(migration_error(
-            "migration produced invalid v3 catalog schema",
-        ));
+    if matches!(
+        kind,
+        SchemaKind::Fresh | SchemaKind::LegacyV1 | SchemaKind::CurrentV2
+    ) {
+        transaction.execute_batch(MODEL_MANAGER_V3_SCHEMA)?;
+        ddl_hook()?;
+        if !is_v3(&transaction)? {
+            return Err(migration_error(
+                "migration produced invalid v3 catalog schema",
+            ));
+        }
+    }
+    if matches!(
+        kind,
+        SchemaKind::Fresh | SchemaKind::LegacyV1 | SchemaKind::CurrentV2 | SchemaKind::CurrentV3
+    ) {
+        transaction.execute_batch(TOOL_API_V4_SCHEMA)?;
+        if !is_v4(&transaction)? {
+            return Err(migration_error(
+                "migration produced invalid v4 catalog schema",
+            ));
+        }
     }
     transaction.pragma_update(None, "user_version", CURRENT_VERSION)?;
     transaction.commit()

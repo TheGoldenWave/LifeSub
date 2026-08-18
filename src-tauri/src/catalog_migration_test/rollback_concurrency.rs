@@ -15,10 +15,10 @@ fn migrates_real_v1_fixture_and_preserves_legacy_evidence() {
     drop(catalog);
 
     let mut connection = Connection::open(path).unwrap();
-    assert_eq!(user_version(&connection), 3);
+    assert_eq!(user_version(&connection), 4);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV3
+        SchemaKind::CurrentV4
     );
     let session: (String, String, String, String, Option<String>) = connection
         .query_row(
@@ -291,9 +291,9 @@ fn two_connections_concurrently_migrate_the_same_v2_fixture() {
         worker.join().unwrap().unwrap();
     }
     let mut connection = Connection::open(path).unwrap();
-    assert_eq!(user_version(&connection), 3);
+    assert_eq!(user_version(&connection), 4);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV3
+        SchemaKind::CurrentV4
     );
 }

@@ -4,7 +4,8 @@ use rusqlite::Connection;
 
 use super::ddl::{
     ASR_SCHEMA, CURRENT_VERSION, FRESH_BASE_SCHEMA, FTS_SHADOW_SCHEMA, FTS_SHADOWS, FTS_TABLE,
-    LEGACY_SCHEMA, MODEL_MANAGER_V3_SCHEMA, V1_TABLES, V2_TABLES, V3_TABLES,
+    LEGACY_SCHEMA, MODEL_MANAGER_V3_SCHEMA, TOOL_API_V4_SCHEMA, V1_TABLES, V2_TABLES, V3_TABLES,
+    V4_TABLES,
 };
 use super::{SchemaKind, migration_error};
 
@@ -21,8 +22,10 @@ pub(super) fn classify_locked(connection: &Connection) -> rusqlite::Result<Schem
         0 => Ok(SchemaKind::Unknown),
         2 if is_v2(connection)? => Ok(SchemaKind::CurrentV2),
         2 => Err(migration_error("corrupt v2 catalog schema")),
-        CURRENT_VERSION if is_v3(connection)? => Ok(SchemaKind::CurrentV3),
-        CURRENT_VERSION => Err(migration_error("corrupt v3 catalog schema")),
+        3 if is_v3(connection)? => Ok(SchemaKind::CurrentV3),
+        3 => Err(migration_error("corrupt v3 catalog schema")),
+        CURRENT_VERSION if is_v4(connection)? => Ok(SchemaKind::CurrentV4),
+        CURRENT_VERSION => Err(migration_error("corrupt v4 catalog schema")),
         other => Err(migration_error(&format!(
             "incompatible catalog version {other}"
         ))),
@@ -143,6 +146,77 @@ pub(super) fn is_v3(connection: &Connection) -> rusqlite::Result<bool> {
         return Ok(false);
     };
     Ok(normalize_sql(&actual) == normalize_sql(&expected))
+}
+
+pub(super) fn is_v4(connection: &Connection) -> rusqlite::Result<bool> {
+    let expected_indexes = names(&[
+        "asr_jobs_claimable",
+        "asr_jobs_one_active_fingerprint",
+        "model_download_artifacts_state",
+        "model_downloads_one_active_model",
+        "operations_principal",
+        "tool_requests_operation",
+    ]);
+    if all_tables(connection)? != table_names_with_fts_shadows(&V4_TABLES)
+        || !fts_is_trigram(connection)?
+        || !fts_shadows_are_exact(connection)?
+        || named_indexes(connection)? != expected_indexes
+        || !auxiliary_objects(connection)?.is_empty()
+        || !base_tables_are_exact(connection)?
+    {
+        return Ok(false);
+    }
+    for table in [
+        "asr_settings",
+        "model_downloads",
+        "asr_jobs",
+        "provider_receipts",
+        "revision_receipts",
+    ] {
+        let expected = statement_named(ASR_SCHEMA, table)?;
+        if normalize_sql(&schema_sql(connection, table)?) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for table in ["model_installations", "model_download_artifacts"] {
+        let expected = statement_named(MODEL_MANAGER_V3_SCHEMA, table)?;
+        if normalize_sql(&schema_sql(connection, table)?) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for table in ["tool_requests", "operations", "open_intent_ledger"] {
+        let expected = statement_named(TOOL_API_V4_SCHEMA, table)?;
+        if normalize_sql(&schema_sql(connection, table)?) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for index in [
+        "model_downloads_one_active_model",
+        "asr_jobs_one_active_fingerprint",
+        "asr_jobs_claimable",
+    ] {
+        let expected = statement_named(ASR_SCHEMA, index)?;
+        let Some(actual) = schema_sql_optional(connection, index)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for (schema, index) in [
+        (MODEL_MANAGER_V3_SCHEMA, "model_download_artifacts_state"),
+        (TOOL_API_V4_SCHEMA, "operations_principal"),
+        (TOOL_API_V4_SCHEMA, "tool_requests_operation"),
+    ] {
+        let expected = statement_named(schema, index)?;
+        let Some(actual) = schema_sql_optional(connection, index)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn base_tables_are_exact(connection: &Connection) -> rusqlite::Result<bool> {

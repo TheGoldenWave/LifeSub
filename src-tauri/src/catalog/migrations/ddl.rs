@@ -1,4 +1,4 @@
-pub(super) const CURRENT_VERSION: i64 = 3;
+pub(super) const CURRENT_VERSION: i64 = 4;
 pub(super) const FTS_TABLE: &str = "segment_search";
 pub(super) const FTS_SHADOWS: [&str; 5] = [
     "segment_search_config",
@@ -40,6 +40,23 @@ pub(super) const V3_TABLES: [&str; 12] = [
     "segment_search",
     "segments",
     "sessions",
+];
+pub(super) const V4_TABLES: [&str; 15] = [
+    "asr_jobs",
+    "asr_settings",
+    "chunks",
+    "model_download_artifacts",
+    "model_downloads",
+    "model_installations",
+    "open_intent_ledger",
+    "operations",
+    "provider_receipts",
+    "revision_receipts",
+    "revisions",
+    "segment_search",
+    "segments",
+    "sessions",
+    "tool_requests",
 ];
 
 pub(super) const LEGACY_SCHEMA: &str = "
@@ -139,3 +156,56 @@ CREATE TABLE model_download_artifacts (
   UNIQUE(download_id, required_path)
 );
 CREATE INDEX model_download_artifacts_state ON model_download_artifacts(download_id, state);";
+
+pub(super) const TOOL_API_V4_SCHEMA: &str = "
+CREATE TABLE tool_requests (
+  idempotency_key TEXT NOT NULL,
+  contract TEXT NOT NULL,
+  contract_version INTEGER NOT NULL,
+  principal_id TEXT NOT NULL,
+  principal_kind TEXT NOT NULL CHECK(principal_kind IN ('local_agent', 'tauri_ui', 'gateway')),
+  method TEXT NOT NULL,
+  request_fingerprint TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('in_progress', 'succeeded', 'failed')),
+  operation_id TEXT,
+  response_json TEXT,
+  error_code TEXT,
+  error_message_key TEXT,
+  created_at TEXT NOT NULL,
+  committed_at TEXT NOT NULL,
+  PRIMARY KEY(contract, contract_version, principal_id, idempotency_key)
+);
+CREATE INDEX tool_requests_operation ON tool_requests(operation_id);
+
+CREATE TABLE operations (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('queued', 'running', 'succeeded', 'failed', 'cancelled', 'recovery_required')),
+  principal_id TEXT NOT NULL,
+  principal_kind TEXT NOT NULL CHECK(principal_kind IN ('local_agent', 'tauri_ui', 'gateway')),
+  method TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_error_code TEXT,
+  last_error_summary TEXT
+);
+CREATE INDEX operations_principal ON operations(principal_id, principal_kind, created_at);
+
+CREATE TABLE open_intent_ledger (
+  intent_id TEXT PRIMARY KEY,
+  requesting_principal_id TEXT NOT NULL,
+  requesting_principal_kind TEXT NOT NULL CHECK(requesting_principal_kind IN ('local_agent', 'tauri_ui', 'gateway')),
+  evidence_ref_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending', 'executing', 'consumed', 'uncertain', 'expired')),
+  display_metadata_json TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  host_event_id TEXT,
+  claim_principal_id TEXT,
+  claim_request_id TEXT,
+  consent_at TEXT,
+  consumed_at TEXT,
+  uncertain_at TEXT,
+  diagnostic_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);";

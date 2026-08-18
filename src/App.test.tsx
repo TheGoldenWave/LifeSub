@@ -15,7 +15,8 @@ describe('LifeSub navigation', () => {
 
   it('defaults to live capture page', () => {
     render(<App />)
-    expect(screen.getByText('实时录音与转写')).toBeInTheDocument()
+    expect(screen.getByText('准备就绪')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '开始记录' })).toBeInTheDocument()
   })
 
   it('switches pages via sidebar', async () => {

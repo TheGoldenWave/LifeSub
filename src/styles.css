@@ -406,6 +406,94 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .settings-nav__item--active { color: var(--colors-brand-textPrimary); border-left-color: var(--colors-brand-textPrimary); }
 .settings-content { padding: var(--spacing-6); overflow: auto; }
 
+/* ── LiveCapture ─────────────────────────────────────────────────────── */
+
+.live-capture {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--colors-brand-border);
+  background: var(--colors-brand-surface);
+}
+.live-capture__bar {
+  padding: var(--spacing-4) var(--spacing-6);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-6);
+  border-bottom: 1px solid var(--colors-brand-border);
+  background: var(--colors-brand-canvas);
+}
+.live-capture__status { display: flex; align-items: center; gap: var(--spacing-3); min-width: 200px; }
+.live-capture__status strong { display: block; font-family: var(--typography-fontFamily-mono); font-size: var(--typography-fontSize-sm); }
+.live-capture__status small { color: var(--colors-brand-textMuted); font-family: var(--typography-fontFamily-mono); font-size: 11px; }
+.live-capture__asr {
+  padding: var(--spacing-1) var(--spacing-3);
+  border: 1px solid var(--colors-brand-border);
+  color: var(--colors-brand-textMuted);
+  font-family: var(--typography-fontFamily-mono);
+  font-size: 11px;
+}
+.live-capture__actions { margin-left: auto; display: flex; gap: var(--spacing-2); }
+.live-capture__body {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  overflow: hidden;
+}
+.live-capture__transcript { overflow: auto; padding: var(--spacing-6); }
+.live-capture__transcript-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: var(--spacing-6); padding-bottom: var(--spacing-3);
+  border-bottom: 1px solid var(--colors-brand-border);
+}
+.live-segment { padding: var(--spacing-4) 0; border-bottom: 1px solid var(--colors-brand-border); }
+.live-segment__header { display: flex; align-items: center; gap: var(--spacing-2); margin-bottom: var(--spacing-2); }
+.live-segment__speaker { font-family: var(--typography-fontFamily-mono); font-size: var(--typography-fontSize-sm); font-weight: var(--typography-fontWeight-medium); user-select: none; }
+.live-segment__speaker--voiceprint { color: var(--colors-brand-available); }
+.live-segment__speaker--dictionary { color: var(--colors-brand-available); border-bottom: 1px dashed var(--colors-brand-available); cursor: pointer; }
+.live-segment__speaker--manual { color: var(--colors-brand-focus); }
+.live-segment__speaker--unknown { color: var(--colors-brand-paused); cursor: pointer; border-bottom: 1px dashed var(--colors-brand-paused); }
+.live-segment__time { color: var(--colors-brand-textMuted); font-family: var(--typography-fontFamily-mono); font-size: 11px; }
+.live-segment__cursor { color: var(--colors-brand-focus); animation: blink 1s step-end infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.live-segment__text { max-width: 70ch; margin: 0; font-size: var(--typography-fontSize-lg); line-height: var(--typography-lineHeight-loose); }
+
+/* ── NotePanel ────────────────────────────────────────────────────────── */
+
+.note-panel {
+  overflow: auto; padding: var(--spacing-4);
+  border-left: 1px solid var(--colors-brand-border);
+  background: var(--colors-brand-canvas);
+}
+.note-panel__header { display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--spacing-4); }
+.note-panel__list { display: grid; gap: var(--spacing-2); }
+.note-panel__empty { color: var(--colors-brand-textMuted); font-size: var(--typography-fontSize-xs); text-align: center; padding: var(--spacing-8); }
+.note-card { padding: var(--spacing-3); border-left: 2px solid var(--colors-brand-border); background: var(--colors-brand-surface); }
+.note-card--待办 { border-left-color: var(--colors-brand-paused); }
+.note-card--备忘 { border-left-color: var(--colors-brand-focus); }
+.note-card--问题 { border-left-color: var(--colors-brand-recording); }
+.note-card--决定 { border-left-color: var(--colors-brand-available); }
+.note-card__header { display: flex; align-items: center; gap: var(--spacing-2); margin-bottom: var(--spacing-1); }
+.note-card__time { font-family: var(--typography-fontFamily-mono); font-size: 11px; color: var(--colors-brand-textMuted); }
+.note-card__tag { padding: 1px var(--spacing-1); font-family: var(--typography-fontFamily-mono); font-size: 10px; border: 1px solid var(--colors-brand-border); }
+.note-card__content { margin: 0; font-size: var(--typography-fontSize-sm); color: var(--colors-brand-textSecondary); }
+
+/* ── NoteEditor ───────────────────────────────────────────────────────── */
+
+.note-editor { margin-bottom: var(--spacing-4); padding: var(--spacing-3); border: 1px solid var(--colors-brand-borderStrong); background: var(--colors-brand-surface); }
+.note-editor__input { width: 100%; padding: var(--spacing-2); border: 1px solid var(--colors-brand-border); border-radius: var(--borderRadius-sm); color: var(--colors-brand-textPrimary); background: var(--colors-brand-canvas); font-size: var(--typography-fontSize-sm); resize: vertical; }
+.note-editor__meta { margin-top: var(--spacing-2); }
+.note-editor__tag-select { padding: var(--spacing-1) var(--spacing-2); border: 1px solid var(--colors-brand-border); color: var(--colors-brand-textPrimary); background: var(--colors-brand-canvas); font-size: var(--typography-fontSize-xs); }
+.note-editor__actions { margin-top: var(--spacing-2); display: flex; justify-content: flex-end; gap: var(--spacing-2); }
+
+/* ── Pulse states ─────────────────────────────────────────────────────── */
+
+.recorder__pulse--idle { background: var(--colors-brand-textMuted); }
+.recorder__pulse--recording { background: var(--colors-brand-recording); }
+.recorder__pulse--paused { background: var(--colors-brand-paused); }
+.recorder__pulse--stopped { background: var(--colors-brand-available); }
+
 @media (prefers-reduced-motion: no-preference) {
   button { transition: color 150ms ease-out, background-color 150ms ease-out, border-color 150ms ease-out, transform 150ms ease-out; }
   button:active { transform: translateY(1px); }

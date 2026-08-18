@@ -1,13 +1,13 @@
 ---
-stage: phase-1.1-complete
+stage: phase-1-complete
 last_updated: 2026-08-18
 source: codex
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
 
-- **HEAD: Phase 1.1 完成**。前端所有页面已通过 `src/data/adapter.ts` 接入真实后端 API，Tauri 模式下走 invoke，非 Tauri 模式（dev/test）fallback demo 数据。
-- **下一步**: Phase 1.2 — Task 14 真实 Provider Gate 验证（需物理设备 + 模型下载），或 Phase 1.3 — Task 15 Playwright E2E
+- **HEAD: Phase 1 完成**。V0.2 收尾工作全部推进到位：前端 API 接入、ASR Gate 二进制、Playwright E2E、桌面验收模式。
+- **下一步**: Phase 2.1 — 流式 ASR 实时通道，详见 `docs/superpowers/plans/2026-08-18-lifesub-roadmap.md`
 
 ## Phase 1.1 完成（前端 API 接入）
 

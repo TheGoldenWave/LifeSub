@@ -107,6 +107,15 @@ impl AnchoredCatalogOpen {
 }
 
 impl Catalog {
+    pub(crate) fn connection(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.connection.lock().unwrap()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
+        self.connection.get_mut().unwrap()
+    }
+
     #[cfg(test)]
     pub(crate) fn execute_test_sql(&self, sql: &str) -> rusqlite::Result<()> {
         self.connection.lock().unwrap().execute_batch(sql)

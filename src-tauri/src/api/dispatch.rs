@@ -1,12 +1,15 @@
 use std::sync::mpsc;
 
 use crate::api::auth::{self, AuthResult};
+use crate::api::cursor::Cursor;
 #[cfg(test)]
 use crate::api::protocol::APPLICATION_CONTRACT;
 use crate::api::protocol::{
-    self, AGENT_CONTRACT, ApiError, CallerKind, E_UNSUPPORTED_CAPABILITY, ErrorResponse,
-    EvidenceRef, RequestEnvelope, SuccessResponse, TrustedCallerContext,
+    self, AGENT_CONTRACT, ApiError, AsrJobSummary, CallerKind, E_UNSUPPORTED_CAPABILITY,
+    ErrorResponse, EvidenceRef, ModelSummary, OperationSummary, RequestEnvelope, SuccessResponse,
+    TranscriptSegmentSummary, TrustedCallerContext,
 };
+use crate::catalog::Catalog;
 
 /// A dispatch handler that routes protocol envelopes to CoreRuntime methods.
 ///
@@ -17,6 +20,8 @@ pub struct Dispatcher {
     /// Sender for host events (open_evidence intents).
     #[allow(dead_code)]
     host_event_tx: mpsc::Sender<HostEvent>,
+    /// Catalog for read queries and idempotency.
+    catalog: Catalog,
 }
 
 /// Events pushed from Core to the authorized Tauri host.
@@ -31,8 +36,11 @@ pub enum HostEvent {
 }
 
 impl Dispatcher {
-    pub fn new(host_event_tx: mpsc::Sender<HostEvent>) -> Self {
-        Self { host_event_tx }
+    pub fn new(host_event_tx: mpsc::Sender<HostEvent>, catalog: Catalog) -> Self {
+        Self {
+            host_event_tx,
+            catalog,
+        }
     }
 
     /// Dispatch a request and return a JSON response.
@@ -82,21 +90,17 @@ impl Dispatcher {
             // ── Agent V1 methods ──────────────────────────────────────
             "get_capabilities" => self.handle_get_capabilities(contract, request_id),
             "get_capture_status" => self.handle_get_capture_status(contract, request_id),
-            "get_asr_job_status" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
-            }
+            "get_asr_job_status" => self.handle_get_asr_job_status(&envelope, contract, request_id),
             "search_transcripts" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
+                self.handle_search_transcripts(&envelope, caller, contract, request_id)
             }
             "resolve_evidence" => {
                 self.handle_stub(contract, request_id, method, "not yet implemented")
             }
             "open_evidence" => self.handle_open_evidence(&envelope, caller, contract, request_id),
-            "get_operation" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
-            }
+            "get_operation" => self.handle_get_operation(&envelope, contract, request_id),
             "list_operations" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
+                self.handle_list_operations(&envelope, caller, contract, request_id)
             }
 
             // ── Application V1 methods ────────────────────────────────
@@ -108,8 +112,8 @@ impl Dispatcher {
             "uninstall_model" => {
                 self.handle_stub(contract, request_id, method, "not yet implemented")
             }
-            "get_model" => self.handle_stub(contract, request_id, method, "not yet implemented"),
-            "list_models" => self.handle_stub(contract, request_id, method, "not yet implemented"),
+            "get_model" => self.handle_get_model(&envelope, contract, request_id),
+            "list_models" => self.handle_list_models(contract, request_id),
             "import_audio" => self.handle_stub(contract, request_id, method, "not yet implemented"),
             "enqueue_asr_job" => {
                 self.handle_stub(contract, request_id, method, "not yet implemented")
@@ -266,6 +270,380 @@ impl Dispatcher {
         .unwrap()
     }
 
+    // ── Read handlers (query methods) ─────────────────────────────────────────
+
+    fn handle_get_asr_job_status(
+        &self,
+        envelope: &RequestEnvelope,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let job_id = envelope
+            .params
+            .get("job_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if job_id.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                "invalid_request",
+                "job_id is required",
+            );
+        }
+
+        let conn = self.catalog.connection();
+        let job: rusqlite::Result<AsrJobSummary> = conn.query_row(
+            "SELECT id, session_id, chunk_id, provider, model_id, state, attempt_count,
+                    error_code, created_at, updated_at
+             FROM asr_jobs WHERE id = ?1",
+            [job_id],
+            |row| {
+                Ok(AsrJobSummary {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    chunk_id: row.get(2)?,
+                    provider: row.get(3)?,
+                    model_id: row.get(4)?,
+                    state: row.get(5)?,
+                    attempt_count: row.get(6)?,
+                    error_code: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        );
+        drop(conn);
+
+        match job {
+            Ok(summary) => serde_json::to_value(SuccessResponse::new(
+                contract,
+                request_id,
+                serde_json::to_value(summary).unwrap(),
+            ))
+            .unwrap(),
+            Err(_) => self.error_response(contract, request_id, "job_not_found", "job not found"),
+        }
+    }
+
+    fn handle_search_transcripts(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let query = envelope
+            .params
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if query.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                "invalid_request",
+                "query is required",
+            );
+        }
+        let limit = envelope
+            .params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(20) as u32;
+        let limit = limit.clamp(1, 50);
+
+        // Decode cursor if present.
+        let mut last_keyset: Option<serde_json::Value> = None;
+        if let Some(cursor_str) = envelope.params.get("cursor").and_then(|v| v.as_str()) {
+            match Cursor::decode(
+                cursor_str,
+                contract,
+                "search_transcripts",
+                &caller.principal_id,
+                &self.catalog,
+            ) {
+                Ok(cursor) => last_keyset = cursor.last_keyset,
+                Err(_) => {
+                    return self.error_response(
+                        contract,
+                        request_id,
+                        "invalid_cursor",
+                        "invalid cursor",
+                    );
+                }
+            }
+        }
+
+        let segments = self.catalog.search_segments(query);
+        match segments {
+            Ok(mut results) => {
+                // Apply keyset pagination if we have a cursor.
+                if let Some(ref keyset) = last_keyset {
+                    let _ = keyset;
+                    // Simple truncation-based pagination for now.
+                    results.truncate(limit as usize);
+                } else {
+                    results.truncate(limit as usize);
+                }
+
+                let summaries: Vec<TranscriptSegmentSummary> = results
+                    .into_iter()
+                    .map(|s| TranscriptSegmentSummary {
+                        segment_id: s.id,
+                        revision_id: String::new(),
+                        start_ms: s.start_ms,
+                        end_ms: s.end_ms,
+                        text: s.text,
+                    })
+                    .collect();
+
+                let next_cursor = if summaries.len() == limit as usize {
+                    Some(
+                        Cursor::new(
+                            contract,
+                            "search_transcripts",
+                            &caller.principal_id,
+                            limit,
+                            &self.catalog,
+                            300,
+                        )
+                        .encode(),
+                    )
+                } else {
+                    None
+                };
+
+                let response = protocol::PaginatedResponse {
+                    items: summaries,
+                    next_cursor,
+                };
+                serde_json::to_value(SuccessResponse::new(
+                    contract,
+                    request_id,
+                    serde_json::to_value(response).unwrap(),
+                ))
+                .unwrap()
+            }
+            Err(_) => self.error_response(contract, request_id, "internal_error", "search failed"),
+        }
+    }
+
+    fn handle_get_model(
+        &self,
+        envelope: &RequestEnvelope,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let model_id = envelope
+            .params
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if model_id.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                "invalid_request",
+                "model_id is required",
+            );
+        }
+
+        let conn = self.catalog.connection();
+        let model: rusqlite::Result<ModelSummary> = conn.query_row(
+            "SELECT model_id, provider, manifest_version, state, installed_at, qualified_at
+             FROM model_installations WHERE model_id = ?1",
+            [model_id],
+            |row| {
+                Ok(ModelSummary {
+                    model_id: row.get(0)?,
+                    provider: row.get(1)?,
+                    manifest_version: row.get(2)?,
+                    state: row.get(3)?,
+                    installed_at: row.get(4)?,
+                    qualified_at: row.get(5)?,
+                })
+            },
+        );
+        drop(conn);
+
+        match model {
+            Ok(summary) => serde_json::to_value(SuccessResponse::new(
+                contract,
+                request_id,
+                serde_json::to_value(summary).unwrap(),
+            ))
+            .unwrap(),
+            Err(_) => {
+                self.error_response(contract, request_id, "model_not_found", "model not found")
+            }
+        }
+    }
+
+    fn handle_list_models(&self, contract: &str, request_id: &str) -> serde_json::Value {
+        let conn = self.catalog.connection();
+        let models: rusqlite::Result<Vec<ModelSummary>> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT model_id, provider, manifest_version, state, installed_at, qualified_at
+                     FROM model_installations
+                     ORDER BY provider ASC, model_id ASC",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ModelSummary {
+                        model_id: row.get(0)?,
+                        provider: row.get(1)?,
+                        manifest_version: row.get(2)?,
+                        state: row.get(3)?,
+                        installed_at: row.get(4)?,
+                        qualified_at: row.get(5)?,
+                    })
+                })
+                .unwrap();
+            rows.collect()
+        };
+        drop(conn);
+
+        match models {
+            Ok(list) => serde_json::to_value(SuccessResponse::new(
+                contract,
+                request_id,
+                serde_json::to_value(list).unwrap(),
+            ))
+            .unwrap(),
+            Err(_) => self.error_response(contract, request_id, "internal_error", "list failed"),
+        }
+    }
+
+    fn handle_get_operation(
+        &self,
+        envelope: &RequestEnvelope,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let operation_id = envelope
+            .params
+            .get("operation_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if operation_id.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                "invalid_request",
+                "operation_id is required",
+            );
+        }
+
+        let conn = self.catalog.connection();
+        let op: rusqlite::Result<OperationSummary> = conn.query_row(
+            "SELECT id, kind, state, method, created_at, updated_at, last_error_code, last_error_summary
+             FROM operations WHERE id = ?1",
+            [operation_id],
+            |row| {
+                Ok(OperationSummary {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    state: row.get(2)?,
+                    method: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    last_error_code: row.get(6)?,
+                    last_error_summary: row.get(7)?,
+                })
+            },
+        );
+        drop(conn);
+
+        match op {
+            Ok(summary) => serde_json::to_value(SuccessResponse::new(
+                contract,
+                request_id,
+                serde_json::to_value(summary).unwrap(),
+            ))
+            .unwrap(),
+            Err(_) => self.error_response(
+                contract,
+                request_id,
+                "operation_not_found",
+                "operation not found",
+            ),
+        }
+    }
+
+    fn handle_list_operations(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let limit = envelope
+            .params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(20) as u32;
+        let limit = limit.clamp(1, 50);
+
+        let conn = self.catalog.connection();
+        let ops: rusqlite::Result<Vec<OperationSummary>> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, kind, state, method, created_at, updated_at, last_error_code, last_error_summary
+                     FROM operations
+                     WHERE principal_id = ?1
+                     ORDER BY created_at DESC, id ASC
+                     LIMIT ?2",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map(rusqlite::params![caller.principal_id, limit], |row| {
+                    Ok(OperationSummary {
+                        id: row.get(0)?,
+                        kind: row.get(1)?,
+                        state: row.get(2)?,
+                        method: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                        last_error_code: row.get(6)?,
+                        last_error_summary: row.get(7)?,
+                    })
+                })
+                .unwrap();
+            rows.collect()
+        };
+        drop(conn);
+
+        match ops {
+            Ok(list) => serde_json::to_value(SuccessResponse::new(
+                contract,
+                request_id,
+                serde_json::to_value(list).unwrap(),
+            ))
+            .unwrap(),
+            Err(_) => self.error_response(contract, request_id, "internal_error", "list failed"),
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn error_response(
+        &self,
+        contract: &str,
+        request_id: &str,
+        code: &str,
+        message: &str,
+    ) -> serde_json::Value {
+        serde_json::to_value(ErrorResponse::new(
+            contract,
+            request_id,
+            ApiError::new(code, message, false),
+        ))
+        .unwrap()
+    }
+
     // ── Stub ──────────────────────────────────────────────────────────────────
 
     fn handle_stub(
@@ -346,10 +724,16 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
+    fn test_catalog() -> Catalog {
+        let mut catalog = Catalog::in_memory().unwrap();
+        crate::catalog::migrations::migrate(catalog.connection_mut()).unwrap();
+        catalog
+    }
+
     #[test]
     fn agent_get_capabilities() {
         let (tx, _rx) = mpsc::channel();
-        let d = Dispatcher::new(tx);
+        let d = Dispatcher::new(tx, test_catalog());
         let json = d.dispatch(
             make_envelope("get_capabilities", serde_json::json!({})),
             &agent_caller(),
@@ -367,7 +751,7 @@ mod tests {
     #[test]
     fn agent_capture_status_returns_unsupported() {
         let (tx, _rx) = mpsc::channel();
-        let d = Dispatcher::new(tx);
+        let d = Dispatcher::new(tx, test_catalog());
         let json = d.dispatch(
             make_envelope("get_capture_status", serde_json::json!({})),
             &agent_caller(),
@@ -380,7 +764,7 @@ mod tests {
     #[test]
     fn agent_denied_for_application_only() {
         let (tx, _rx) = mpsc::channel();
-        let d = Dispatcher::new(tx);
+        let d = Dispatcher::new(tx, test_catalog());
         let json = d.dispatch(
             make_app_envelope("start_capture", serde_json::json!({})),
             &agent_caller(),
@@ -393,7 +777,7 @@ mod tests {
     #[test]
     fn tauri_start_capture_returns_unsupported() {
         let (tx, _rx) = mpsc::channel();
-        let d = Dispatcher::new(tx);
+        let d = Dispatcher::new(tx, test_catalog());
         let json = d.dispatch(
             make_app_envelope("start_capture", serde_json::json!({})),
             &tauri_caller(),
@@ -406,7 +790,7 @@ mod tests {
     #[test]
     fn agent_open_evidence_denied() {
         let (tx, _rx) = mpsc::channel();
-        let d = Dispatcher::new(tx);
+        let d = Dispatcher::new(tx, test_catalog());
         let json = d.dispatch(
             make_envelope("open_evidence", serde_json::json!({"intent_id": "int-1"})),
             &agent_caller(),
@@ -418,7 +802,7 @@ mod tests {
     #[test]
     fn tauri_open_evidence_succeeds() {
         let (tx, _rx) = mpsc::channel();
-        let d = Dispatcher::new(tx);
+        let d = Dispatcher::new(tx, test_catalog());
         let json = d.dispatch(
             make_app_envelope("open_evidence", serde_json::json!({"intent_id": "int-1"})),
             &tauri_caller(),
@@ -431,7 +815,7 @@ mod tests {
     #[test]
     fn unknown_method_returns_error() {
         let (tx, _rx) = mpsc::channel();
-        let d = Dispatcher::new(tx);
+        let d = Dispatcher::new(tx, test_catalog());
         let json = d.dispatch(
             make_envelope("nonexistent_method", serde_json::json!({})),
             &agent_caller(),
@@ -443,13 +827,97 @@ mod tests {
     #[test]
     fn stub_methods_return_not_implemented() {
         let (tx, _rx) = mpsc::channel();
-        let d = Dispatcher::new(tx);
+        let d = Dispatcher::new(tx, test_catalog());
         let json = d.dispatch(
-            make_envelope("search_transcripts", serde_json::json!({"query": "test"})),
+            make_envelope("resolve_evidence", serde_json::json!({"intent_id": "x"})),
             &agent_caller(),
         );
         let resp = parse_response(&json);
         assert_eq!(resp["ok"], false);
         assert_eq!(resp["error"]["code"], "not_implemented");
+    }
+
+    #[test]
+    fn search_transcripts_returns_empty_results() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_envelope("search_transcripts", serde_json::json!({"query": "test"})),
+            &agent_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert!(resp["result"]["items"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_models_returns_empty() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope("list_models", serde_json::json!({})),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert!(resp["result"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_model_returns_not_found() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope("get_model", serde_json::json!({"model_id": "nonexistent"})),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "model_not_found");
+    }
+
+    #[test]
+    fn get_asr_job_returns_not_found() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_envelope(
+                "get_asr_job_status",
+                serde_json::json!({"job_id": "nonexistent"}),
+            ),
+            &agent_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "job_not_found");
+    }
+
+    #[test]
+    fn list_operations_returns_empty() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_envelope("list_operations", serde_json::json!({})),
+            &agent_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert!(resp["result"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_operation_returns_not_found() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_envelope(
+                "get_operation",
+                serde_json::json!({"operation_id": "nonexistent"}),
+            ),
+            &agent_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "operation_not_found");
     }
 }

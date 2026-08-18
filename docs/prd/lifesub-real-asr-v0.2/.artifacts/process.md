@@ -1,13 +1,23 @@
 ---
-stage: task-13.5-complete
+stage: phase-1.1-complete
 last_updated: 2026-08-18
 source: codex
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
 
-- **HEAD: Task 13.5 完成**。后端笔记/词典/声纹/统计/设置全部实现，前端 UI 4 页面架构重构完成，应用重新打包成功。
-- **下一步**: Phase 1.1 — 前端 API 接入（替换 demo 数据为真实后端调用），详见 `docs/superpowers/plans/2026-08-18-lifesub-roadmap.md`
+- **HEAD: Phase 1.1 完成**。前端所有页面已通过 `src/data/adapter.ts` 接入真实后端 API，Tauri 模式下走 invoke，非 Tauri 模式（dev/test）fallback demo 数据。
+- **下一步**: Phase 1.2 — Task 14 真实 Provider Gate 验证（需物理设备 + 模型下载），或 Phase 1.3 — Task 15 Playwright E2E
+
+## Phase 1.1 完成（前端 API 接入）
+
+- ✅ `src/data/adapter.ts` — 统一数据适配层，Tauri 运行时走真实 invoke，dev/test fallback demo
+- ✅ DictionaryView — 分类/词条 CRUD 通过 adapter 加载和持久化
+- ✅ StatsBar — 24h 统计通过 adapter 加载
+- ✅ AsrSettings — Provider/语言/VAD/ITN 配置 + 声纹库通过 adapter 加载
+- ✅ RecordingSettings — 捕获模式/IM 检测/音频格式/存储通过 adapter 加载
+- ✅ LiveCapture — 笔记 CRUD 通过 adapter 持久化
+- ✅ 验证: TSC 0 错误，10/10 测试通过，npm build 成功
 
 ## 已完成
 

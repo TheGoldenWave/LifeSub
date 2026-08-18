@@ -9,6 +9,7 @@
 # Local LifeSub data
 .lifesub/
 data/
+!src/data/
 recordings/
 
 # Design scratch space

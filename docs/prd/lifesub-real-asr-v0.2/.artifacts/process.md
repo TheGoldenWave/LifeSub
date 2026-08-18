@@ -1,18 +1,17 @@
 ---
-stage: task-11-complete
+stage: task-12-complete
 last_updated: 2026-08-18
 source: codex-goal
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
 
-- HEAD：`ba66eca`。Task 11 全部完成（M1-M5）。下一步：Task 12（API 方法实现 + 全量 idempotency + cursor 分页）。
-- Task 10 全部完成 ✅（M1-M5）
-- Task 11 M1：Catalog v4 迁移 ✅（`5ce62f7`）：tool_requests/operations/open_intent_ledger 表 + 32/32 迁移测试
-- Task 11 M2：共享协议原语 ✅（`24d12d0`）：envelope/error/DTO/trusted caller/方法常量 + 12 测试
-- Task 11 M3：UDS IPC ✅（`f3a42af`）：agent.sock/ui.sock bind + peer credential 认证 + 5 测试
-- Task 11 M4：方法授权 ✅（`15150a9`）：capability-based access control + 8 测试
-- Task 11 M5：dispatch 路由 ✅（`ba66eca`）：envelope 分发 + Host Event 协议 + 9 测试
+- HEAD：`88051cb`。Task 12 全部完成（M1-M3）。下一步：Task 13（install_model/uninstall_model/import_audio/enqueue_asr_job 等 mutation 方法 + idempotency 集成）。
+- Task 10 全部完成 ✅ + Task 11 全部完成 ✅
+- Task 12 M1：idempotency 层 ✅（`88051cb`）：tool_requests 读写 + 6 测试
+- Task 12 M2：cursor 分页 ✅（`88051cb`）：MAC 签名 + 5 测试
+- Task 12 M3：method 实现 ✅（`88051cb`）：search_transcripts/list_models/get_model/get_asr_job_status/get_operation/list_operations + 6 新测试
+- 验证：全量 440/440（0 失败！）、fmt/clippy/diff 通过
 - 验证：全量 422/429（+24 新测试，1 个已有隔离失败）、fmt/clippy/diff 通过
 - secondary Tauri 安全边界：UDS 认证 + 方法授权 = secondary 不得直接打开 writable SQLite
 - 已确认方向：本地优先；SenseVoiceSmall、Whisper 与 Qwen3-ASR 0.6B 共用 sherpa-onnx 1.13.5；无 Python Sidecar；无云端 ASR。Qwen3-ASR 1.7B 仅在固定可执行资产和 Apple Silicon Gate 通过后启用。

@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { CirclePause, Square, Plus, Copy } from 'lucide-react'
+import { CirclePause, Square, Plus, Copy, Sparkles } from 'lucide-react'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { NotePanel } from './NotePanel'
 import { loadNotes, createNoteAdapter, deleteNoteAdapter } from '../data/adapter'
-import { startStreamingCapture, stopStreamingCapture, pauseStreamingCapture, resumeStreamingCapture, isTauriRuntime } from '../services/lifesub'
+import { startStreamingCapture, stopStreamingCapture, pauseStreamingCapture, resumeStreamingCapture, isTauriRuntime, llmPolish, registerQuickInputHotkey, type PolishResponse } from '../services/lifesub'
 import type { CaptureMode, CaptureState, LiveSegment, CaptureNote } from '../domain'
 
 interface LiveCaptureProps {
@@ -24,7 +24,12 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
   const [segments, setSegments] = useState<LiveSegment[]>([])
   const [notes, setNotes] = useState<CaptureNote[]>([])
   const [showDemo, setShowDemo] = useState(false)
+  const [showPolished, setShowPolished] = useState(false)
+  const [polishedTexts, setPolishedTexts] = useState<Record<string, string>>({})
+  const [polishing, setPolishing] = useState(false)
+  const [quickInputActive, setQuickInputActive] = useState(false)
   const unlistenRef = useRef<UnlistenFn | null>(null)
+  const quickInputUnlistenRef = useRef<UnlistenFn | null>(null)
 
   useEffect(() => {
     loadNotes('current').then((loaded) => {
@@ -32,6 +37,7 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
     })
     return () => {
       if (unlistenRef.current) unlistenRef.current()
+      if (quickInputUnlistenRef.current) quickInputUnlistenRef.current()
     }
   }, [])
 
@@ -44,24 +50,38 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
     setCaptureState('recording')
     setSegments([])
     setNotes([])
+    setPolishedTexts({})
 
     if (isTauriRuntime()) {
       try {
-        // Listen for streaming ASR segments from the backend
         const unlisten = await listen<LiveSegment>('asr-live-segment', (event) => {
           setSegments((prev) => [...prev, event.payload].sort((a, b) => a.startMs - b.startMs))
         })
         unlistenRef.current = unlisten
+
+        // Register quick-input hotkey and listen for state changes
+        try {
+          await registerQuickInputHotkey()
+          const qiUnlisten = await listen<{ active: boolean }>('quick-input-started', () => {
+            setQuickInputActive(true)
+          })
+          // Also listen for stopped
+          const qiStopUnlisten = await listen<{ active: boolean }>('quick-input-stopped', () => {
+            setQuickInputActive(false)
+          })
+          quickInputUnlistenRef.current = () => { qiUnlisten(); qiStopUnlisten() }
+        } catch {
+          // quick-input not available; silent
+        }
+
         await startStreamingCapture()
       } catch {
-        // Fallback to demo if streaming fails
         setTimeout(() => {
           setSegments(DEMO_SEGMENTS)
           setShowDemo(true)
         }, 1000)
       }
     } else {
-      // Non-Tauri: use demo segments
       setTimeout(() => {
         setSegments(DEMO_SEGMENTS)
         setShowDemo(true)
@@ -82,6 +102,27 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
       // stop silently if not running
     }
     onNotice('录音已保存，可在时间线页面查看。')
+  }
+
+  const polishAll = async () => {
+    if (segments.length === 0) return
+    setPolishing(true)
+    const fullText = segments.map((s) => s.text).join('\n')
+    try {
+      const result = await llmPolish({ text: fullText })
+      // Split back into per-segment polished texts
+      const polishedLines = result.polished.split('\n')
+      const newPolished: Record<string, string> = {}
+      segments.forEach((s, i) => {
+        newPolished[s.id] = polishedLines[i] ?? s.text
+      })
+      setPolishedTexts(newPolished)
+      setShowPolished(true)
+      onNotice('润色完成')
+    } catch {
+      onNotice('润色失败，请检查本地 LLM 是否可用')
+    }
+    setPolishing(false)
   }
 
   const togglePause = async () => {
@@ -180,6 +221,11 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
             </>
           )}
         </div>
+        {quickInputActive && (
+          <div className="quick-input-indicator">
+            <span className="recorder__pulse recorder__pulse--recording" /> 快速输入已激活
+          </div>
+        )}
       </header>
 
       <div className="live-capture__body">
@@ -187,9 +233,20 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
           <div className="live-capture__transcript-header">
             <span className="eyebrow">实时转写</span>
             {segments.length > 0 && (
-              <button className="text-button" onClick={copyAll}>
-                <Copy size={14} />复制全部
-              </button>
+              <>
+                {showPolished ? (
+                  <button className="text-button" onClick={() => setShowPolished(false)}>
+                    查看原始
+                  </button>
+                ) : (
+                  <button className="text-button" onClick={polishAll} disabled={polishing}>
+                    <Sparkles size={14} />{polishing ? '润色中...' : 'AI 润色'}
+                  </button>
+                )}
+                <button className="text-button" onClick={copyAll}>
+                  <Copy size={14} />复制全部
+                </button>
+              </>
             )}
           </div>
 
@@ -233,7 +290,9 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
                   <span className="live-segment__time">{formatTime(seg.startMs)}</span>
                   {!seg.completed && <span className="live-segment__cursor">▌</span>}
                 </div>
-                <p className="live-segment__text">{seg.text}</p>
+                <p className="live-segment__text">
+                  {showPolished && polishedTexts[seg.id] ? polishedTexts[seg.id] : seg.text}
+                </p>
               </article>
             ))}
           </div>

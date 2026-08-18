@@ -553,6 +553,20 @@ label.toggle input[type="checkbox"] {
   accent-color: var(--colors-brand-primary);
 }
 
+/* quick-input indicator */
+.quick-input-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  padding: var(--spacing-1) var(--spacing-2);
+  font-family: var(--typography-fontFamily-mono);
+  font-size: var(--typography-fontSize-xs);
+  color: var(--colors-brand-primary);
+  border: 1px solid var(--colors-brand-primary);
+  border-radius: var(--radii-sm);
+  margin-top: var(--spacing-2);
+}
+
 /* ── Voiceprint cards ─────────────────────────────────────────────────── */
 
 .voiceprint-list { display: grid; gap: var(--spacing-2); margin-top: var(--spacing-3); }

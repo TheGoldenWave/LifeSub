@@ -243,3 +243,40 @@ export function pauseStreamingCapture() {
 export function resumeStreamingCapture() {
   return invoke('resume_streaming_capture')
 }
+
+// ── Phase 3: LLM polish + quick input ─────────────────────────────────────
+
+export interface PolishRequest {
+  text: string
+  model?: string
+  appBundleId?: string
+  preserveRaw?: boolean
+}
+
+export interface PolishResponse {
+  original: string
+  polished: string
+}
+
+export function llmPolish(request: PolishRequest) {
+  return invoke<PolishResponse>('llm_polish', {
+    request: {
+      text: request.text,
+      model: request.model ?? null,
+      app_bundle_id: request.appBundleId ?? null,
+      preserve_raw: request.preserveRaw ?? false,
+    },
+  })
+}
+
+export function registerQuickInputHotkey(hotkey?: string) {
+  return invoke('register_quick_input_hotkey', { hotkey: hotkey ?? null })
+}
+
+export function getFrontmostApp() {
+  return invoke<string | null>('get_frontmost_app')
+}
+
+export function pasteTextAtCursor(text: string) {
+  return invoke('paste_text_at_cursor', { text })
+}

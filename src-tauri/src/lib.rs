@@ -4,6 +4,9 @@ pub mod asr;
 pub mod capture;
 pub mod catalog;
 pub mod domain;
+pub mod llm;
+#[cfg(feature = "desktop")]
+pub mod quick_input;
 pub mod service;
 
 #[cfg(feature = "desktop")]
@@ -50,6 +53,7 @@ mod service_test;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             app.manage(commands::AppState::initialize(app.handle())?);
             Ok(())
@@ -89,6 +93,11 @@ pub fn run() {
             commands::stop_streaming_capture,
             commands::pause_streaming_capture,
             commands::resume_streaming_capture,
+            // Phase 3: LLM polish + quick input
+            commands::llm_polish,
+            commands::register_quick_input_hotkey,
+            commands::get_frontmost_app,
+            commands::paste_text_at_cursor,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LifeSub desktop app");

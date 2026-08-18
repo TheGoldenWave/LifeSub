@@ -1,13 +1,25 @@
 ---
-stage: phase-2.1-complete
+stage: phase-3-complete
 last_updated: 2026-08-18
 source: codex
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
 
-- **HEAD: Phase 2.1 完成**。流式 ASR 实时通道已实现：后端 StreamingCapture 通过 Tauri Event 推送 LiveSegment，前端 LiveCapture 监听事件实时追加段落。
+- **HEAD: Phase 3 完成**。LLM 后处理管道 + Fn 键快速输入 + 场景感知全部实现。
 - **下一步**: Phase 2.2 — 说话人分离 + CAM++ 声纹，详见 `docs/superpowers/plans/2026-08-18-lifesub-roadmap.md`
+
+## Phase 3 完成（LLM 后处理 + Fn 键快速输入 + 场景感知）
+
+- ✅ `src-tauri/src/llm/polish.rs` — LLM 润色服务，ollama CLI 调用 + mock 降级，去口头禅/纠错/格式化
+- ✅ `src-tauri/src/quick_input.rs` — 全局快捷键（CommandOrControl+Shift+Space）+ `CGEventPost` 光标写入 + 场景感知
+- ✅ `src-tauri/Cargo.toml` — 新增 `tauri-plugin-global-shortcut` 依赖
+- ✅ `src-tauri/src/commands.rs` — 5 个新命令：`llm_polish` / `register_quick_input_hotkey` / `get_frontmost_app` / `paste_text_at_cursor`
+- ✅ `src-tauri/src/lib.rs` — 注册 llm + quick_input 模块 + 5 个新命令 + global-shortcut 插件
+- ✅ `src/services/lifesub.ts` — 5 个新 invoke wrapper
+- ✅ `src/components/LiveCapture.tsx` — AI 润色按钮 + 原始/润色切换 + 快速输入状态指示器
+- ✅ `src/styles.css` — 新增 `.quick-input-indicator` 样式
+- ✅ 验证: TSC 0 错误，10/10 测试，npm build 成功，Rust 453/453 测试通过（0 失败）
 
 ## Phase 2.1 完成（流式 ASR 实时通道）
 

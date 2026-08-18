@@ -10,11 +10,13 @@ use crate::domain::{
     AudioChunk, CaptureNote, CaptureSession, CaptureState, DictionaryCategory, DictionaryEntry,
     StatsSnapshot, TranscriptRevision, TranscriptSegment, Voiceprint,
 };
+use crate::quick_input::QuickInput;
 use crate::service::{CoreRuntime, EvidenceService, parse_evidence_uri};
 
 pub struct AppState {
     runtime: CoreRuntime,
     streaming: Mutex<StreamingCapture>,
+    pub quick_input: QuickInput,
 }
 
 #[derive(Serialize)]
@@ -37,7 +39,7 @@ impl AppState {
 
     fn initialize_at(data_dir: PathBuf) -> Result<Self, String> {
         let runtime = CoreRuntime::initialize(&data_dir).map_err(|error| format!("{error:?}"))?;
-        Ok(Self { runtime, streaming: Mutex::new(StreamingCapture::default()) })
+        Ok(Self { runtime, streaming: Mutex::new(StreamingCapture::default()), quick_input: QuickInput::default() })
     }
 
     fn with_current_catalog<T>(
@@ -867,4 +869,53 @@ pub fn resume_streaming_capture(state: State<'_, AppState>) -> Result<(), String
     }
     streaming.resume();
     Ok(())
+}
+
+// ── Phase 3: LLM polish + quick input ────────────────────────────────────
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct PolishRequest {
+    pub text: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub app_bundle_id: Option<String>,
+    #[serde(default)]
+    pub preserve_raw: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PolishResponse {
+    pub original: String,
+    pub polished: String,
+}
+
+#[tauri::command]
+pub fn llm_polish(request: PolishRequest) -> Result<PolishResponse, String> {
+    let model = request.model.unwrap_or_else(|| "qwen2.5:0.5b".into());
+    let context = crate::llm::PolishContext {
+        app_bundle_id: request.app_bundle_id,
+        preserve_raw: request.preserve_raw,
+    };
+    let result = crate::llm::polish(&request.text, &model, &context);
+    Ok(PolishResponse {
+        original: result.original,
+        polished: result.polished,
+    })
+}
+
+#[tauri::command]
+pub fn register_quick_input_hotkey(app: AppHandle, hotkey: Option<String>) -> Result<(), String> {
+    let key = hotkey.unwrap_or_else(|| "CommandOrControl+Shift+Space".into());
+    crate::quick_input::register_hotkey(&app, &key)
+}
+
+#[tauri::command]
+pub fn get_frontmost_app() -> Result<Option<String>, String> {
+    Ok(crate::quick_input::get_frontmost_app())
+}
+
+#[tauri::command]
+pub fn paste_text_at_cursor(text: String) -> Result<(), String> {
+    crate::quick_input::paste_text_at_cursor(&text)
 }

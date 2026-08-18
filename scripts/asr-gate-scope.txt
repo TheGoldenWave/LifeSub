@@ -1,0 +1,14 @@
+src-tauri/src/bin/lifesub-asr-gate.rs
+src-tauri/src/asr_runtime_test.rs
+tests/fixtures/asr/fixture-manifest.json
+tests/fixtures/asr/qwen06-codeswitch.wav
+tests/fixtures/asr/tone.wav
+tests/fixtures/asr/tone.mp3
+tests/fixtures/asr/tone.m4a
+tests/fixtures/asr/tone.aac
+tests/fixtures/asr/tone.flac
+tests/fixtures/asr/tone.ogg
+tests/fixtures/asr/multichannel-3ch.wav
+tests/fixtures/asr/impulse-48k.wav
+scripts/verify-asr-gate.sh
+scripts/asr-gate-scope.txt

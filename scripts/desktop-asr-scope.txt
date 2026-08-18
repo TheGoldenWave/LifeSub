@@ -1,0 +1,5 @@
+src-tauri/src/acceptance.rs
+src/acceptance.ts
+src/App.tsx
+scripts/verify-desktop-asr.sh
+scripts/desktop-asr-scope.txt

@@ -5,6 +5,9 @@ pub mod domain;
 pub mod service;
 
 #[cfg(feature = "desktop")]
+pub mod acceptance;
+
+#[cfg(feature = "desktop")]
 mod commands;
 
 #[cfg(feature = "desktop")]

@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Sidebar, type PageId } from './components/Sidebar'
 import { LiveCapture } from './components/LiveCapture'
 import { TimelineView } from './components/TimelineView'
 import { DictionaryView } from './components/DictionaryView'
 import { SettingsModal } from './components/SettingsModal'
 import { demoRecords } from './data/demo'
+import { getAcceptanceScenario, recordHeartbeat } from './acceptance'
 import type { EvidenceRecord } from './domain'
 
 export default function App() {
@@ -12,6 +13,13 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [records, setRecords] = useState<EvidenceRecord[]>(demoRecords)
   const [notice, setNotice] = useState('')
+
+  useEffect(() => {
+    const scenario = getAcceptanceScenario()
+    if (scenario) {
+      recordHeartbeat(scenario)
+    }
+  }, [])
 
   const handleImportAudio = () => {
     setNotice('导入音频功能将在时间线页面中可用。')

@@ -48,3 +48,11 @@ default = []
 asr-runtime = ["dep:sherpa-onnx"]
 asr-qwen17-runtime = ["dep:qwen3-asr", "dep:candle-core"]
 desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "asr-runtime", "asr-qwen17-runtime"]
+
+[[bin]]
+name = "lifesub"
+path = "src/main.rs"
+
+[[bin]]
+name = "lifesub-asr-gate"
+path = "src/bin/lifesub-asr-gate.rs"

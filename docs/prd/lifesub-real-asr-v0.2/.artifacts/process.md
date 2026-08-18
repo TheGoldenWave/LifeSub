@@ -1,13 +1,24 @@
 ---
-stage: phase-1-complete
+stage: phase-2.1-complete
 last_updated: 2026-08-18
 source: codex
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
 
-- **HEAD: Phase 1 完成**。V0.2 收尾工作全部推进到位：前端 API 接入、ASR Gate 二进制、Playwright E2E、桌面验收模式。
-- **下一步**: Phase 2.1 — 流式 ASR 实时通道，详见 `docs/superpowers/plans/2026-08-18-lifesub-roadmap.md`
+- **HEAD: Phase 2.1 完成**。流式 ASR 实时通道已实现：后端 StreamingCapture 通过 Tauri Event 推送 LiveSegment，前端 LiveCapture 监听事件实时追加段落。
+- **下一步**: Phase 2.2 — 说话人分离 + CAM++ 声纹，详见 `docs/superpowers/plans/2026-08-18-lifesub-roadmap.md`
+
+## Phase 2.1 完成（流式 ASR 实时通道）
+
+- ✅ `src-tauri/src/capture/streaming.rs` — StreamingCapture 服务，MockStreamingSource 开发模式，StreamingSource trait 供生产 ASR 接入
+- ✅ `src-tauri/src/capture/mod.rs` — 模块入口，`#[cfg(feature = "desktop")]` 特性门控
+- ✅ `src-tauri/src/commands.rs` — `start_streaming_capture` / `stop_streaming_capture` 命令，AppState 持有 Mutex<StreamingCapture>
+- ✅ `src-tauri/src/lib.rs` — 注册 capture 模块 + 2 个新命令
+- ✅ `src/services/lifesub.ts` — `startStreamingCapture` / `stopStreamingCapture` invoke 封装
+- ✅ `src/components/LiveCapture.tsx` — 监听 `asr-live-segment` 事件，实时追加 LiveSegment，Tauri 模式 fallback demo
+- ✅ `src/test/setup.ts` — mock `@tauri-apps/api/event` 使 Vitest 测试通过
+- ✅ 验证: TSC 0 错误，10/10 测试，npm build 成功，Rust 449/450（1 个已知失败 unchanged）
 
 ## Phase 1.1 完成（前端 API 接入）
 

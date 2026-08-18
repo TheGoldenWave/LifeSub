@@ -148,6 +148,96 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   .status-pill { grid-column: 2; justify-self: start; }
 }
 
+/* ── Shared: nav-item--action ──────────────────────────────────────── */
+
+.nav-item--action {
+  border: 1px dashed var(--colors-brand-borderStrong);
+  margin: var(--spacing-2) 0;
+  color: var(--colors-brand-textSecondary);
+}
+.nav-item--action:hover {
+  border-style: solid;
+  color: var(--colors-brand-textPrimary);
+}
+
+/* ── Shared: Modal ──────────────────────────────────────────────────── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--zIndex-overlay);
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.6);
+}
+.modal-container {
+  width: min(900px, 95vw);
+  max-height: 85vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid var(--colors-brand-borderStrong);
+  background: var(--colors-brand-surface);
+  overflow: hidden;
+}
+.modal-header {
+  padding: var(--spacing-4) var(--spacing-6);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--colors-brand-border);
+}
+.modal-header h2 {
+  margin: 0;
+  font-family: var(--typography-fontFamily-mono);
+  font-size: var(--typography-fontSize-sm);
+  font-weight: var(--typography-fontWeight-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.modal-body {
+  overflow: auto;
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+}
+
+/* ── Shared: TabBar ─────────────────────────────────────────────────── */
+
+.tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--colors-brand-border);
+}
+.tab-bar__tab {
+  padding: var(--spacing-3) var(--spacing-4);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--colors-brand-textMuted);
+  background: transparent;
+  font-family: var(--typography-fontFamily-mono);
+  font-size: var(--typography-fontSize-xs);
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.tab-bar__tab:hover {
+  color: var(--colors-brand-textSecondary);
+  background: var(--colors-brand-surfaceSubtle);
+}
+.tab-bar__tab--active {
+  color: var(--colors-brand-textPrimary);
+  border-bottom-color: var(--colors-brand-textPrimary);
+}
+
+/* ── Page placeholder ───────────────────────────────────────────────── */
+
+.page-placeholder {
+  min-height: 0;
+  padding: var(--spacing-16);
+  display: grid;
+  place-items: center;
+  color: var(--colors-brand-textMuted);
+  border: 1px solid var(--colors-brand-border);
+  background: var(--colors-brand-surface);
+}
+
 @media (prefers-reduced-motion: no-preference) {
   button { transition: color 150ms ease-out, background-color 150ms ease-out, border-color 150ms ease-out, transform 150ms ease-out; }
   button:active { transform: translateY(1px); }

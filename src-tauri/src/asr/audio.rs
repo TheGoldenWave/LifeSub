@@ -161,9 +161,24 @@ pub(crate) fn validate_declared_source_frames(
 
 pub fn decode_to_working_audio(path: &Path) -> Result<WorkingAudio, AudioPreparationError> {
     let source = File::open(path).map_err(|_| AudioPreparationError::UnsupportedOrCorruptAudio)?;
+    let extension = path.extension().and_then(|value| value.to_str());
+    decode_from_file(source, extension)
+}
+
+pub fn decode_to_working_audio_from_file(
+    file: File,
+    extension_hint: Option<&str>,
+) -> Result<WorkingAudio, AudioPreparationError> {
+    decode_from_file(file, extension_hint)
+}
+
+fn decode_from_file(
+    source: File,
+    extension_hint: Option<&str>,
+) -> Result<WorkingAudio, AudioPreparationError> {
     let stream = MediaSourceStream::new(Box::new(source), Default::default());
     let mut hint = Hint::new();
-    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+    if let Some(extension) = extension_hint {
         hint.with_extension(extension);
     }
     let mut format = symphonia::default::get_probe()

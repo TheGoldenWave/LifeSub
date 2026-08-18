@@ -1,16 +1,18 @@
 ---
-stage: paused-task-10-direct-archive-toctou-fix-in-progress
+stage: task-10-complete
 last_updated: 2026-08-17
 source: codex-goal
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
 
-- 暂停点：HEAD `0227371`。Task 10 的原子发布、enqueue、fenced snapshot、长期 Core ModelManager、anchored lease/download、Sherpa/VAD/Qwen 0.6/Qwen 1.7 fd-backed runtime 已提交；Direct/Archive install 的最终 identity-check→rename/remove TOCTOU 修复仍未提交、未完成 GREEN/双审。
-- 恢复第一步：只处理 `model_manager/{anchored_reconcile,archive,install,install_support,storage}.rs` 与对应 tests；完成 `move_expected_to_private(expected)` 原语和 barrier 测试，replacement path/inode/bytes 必须不变。当前 `git diff --check` 通过，不代表质量门通过。
-- 后续剩余：anchored delete/trash/qualification、fd-safe chunk decode + ASR pipeline、独立 ≤5 秒 heartbeat；Task 10 全部双审后才进入 Task 11。
-
-- 当前阶段：Task 8、9 已提交并双审放行；Task 10 M1 原子发布内核与 Core storage ownership baseline 已提交并通过独立复审，下一步完成 Task 10 M2-M5，再进入 Tasks 11-13。
+- HEAD：`117698e`。Task 10 全部完成（M1-M5）。下一步：Task 11（CoreRuntime 唯一化 + Catalog v4 + Tool API V1 + 安全 IPC）。
+- Task 10 M1：原子 Receipt/Revision/Segments/FTS/Job publication ✅（已提交 `bf0bde7`）
+- Task 10 M2：Direct/Archive install TOCTOU 修复 ✅（`aa78f47`）：4 个原语 + 11 barrier 测试
+- Task 10 M3：anchored delete ✅（`66cd832`）：delete→AnchoredFs 迁移 + 1 测试
+- Task 10 M4：fd-safe audio decode ✅（`117698e`）：`decode_to_working_audio_from_file(File)`
+- Task 10 M5：heartbeat 已验证（已存在 RENEW_SECONDS=5 + clear_if_ownership_lost）
+- 验证：ModelManager 89/89、全量 391/398（1 个已有隔离失败）、fmt/clippy/diff 通过
 - 已确认方向：本地优先；SenseVoiceSmall、Whisper 与 Qwen3-ASR 0.6B 共用 sherpa-onnx 1.13.5；无 Python Sidecar；无云端 ASR。Qwen3-ASR 1.7B 仅在固定可执行资产和 Apple Silicon Gate 通过后启用。
 - 已完成研究：sherpa-onnx 1.13.5 已提供 `OfflineQwen3ASRModelConfig` 与 Rust 示例；0.6B INT8 官方 sherpa 包大小 878,702,423 B，SHA-256 为 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`；未发现同等成熟的 1.7B sherpa 发布包。
 - Task 8 质量修复：Q1 production qualification 仅暴露 ModelManager-owned `qualify_qwen17_current_device`/`reconcile_qwen17_current_device`，固定当前设备与真实 Qwen Candle/Metal smoke，泛型 fake smoke 仅 `cfg(test)`；Q2 Provider 持有共享 registry 的 RAII execution lease，删除在 Provider 存活时返回 `model_in_use`、drop 后成功，inventory 仅验证一次；Q3 UUID 临时 marker 在所有 publish 错误路径清理，reconcile 扫描并 fsync 清理 stale temp；Q4 显式选择 ignored real gate 而缺环境变量时稳定非零失败；Q5 qualification contract 冻结原文、四个 phrases、2/4 threshold、NFKC+alphanumeric+lowercase normalization、原始/PCM hashes、archive/license/provenance，并以 canonical SHA-256 `b96f1f2f268ae54694e4d2a6a036e3ac8a94759db389e47e1005387239147006` 同时绑定 fixture metadata 与 runtime identity，任一 metadata mutation fail closed。

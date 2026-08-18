@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>LifeSub</title>
+  <rect width="64" height="64" rx="14" fill="#1f2228"/>
+  <path d="M13 14h38c4 0 7 3 7 7v22c0 4-3 7-7 7H32l-13 8 3-8h-9c-4 0-7-3-7-7V21c0-4 3-7 7-7Z" fill="#292e37" stroke="#59616e" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M14 32h9l5-8 7 17 7-14 6 7h5" stroke="#f4f6f8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

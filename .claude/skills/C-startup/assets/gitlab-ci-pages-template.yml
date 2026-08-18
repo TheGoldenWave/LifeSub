@@ -1,0 +1,17 @@
+# GitLab Pages: 在线浏览 PRD 双视窗
+# 将此文件放在项目根目录，push 到 GitLab 后自动部署到 Pages
+# 访问地址: https://<namespace>.gitlab.io/<project>/docs/prd/<feature_id>/.artifacts/PRD_dual-pane.html
+
+pages:
+  stage: deploy
+  script:
+    - mkdir -p public
+    # 将 docs/ 目录整体复制到 public/，保持相对路径
+    - cp -r docs public/docs
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - docs/**/*

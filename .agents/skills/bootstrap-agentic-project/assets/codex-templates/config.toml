@@ -1,0 +1,100 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+
+# Agentic Engineering 项目 — Codex CLI 配置
+#
+# 由 bootstrap-agentic-project 初始化脚本自动生成。
+# 位于 .codex/config.toml（项目级，优先级高于 ~/.codex/config.toml）。
+#
+# 官方文档:
+#   https://developers.openai.com/codex/config-reference
+#   https://developers.openai.com/codex/multi-agent
+
+# --- 基础运行时设置 ---
+approval_policy  = "on-request"
+sandbox_mode     = "workspace-write"
+web_search       = "live"
+project_doc_fallback_filenames = ["CLAUDE.md"]
+
+# 每次会话追加的开发指令（不替换 AGENTS.md，而是叠加）
+developer_instructions = """
+请严格遵守项目 AGENTS.md 中的全局规范和路由规则。
+每次会话开始前，先读取 docs/prd/ 下所有 `.artifacts/process.md` 文件；若存在遗留 `process.txt`，一并兼容读取以恢复上下文。
+代码中禁止硬编码颜色、间距等样式值，必须引用 docs/design/tokens/base.json。
+知识库管理命令（通过 .agents/skills/ 发现）：
+  /ingest <file-or-url>    — 导入外部知识源到 Wiki 体系
+  /wiki query <topic>       — 查询项目知识库
+  /wiki generate overview   — 生成知识总览
+  /reflect lint             — 知识库健康检查
+项目知识层目录：.sources/（原始知识源，只读）→ docs/context/wiki/（Wiki 页面）→ docs/context/INDEX.md（索引）。
+如需并行委派，请明确说明使用哪个自定义 subagent（pm/dev/architect/ui/qa/project-manager）及其目标。
+"""
+
+# --- MCP 服务器 ---
+# 保持项目基础配置精简；重量级 MCP 建议放在 ~/.codex/config.toml 按需启用。
+# 填入真实 API Key 后，将此文件加入 .gitignore！
+
+# GitHub MCP — 用于 PR/Issue 查询（需要 GITHUB_TOKEN 环境变量）
+# [mcp_servers.github]
+# command = "npx"
+# args    = ["-y", "@modelcontextprotocol/server-github"]
+# startup_timeout_sec = 30
+
+# TAPD MCP — 用于需求/Bug 追踪（替换为实际配置）
+# [mcp_servers.tapd]
+# command = "npx"
+# args    = ["-y", "tapd-mcp-server"]
+# startup_timeout_sec = 30
+
+# Markitdown MCP — 用于 /ingest 知识导入（PDF/DOCX/PPTX/HTML → Markdown）
+# [mcp_servers.markitdown]
+# command = "uvx"
+# args    = ["markitdown-mcp"]
+# startup_timeout_sec = 30
+
+# --- 功能开关 ---
+[features]
+# 启用多 Agent 协作（稳定功能，当前 Codex 版本默认开启）
+multi_agent   = true
+# 如需 Codex hooks，请另行添加 .codex/hooks.json 后再开启
+# codex_hooks = true
+
+# --- 运行模式 ---
+# 切换方式：codex -p strict / codex -p yolo
+[profiles.strict]
+approval_policy = "on-request"
+sandbox_mode    = "read-only"
+web_search      = "cached"
+
+[profiles.yolo]
+approval_policy = "never"
+sandbox_mode    = "workspace-write"
+web_search      = "live"
+
+# --- 多 Agent 角色配置 ---
+[agents]
+max_threads = 5
+max_depth   = 2
+
+[agents.pm]
+description = "产品经理：需求澄清、PRD 撰写、验收标准维护与 UI/QA 移交，不碰业务代码。"
+config_file = "agents/pm.toml"
+
+[agents.dev]
+description = "全栈工程师：业务代码实现、TDD 开发循环、代码维护与多 Agent 协作。"
+config_file = "agents/dev.toml"
+
+[agents.architect]
+description = "系统架构师：Code Review、架构决策、规则维护与知识沉淀，不写 CRUD 代码。"
+config_file = "agents/architect.toml"
+
+[agents.ui]
+description = "UI 工程师：设计规范建设、Design Token 维护、双视窗 PRD 与界面实现。"
+config_file = "agents/ui.toml"
+
+[agents.qa]
+description = "QA 测试工程师：先写验收测试、执行自动化测试并维护质量门禁。"
+config_file = "agents/qa.toml"
+
+[agents.project-manager]
+description = "项目经理：项目排期、进度追踪、阻塞管理和状态报告，不碰需求分析和业务代码。"
+config_file = "agents/project-manager.toml"

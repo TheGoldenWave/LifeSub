@@ -57,6 +57,25 @@
 - 决定：首版 Codex 插件连接本机 LifeSub Core，通过本地或仓库插件市场分发。
 - 延后：需要公网 MCP 与认证的公共 ChatGPT/Codex 插件。
 
+## D-011：Logo 与 macOS 菜单栏呈现
+
+- 状态：已确认
+- 决定：菜单栏常驻图标采用 `A1 · Balanced Evidence Trace`；录音中沿用 A1，通过间断播放的音波脉冲表达状态，不永久附加独立录音圆点。
+- 品牌：Dock / App Icon 已定稿为 `B2 · Evidence First Narration Bubble`，使用深色圆角底板、加宽气泡边框与白色 A1 Evidence Trace；官网与品牌主视觉沿用该母版扩展。
+- 布局：优先探索将 A1 放在刘海左侧或右侧的专属邻近位置；只有公共 API、空间和多屏回退可验证时启用，标准菜单栏 `NSStatusItem` 始终作为可靠回退。
+- 无障碍：Reduce Motion 时禁用 pulse；状态必须同时提供文字或可访问名称，不能只靠动画或颜色。
+- 详情：见 [`docs/design/lifesub-logo-decision.md`](design/lifesub-logo-decision.md)。
+
+## D-012：多设备录音作为 Evidence 治理能力
+
+- 状态：已确认，规划至 V0.3
+- 决定：LifeSub 支持将 Mac、手机、手表等设备对同一事件产生的多份录音和 ASR 结果进行归并、校准、去重、冲突治理，并产出新的最终合并音频/ASR Revision 与 Markdown 文档。
+- 原则：原始录音、设备独立 ASR 和历史 Revision 永久保留；合并结果必须是新的不可变 Revision，不能静默覆盖来源结果。
+- 追溯：最终片段必须能追溯到设备、Physical Audio Chunk、原始 ASR Revision、时间范围、采用的治理规则和冲突来源。
+- 边界：这属于 Audio、Transcript、Evidence 的治理，不扩展为通用文件管理、会议纪要、Project 状态或长期知识治理。
+- 默认策略：先做确定性时间对齐、音频质量评估、重叠检测和来源优先级；ASR 冲突需要保留来源，不能静默选择“看起来更好”的文本。
+- 删除与保留：本版本不自动删除低质量来源；用户确认的合并结果与来源保留策略另行建模。
+
 ## 待决事项
 
 - 技术栈与进程边界。
@@ -67,4 +86,3 @@
 - Malow 插件接口。
 - MVP 的量化质量与性能指标。
 - 项目开源许可证。
-

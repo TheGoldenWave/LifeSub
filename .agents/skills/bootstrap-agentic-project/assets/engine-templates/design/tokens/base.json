@@ -1,0 +1,86 @@
+{
+  "_comment": "Design Tokens 基准文件。由 ui-agent 维护，所有代码中的颜色/间距/字号必须引用这里的 Token，禁止硬编码。",
+  "colors": {
+    "primary": {
+      "50": "#eff6ff",
+      "100": "#dbeafe",
+      "400": "#60a5fa",
+      "500": "#3b82f6",
+      "600": "#2563eb",
+      "900": "#1e3a8a"
+    },
+    "neutral": {
+      "0":   "#ffffff",
+      "50":  "#f9fafb",
+      "100": "#f3f4f6",
+      "200": "#e5e7eb",
+      "400": "#9ca3af",
+      "600": "#4b5563",
+      "800": "#1f2937",
+      "900": "#111827"
+    },
+    "success": "#22c55e",
+    "warning": "#f59e0b",
+    "error":   "#ef4444",
+    "info":    "#3b82f6"
+  },
+  "spacing": {
+    "1":  "4px",
+    "2":  "8px",
+    "3":  "12px",
+    "4":  "16px",
+    "5":  "20px",
+    "6":  "24px",
+    "8":  "32px",
+    "10": "40px",
+    "12": "48px",
+    "16": "64px"
+  },
+  "typography": {
+    "fontFamily": {
+      "sans":  "Inter, 'PingFang SC', 'Helvetica Neue', sans-serif",
+      "mono":  "'JetBrains Mono', Consolas, monospace"
+    },
+    "fontSize": {
+      "xs":   "12px",
+      "sm":   "14px",
+      "base": "16px",
+      "lg":   "18px",
+      "xl":   "20px",
+      "2xl":  "24px",
+      "3xl":  "30px",
+      "4xl":  "36px"
+    },
+    "fontWeight": {
+      "regular":   "400",
+      "medium":    "500",
+      "semibold":  "600",
+      "bold":      "700"
+    },
+    "lineHeight": {
+      "tight":  "1.25",
+      "normal": "1.5",
+      "loose":  "1.75"
+    }
+  },
+  "borderRadius": {
+    "sm":   "4px",
+    "md":   "8px",
+    "lg":   "12px",
+    "xl":   "16px",
+    "full": "9999px"
+  },
+  "shadow": {
+    "sm":  "0 1px 2px rgba(0,0,0,0.05)",
+    "md":  "0 4px 6px rgba(0,0,0,0.07)",
+    "lg":  "0 10px 15px rgba(0,0,0,0.1)",
+    "xl":  "0 20px 25px rgba(0,0,0,0.1)"
+  },
+  "zIndex": {
+    "base":    "0",
+    "raised":  "10",
+    "overlay": "100",
+    "modal":   "200",
+    "toast":   "300"
+  }
+}

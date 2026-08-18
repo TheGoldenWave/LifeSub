@@ -1,0 +1,54 @@
+#!/bin/bash
+# 预览PRD-macOS.command — 双击即可在浏览器预览 PRD 双视窗
+cd "$(dirname "$0")" || { echo "❌ 找不到 PRD 目录"; exit 1; }
+
+PORT=8080
+HTML_FILE=".artifacts/PRD_dual-pane.html"
+PID_FILE=".artifacts/.server.pid"
+
+cleanup_port() {
+    if [ -f "$PID_FILE" ]; then
+        OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+            echo "🧹 停止残留服务器 (PID: $OLD_PID)..."
+            kill "$OLD_PID" 2>/dev/null; sleep 1
+            kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
+        fi
+        rm -f "$PID_FILE"
+    fi
+    if command -v lsof &>/dev/null; then
+        BLOCKING_PID=$(lsof -ti:"$PORT" 2>/dev/null)
+        if [ -n "$BLOCKING_PID" ]; then
+            echo "🧹 端口 $PORT 被占用 (PID: $BLOCKING_PID)，清理中..."
+            echo "$BLOCKING_PID" | xargs kill 2>/dev/null; sleep 1
+            BLOCKING_PID=$(lsof -ti:"$PORT" 2>/dev/null)
+            [ -n "$BLOCKING_PID" ] && echo "$BLOCKING_PID" | xargs kill -9 2>/dev/null
+        fi
+    fi
+}
+
+on_exit() {
+    [ -f "$PID_FILE" ] && { SERVER_PID=$(cat "$PID_FILE" 2>/dev/null); [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null; rm -f "$PID_FILE"; }
+    exit
+}
+trap on_exit INT TERM EXIT
+
+cleanup_port
+echo "🚀 启动 PRD 双视窗预览..."
+
+if command -v npx &>/dev/null; then
+    npx serve -l $PORT >/dev/null 2>&1 &
+elif command -v python3 &>/dev/null; then
+    python3 -m http.server $PORT >/dev/null 2>&1 &
+elif command -v python &>/dev/null; then
+    python -m SimpleHTTPServer $PORT >/dev/null 2>&1 &
+else
+    echo "❌ 未找到 Node.js 或 Python"; exit 1
+fi
+
+echo $! > "$PID_FILE"
+sleep 2
+echo "✅ 服务已启动"
+open "http://localhost:${PORT}/${HTML_FILE}"
+echo "💡 按 [Ctrl+C] 停止服务器"
+wait

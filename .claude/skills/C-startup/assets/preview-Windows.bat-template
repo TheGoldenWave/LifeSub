@@ -1,0 +1,54 @@
+@echo off
+chcp 65001 >nul
+REM 预览PRD-Windows.bat — 双击即可在浏览器预览 PRD 双视窗
+
+cd /d "%~dp0"
+IF NOT EXIST ".artifacts\PRD_dual-pane.html" (
+    echo ❌ 找不到 .artifacts\PRD_dual-pane.html
+    pause & exit /b 1
+)
+
+SET PORT=8080
+SET HTML_FILE=.artifacts/PRD_dual-pane.html
+SET PID_FILE=.artifacts\.server.pid
+
+IF EXIST "%PID_FILE%" (
+    SET /P OLD_PID=<"%PID_FILE%"
+    IF DEFINED OLD_PID ( taskkill /PID %OLD_PID% /F >nul 2>&1 )
+    del /f "%PID_FILE%" >nul 2>&1
+)
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":%PORT% " ^| findstr "LISTENING" 2^>nul') do (
+    if not "%%a"=="0" ( taskkill /PID %%a /F >nul 2>&1 )
+)
+
+echo 🚀 启动 PRD 双视窗预览...
+where python >nul 2>&1
+IF %ERRORLEVEL%==0 (
+    start "" /B python -m http.server %PORT% >nul 2>&1
+    timeout /t 2 /nobreak >nul
+    for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":%PORT% " ^| findstr "LISTENING" 2^>nul') do (
+        echo %%a> "%PID_FILE%" & goto :open
+    )
+    goto :open
+)
+where npx >nul 2>&1
+IF %ERRORLEVEL%==0 (
+    start "" /B npx serve -l %PORT% >nul 2>&1
+    timeout /t 3 /nobreak >nul
+    for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":%PORT% " ^| findstr "LISTENING" 2^>nul') do (
+        echo %%a> "%PID_FILE%" & goto :open
+    )
+    goto :open
+)
+echo ❌ 未找到 Python 或 Node.js & pause & exit /b 1
+
+:open
+start "" http://localhost:%PORT%/%HTML_FILE%
+echo ✅ 预览已打开。关闭此窗口停止服务器。
+echo 💡 按任意键停止
+pause >nul
+IF EXIST "%PID_FILE%" (
+    SET /P SERVER_PID=<"%PID_FILE%"
+    IF DEFINED SERVER_PID ( taskkill /PID %SERVER_PID% /F >nul 2>&1 )
+    del /f "%PID_FILE%" >nul 2>&1
+)

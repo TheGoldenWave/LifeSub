@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>{{project_name}} - PRD 双视窗</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/deflate-js/0.2.3/rawdeflate.min.js"></script>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: false, theme: 'default' });
+        window.mermaid = mermaid;
+    </script>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; display: flex; height: 100vh; margin: 0; background: #f1f5f9; }
+        .left-pane { flex: 1; min-width: 0; padding: 32px 36px; overflow-y: auto; border-right: 2px solid #e2e8f0; background: #fff; line-height: 1.75; color: #334155; }
+        .right-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #f8fafc; }
+        .right-pane iframe { flex: 1; border: none; }
+
+        /* Typography */
+        .left-pane h1 { font-size: 1.75rem; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: .4em; margin: 0 0 .8em; }
+        .left-pane h2 { font-size: 1.35rem; color: #0f172a; margin: 1.6em 0 .5em; border-bottom: 1px solid #f1f5f9; padding-bottom: .3em; }
+        .left-pane h3 { font-size: 1.1rem; color: #1e293b; margin: 1.4em 0 .4em; }
+        .left-pane p { margin: .6em 0; }
+
+        /* Inline code & blocks */
+        .left-pane code { background: #f1f5f9; padding: .15em .35em; border-radius: 4px; font-family: "SF Mono", Monaco, Consolas, monospace; font-size: .88em; color: #be185d; }
+        .left-pane pre { background: #1e293b; border-radius: 8px; padding: 16px; margin: 1em 0; overflow-x: auto; }
+        .left-pane pre code { background: none; color: #e2e8f0; padding: 0; font-size: .84em; line-height: 1.6; }
+
+        /* Blockquote, tables, lists */
+        .left-pane blockquote { border-left: 4px solid #cbd5e1; margin: .8em 0; padding: .6em 1em; color: #64748b; background: #f8fafc; border-radius: 0 6px 6px 0; }
+        .left-pane table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: .92em; }
+        .left-pane th, .left-pane td { border: 1px solid #e2e8f0; padding: .55rem .75rem; text-align: left; }
+        .left-pane th { background: #f8fafc; font-weight: 600; }
+        .left-pane tr:nth-child(even) td { background: #fafbfd; }
+        .left-pane ul, .left-pane ol { padding-left: 1.6em; }
+        .left-pane li { margin-bottom: .3em; }
+
+        /* Banner */
+        .focus-banner { background: #3b82f6; color: #fff; padding: 8px 16px; font-size: .85em; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+        .focus-banner select { background: #fff; border: none; border-radius: 4px; padding: 4px 10px; font-size: .88em; margin-left: 8px; color: #1e293b; }
+
+        /* PlantUML */
+        .plantuml-img { max-width: 100%; display: block; margin: 1.5em auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+    </style>
+</head>
+<body>
+    <div class="left-pane" id="markdown-content"><p>加载需求文档中...</p></div>
+    <div class="right-pane">
+        <div class="focus-banner">
+            <span>&#x1f50d; 交互沙盒预览区</span>
+            <select id="sandbox-selector" onchange="updateSandbox(this.value)">
+                <option value="about:blank">-- 选择模块 --</option>
+            </select>
+        </div>
+        <iframe src="about:blank" id="sandbox-frame" title="沙盒原型区" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+    </div>
+
+    <script>
+        // 相对于本 HTML 文件的 PRD.md 路径
+        var prdMarkdownFile = '../PRD.md';
+
+        // ── PlantUML deflate 编码 ──
+        function append3bytes(b1, b2, b3) {
+            var c1 = b1 >> 2, c2 = ((b1 & 0x3) << 4) | (b2 >> 4),
+                c3 = ((b2 & 0xF) << 2) | (b3 >> 6), c4 = b3 & 0x3F;
+            return enc6(c1 & 0x3F) + enc6(c2 & 0x3F) + enc6(c3 & 0x3F) + enc6(c4 & 0x3F);
+        }
+        function enc6(b) {
+            if (b < 10) return String.fromCharCode(48 + b); b -= 10;
+            if (b < 26) return String.fromCharCode(65 + b); b -= 26;
+            if (b < 26) return String.fromCharCode(97 + b); b -= 26;
+            return b === 0 ? '-' : b === 1 ? '_' : '?';
+        }
+        function encodePlantuml(code) {
+            var s = unescape(encodeURIComponent(code));
+            var arr = []; for (var i = 0; i < s.length; i++) arr.push(s.charCodeAt(i));
+            var deflated = window.RawDeflate.deflate(arr);
+            return encode64(String.fromCharCode.apply(null, deflated));
+        }
+        function encode64(data) {
+            var r = '';
+            for (var i = 0; i < data.length; i += 3) {
+                if (i + 2 === data.length) r += append3bytes(data.charCodeAt(i), data.charCodeAt(i + 1), 0);
+                else if (i + 1 === data.length) r += append3bytes(data.charCodeAt(i), 0, 0);
+                else r += append3bytes(data.charCodeAt(i), data.charCodeAt(i + 1), data.charCodeAt(i + 2));
+            }
+            return r;
+        }
+
+        // ── Marked 配置 ──
+        var renderer = new marked.Renderer();
+        var origCode = renderer.code.bind(renderer);
+        renderer.code = function(code, lang, escaped) {
+            if (lang === 'mermaid') return '<div class="mermaid">' + code + '</div>';
+            if (lang === 'plantuml' || lang === 'puml') {
+                try { return '<img src="https://www.plantuml.com/plantuml/svg/' + encodePlantuml(code) + '" class="plantuml-img" />'; }
+                catch (e) { return '<pre><code class="language-plantuml">PlantUML 编码错误: ' + code + '</code></pre>'; }
+            }
+            return origCode(code, lang, escaped);
+        };
+        marked.setOptions({ renderer: renderer });
+
+        // ── 加载并渲染 ──
+        fetch(prdMarkdownFile)
+            .then(function(r) {
+                if (!r.ok) throw new Error('无法加载 ' + prdMarkdownFile + '。请确认文件路径正确，且通过 HTTP 服务器访问。');
+                return r.text();
+            })
+            .then(function(text) {
+                document.getElementById('markdown-content').innerHTML = marked.parse(text);
+                if (window.mermaid) setTimeout(function() { window.mermaid.run({ querySelector: '.mermaid' }); }, 100);
+            })
+            .catch(function(e) {
+                document.getElementById('markdown-content').innerHTML = '<p style="color:#dc2626;font-weight:600;">&#x274c; ' + e.message + '</p>';
+            });
+
+        function updateSandbox(url) { document.getElementById('sandbox-frame').src = url; }
+    </script>
+</body>
+</html>

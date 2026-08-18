@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "markitdown": {
+      "command": "uvx",
+      "args": [
+        "markitdown-mcp"
+      ]
+    },
+    "tapd-connector": {
+      "command": "node",
+      "args": [
+        "path/to/tapd-mcp-server/build/index.js"
+      ],
+      "env": {
+        "TAPD_API_KEY": "YOUR_KEY_HERE"
+      }
+    },
+    "github-connector": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "YOUR_PAT_HERE"
+      }
+    }
+  }
+}

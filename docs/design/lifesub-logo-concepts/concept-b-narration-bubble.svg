@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18" fill="none">
+  <title>LifeSub Concept B — Narration Bubble</title>
+  <g stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.15 3.35h11.7c.75 0 1.35.6 1.35 1.35v6.75c0 .75-.6 1.35-1.35 1.35H8.1l-3.2 1.9.65-1.9h-2.4c-.75 0-1.35-.6-1.35-1.35V4.7c0-.75.6-1.35 1.35-1.35Z"/>
+    <path d="M4.4 8.15h1.5l1.05-1.65 1.35 3.25 1.45-2.35 1.15 1.45h2.7"/>
+  </g>
+</svg>

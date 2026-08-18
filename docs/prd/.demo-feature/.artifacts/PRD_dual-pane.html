@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>PRD - Dual Pane</title>
+    <!-- 引入 marked.js 用于在浏览器端解析 Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- 引入 rawdeflate 库用于 PlantUML 的字符串压缩编码 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/deflate-js/0.2.3/rawdeflate.min.js"></script>
+    <!-- 引入 Mermaid.js 用于渲染流程图 -->
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: false, theme: 'default' });
+        window.mermaid = mermaid;
+    </script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; height: 100vh; margin: 0; }
+        .left-pane { flex: 1; padding: 30px; overflow-y: auto; border-right: 1px solid #e2e8f0; line-height: 1.7; color: #334155; }
+        .right-pane { flex: 1; padding: 0; background: #f8fafc; display: flex; flex-direction: column; position: relative; }
+        .right-pane iframe { width: 100%; height: 100%; border: none; }
+
+        /* 简单的 Markdown 样式优化 */
+        .left-pane h1, .left-pane h2, .left-pane h3 { color: #0f172a; margin-top: 1.5em; margin-bottom: 0.5em; }
+        .left-pane h1 { font-size: 2em; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.3em; }
+        .left-pane h2 { font-size: 1.5em; }
+        .left-pane code { background: #f1f5f9; padding: 0.2em 0.4em; border-radius: 4px; font-family: monospace; font-size: 0.9em; color: #db2777; }
+        .left-pane pre code { display: block; padding: 1rem; overflow-x: auto; color: #e2e8f0; background: #1e293b; }
+        .left-pane blockquote { border-left: 4px solid #cbd5e1; margin: 0; padding-left: 1rem; color: #64748b; background: #f8fafc; padding-top: 0.5rem; padding-bottom: 0.5rem; border-radius: 0 4px 4px 0; }
+        .left-pane table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+        .left-pane th, .left-pane td { border: 1px solid #e2e8f0; padding: 0.5rem; text-align: left; }
+        .left-pane th { background-color: #f8fafc; }
+
+        /* 顶部提示条 */
+        .focus-banner { background: #3b82f6; color: white; padding: 8px 15px; font-size: 0.9em; display: flex; justify-content: space-between; align-items: center; }
+        .focus-banner select { background: white; border: none; border-radius: 4px; padding: 4px 8px; font-size: 0.9em; }
+
+        /* PlantUML 渲染样式 */
+        .plantuml-img { max-width: 100%; display: block; margin: 1.5em auto; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); }
+    </style>
+</head>
+<body>
+    <div class="left-pane" id="markdown-content">
+        <!-- Markdown 内容将被渲染在这里 -->
+        <p>正在加载需求文档...</p>
+    </div>
+    <div class="right-pane">
+        <div class="focus-banner">
+            <span>🔍 交互沙盒预览区 (Focus Mode)</span>
+            <select id="sandbox-selector" onchange="updateSandbox(this.value)">
+                <option value="about:blank">-- 请选择要预览的模块 --</option>
+                <option value="http://localhost:3000?focus=login">登录模块 (示例)</option>
+                <option value="http://localhost:3000?focus=dashboard">控制台 (示例)</option>
+            </select>
+        </div>
+        <!-- 这里可以放置沙盒原型的 URL，例如本地运行的组件预览库，或静态 HTML 页面 -->
+        <iframe src="about:blank" id="sandbox-frame" title="沙盒原型区" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+    </div>
+
+    <script>
+        // PRD.md 在上一级目录（本文件位于 .artifacts/ 子目录中）
+        const prdMarkdownFile = '../PRD.md';
+
+        // 配置 Marked 支持 Mermaid 和 PlantUML
+        const renderer = new marked.Renderer();
+        const originalCodeRenderer = renderer.code.bind(renderer);
+
+        // PlantUML 编码逻辑 (基于 deflate)
+        function encode64(data) {
+            let r = "";
+            for (let i = 0; i < data.length; i += 3) {
+                if (i + 2 == data.length) {
+                    r += append3bytes(data.charCodeAt(i), data.charCodeAt(i + 1), 0);
+                } else if (i + 1 == data.length) {
+                    r += append3bytes(data.charCodeAt(i), 0, 0);
+                } else {
+                    r += append3bytes(data.charCodeAt(i), data.charCodeAt(i + 1), data.charCodeAt(i + 2));
+                }
+            }
+            return r;
+        }
+        function append3bytes(b1, b2, b3) {
+            let c1 = b1 >> 2;
+            let c2 = ((b1 & 0x3) << 4) | (b2 >> 4);
+            let c3 = ((b2 & 0xF) << 2) | (b3 >> 6);
+            let c4 = b3 & 0x3F;
+            let r = "";
+            r += encode6bit(c1 & 0x3F);
+            r += encode6bit(c2 & 0x3F);
+            r += encode6bit(c3 & 0x3F);
+            r += encode6bit(c4 & 0x3F);
+            return r;
+        }
+        function encode6bit(b) {
+            if (b < 10) return String.fromCharCode(48 + b);
+            b -= 10;
+            if (b < 26) return String.fromCharCode(65 + b);
+            b -= 26;
+            if (b < 26) return String.fromCharCode(97 + b);
+            b -= 26;
+            if (b == 0) return '-';
+            if (b == 1) return '_';
+            return '?';
+        }
+
+        renderer.code = function(code, language, isEscaped) {
+            if (language === 'mermaid') {
+                return `<div class="mermaid">${code}</div>`;
+            }
+            if (language === 'plantuml' || language === 'puml') {
+                try {
+                    // 使用 PlantUML 官方在线渲染服务
+                    // 1. URL 编码处理中文
+                    const s = unescape(encodeURIComponent(code));
+                    // 2. Deflate 压缩
+                    const arr = [];
+                    for (let i = 0; i < s.length; i++) {
+                        arr.push(s.charCodeAt(i));
+                    }
+                    const deflated = window.RawDeflate.deflate(arr);
+                    // 3. 自定义 Base64 编码
+                    const encoded = encode64(String.fromCharCode.apply(null, deflated));
+                    const url = "https://www.plantuml.com/plantuml/svg/" + encoded;
+                    return `<img src="${url}" alt="PlantUML Diagram" class="plantuml-img" />`;
+                } catch (e) {
+                    console.error("PlantUML encoding error:", e);
+                    return `<pre><code class="language-plantuml">编码错误：\n${code}</code></pre>`;
+                }
+            }
+            return originalCodeRenderer(code, language, isEscaped);
+        };
+        marked.setOptions({ renderer: renderer });
+
+        // 获取并渲染 Markdown
+        fetch(prdMarkdownFile)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('未能加载 ' + prdMarkdownFile + '。请确保你在本地服务器环境中运行（双击 预览PRD-macOS.command 或 预览PRD-Windows.bat），并且文件存在。');
+                }
+                return response.text();
+            })
+            .then(text => {
+                document.getElementById('markdown-content').innerHTML = marked.parse(text);
+                // 渲染 Mermaid 图表
+                if (window.mermaid) {
+                    setTimeout(() => { window.mermaid.run({ querySelector: '.mermaid' }); }, 100);
+                }
+            })
+            .catch(error => {
+                document.getElementById('markdown-content').innerHTML = '<p style="color:red;">加载错误: ' + error.message + '</p>';
+            });
+
+        // 动态更新右侧沙盒
+        function updateSandbox(url) {
+            document.getElementById('sandbox-frame').src = url;
+        }
+    </script>
+</body>
+</html>

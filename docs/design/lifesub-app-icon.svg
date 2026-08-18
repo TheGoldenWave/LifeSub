@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <title>LifeSub App Icon — Narration Bubble, Evidence First</title>
+  <rect width="1024" height="1024" rx="224" fill="#1f2228"/>
+  <path
+    d="M238 234h548c55 0 100 45 100 100v294c0 55-45 100-100 100H510L318 842l48-114H238c-55 0-100-45-100-100V334c0-55 45-100 100-100Z"
+    fill="#292e37"
+    stroke="#59616e"
+    stroke-width="42"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M264 490h116l64-98 84 210 92-176 72 88h102"
+    stroke="#f4f6f8"
+    stroke-width="70"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

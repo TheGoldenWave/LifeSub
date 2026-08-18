@@ -27,7 +27,19 @@ xcuserdata/
 node_modules/
 dist/
 coverage/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+test-results/
+.playwright-cli/
+target/
+src-tauri/gen/schemas/
 
 # Logs
 *.log
 
+
+# Agentic Engineering: MCP configs may contain API keys
+.claude/mcp-servers.json
+.sources/.converted/
+.codex/config.toml

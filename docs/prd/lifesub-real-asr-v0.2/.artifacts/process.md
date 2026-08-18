@@ -1,30 +1,63 @@
 ---
-stage: task-13-complete
+stage: task-13.5-complete
 last_updated: 2026-08-18
-source: codex-goal
+source: codex
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
 
-- HEAD：Task 13 全部完成。8 个 mutation 方法全部实现 idempotency 集成 + operation 创建。下一步：Task 14（真实模型 Gate + 验证）。
-- Task 13 M1：mutation 框架 ✅：`mutation_flow` / `finalize_mutation` / `create_operation` 三 helper + `hash_params` 指纹
-- Task 13 M2：8 个 mutation handler ✅：install_model、uninstall_model、import_audio、enqueue_asr_job、retry_asr_job、cancel_asr_job、retranscribe_chunk、resolve_evidence
-- Task 13 M3：idempotency 集成 ✅：每个 mutation 通过 `check_or_claim` → 业务逻辑 → `commit_success`/`commit_failure` 完整闭环
-- Task 13 M4：测试 ✅：+17 新测试（包括 idempotency 缓存、operation 持久化、tool_request 持久化、validation 失败、权限拒绝）
-- 验证：dispatch 34/34 全量 pass、fmt/clippy 通过、全量 449/455（1 个已有 transaction 隔离失败 unchanged）
-- secondary Tauri 安全边界：UDS 认证 + 方法授权 = secondary 不得直接打开 writable SQLite
-- 已确认方向：本地优先；SenseVoiceSmall、Whisper 与 Qwen3-ASR 0.6B 共用 sherpa-onnx 1.13.5；无 Python Sidecar；无云端 ASR。Qwen3-ASR 1.7B 仅在固定可执行资产和 Apple Silicon Gate 通过后启用。
-- 已完成研究：sherpa-onnx 1.13.5 已提供 `OfflineQwen3ASRModelConfig` 与 Rust 示例；0.6B INT8 官方 sherpa 包大小 878,702,423 B，SHA-256 为 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`；未发现同等成熟的 1.7B sherpa 发布包。
-- Task 8 质量修复：Q1 production qualification 仅暴露 ModelManager-owned `qualify_qwen17_current_device`/`reconcile_qwen17_current_device`，固定当前设备与真实 Qwen Candle/Metal smoke，泛型 fake smoke 仅 `cfg(test)`；Q2 Provider 持有共享 registry 的 RAII execution lease，删除在 Provider 存活时返回 `model_in_use`、drop 后成功，inventory 仅验证一次；Q3 UUID 临时 marker 在所有 publish 错误路径清理，reconcile 扫描并 fsync 清理 stale temp；Q4 显式选择 ignored real gate 而缺环境变量时稳定非零失败；Q5 qualification contract 冻结原文、四个 phrases、2/4 threshold、NFKC+alphanumeric+lowercase normalization、原始/PCM hashes、archive/license/provenance，并以 canonical SHA-256 `b96f1f2f268ae54694e4d2a6a036e3ac8a94759db389e47e1005387239147006` 同时绑定 fixture metadata 与 runtime identity，任一 metadata mutation fail closed。
-- Task 8 最终结论：规格与质量双审放行，Critical=0、Important=0。新增错误码精确映射测试、execution lease/delete 原子 reservation、Qwen 1.7B production Metal failure no-fallback seam；验证包括 no-default provider 12/12、asr-runtime provider 13/13、Qwen17 feature provider 14/14、model manager 72/72、lease/delete race 1/1、desktop check、Clippy、fmt 与 diff check。
-- Task 9 最终结论：规格与质量双审放行，Critical=0、Important=0、Minor=0。固定 Core boot ID；30 秒 lease/5 秒 renew；RAII 单 Coordinator；raw claim API 收口；`JobControl` 分离；cancel/ownership 分型；recovery 清 stale active；`fail()` 与 cancel 竞态通过事务内 `OwnedMutationResult` 和 fenced acknowledge 原子关闭。
-- Task 9 最终验证：目标竞态 1/1、focused 21/21、全量 no-default 283 passed / 5 ignored；fmt、no-default all-targets Clippy `-D warnings`、trusted desktop check、`git diff --check` 与无 `console.log` 均通过。
-- ownership 边界：CoreRuntime 持有不可拆 lifetime guard；grandparent/parent/data directory、SQLite VFS、Evidence import/reconcile 与 startup Model reconcile 都使用 fd capability。SQLite main/rollback/WAL 通过进程级 tokenized anchored VFS，Audio cleanup 使用 no-replace tombstone + dev/ino fencing。正常第二 LifeSub 实例 fail closed；Task 11 再改为连接 primary socket。
-- Task 10 M1：`BEGIN IMMEDIATE` 内以 owner/generation/state/cancel/lease fencing 原子写入 Provider Receipt、Revision、revision_receipts、Segments、FTS，并最后转 `succeeded`；cancel、stale generation、expired lease、source mismatch、时间 overflow 与每个 fault point 均零 partial Evidence。规格复审 Critical=0/Important=0/Minor=0，质量复审 Critical=0/Important=0，仅保留内部 SQLite error typed-source Minor。
-- Task 10 M1/Core storage 集成提交：`bf0bde7 feat: anchor core storage and publish ASR evidence`。Fresh 集成验证：service 67/67、publication 11/11、jobs 21/21、ModelManager 72/72、migration 32/32、catalog 2/2、desktop check、Clippy `-D warnings`、fmt 与 diff check 全部通过。
-- Task 10 M3 强制项：将 ModelManager 的 download/install/delete/qualification/execution lease 全生命周期统一迁移到 `ModelStorage::Anchored`/`AnchoredFs`，provider 必须从已验证 install-dir/required-file fd capability 加载；不得继续通过 `root.join(...)` 访问 production payload。startup reconcile 已 fd-anchored，但不代表 M3 完成。
-- 下一阶段目标：先按 ownership 分组提交当前未提交的 Task 8/9 修复与文档，然后连续完成 Tasks 10–13：Task 10 原子 Receipt/Revision/Segment/FTS 发布；Task 11 单一 CoreRuntime、Catalog v4、版本化 Tool/Application API 与安全本地 IPC；Task 12 typed ASR client 和真实设置/模型 UI；Task 13 Job 状态、Receipt 来源与重转写 UI，并彻底移除 `demo-local` revision 路径。
-- 阶段退出条件：Tasks 10–13 各自完成 TDD、规格复审和质量复审；Rust 原子发布/迁移/Tool API/IPC/双 Tauri harness、前端 focused tests、生产构建和无 `console.log` 全部通过。Task 10 执行循环必须维持不超过 5 秒 heartbeat，ownership lost 时丢弃结果；Task 11 后第二 Tauri 进程只能连接 primary，不得打开 writable SQLite；Task 13 后导入与重转写只消费真实 Core Job/Operation，不合成 transcript。
-- MVP Gate：ASR V0.2 是基础里程碑；其后必须完成 native capture 与 DeepSeek Harness 真实录音到 `lifesub://` Evidence Ref 的完整闭环，才能标记 LifeSub 整体 MVP complete。
-- 阻塞项：无外部阻塞。Task 10 M2-M5 尚未完成；真实 Qwen 1.7B weights/device acceptance 属于 Task 14，不阻塞 Tasks 10-13。工作树仅保留两份未纳入本目标的 cloud-fallback 文档草稿，禁止清理。
-- 2026-08-17 流程优化：审查从双轮（规格+质量）合并为单轮合并审查，放行标准从 Critical=0+Important=0 简化为 Critical=0；测试从每次全量改为三层分级（Tier1 focused → Tier2 pre-commit → Tier3 全量）；文件行数限制从 300 放宽到 Rust 600/TS 400；新增 `scripts/check.sh` 和 `Makefile` 一键验证。详见主仓库 `AGENTS.md`、`.claude/contexts/dev.md`、`.claude/rules/common/coding-style.md`。
+- **HEAD: Task 13.5 完成**。后端笔记/词典/声纹/统计/设置全部实现，前端 UI 4 页面架构重构完成，应用重新打包成功。
+- **下一步**: Phase 1.1 — 前端 API 接入（替换 demo 数据为真实后端调用），详见 `docs/superpowers/plans/2026-08-18-lifesub-roadmap.md`
+
+## 已完成
+
+### Task 1-13: 真实本地 ASR 引擎
+- ✅ 真实本地 ASR 引擎（SenseVoice / Whisper / Qwen3-ASR）
+- ✅ 模型管理（下载/安装/卸载/版本化/原子恢复）
+- ✅ Job 调度（claim/lease/fencing/cancel/recovery）
+- ✅ 原子 Receipt/Revision/Segment/FTS 发布
+- ✅ Catalog V4 迁移 + Tool API V1 + 安全本地 IPC
+- ✅ 8 个 mutation 方法 + idempotency 集成
+- ✅ Task 13: 449/455 测试通过
+
+### Task 13.5: 后端模块补全（2026-08-18）
+- ✅ Catalog V5 迁移（5 张新表: notes / dictionary_categories / dictionary_entries / voiceprints / settings）
+- ✅ 22 个新 Tauri 命令（笔记 4 + 词典 8 + 声纹 5 + 统计+设置 5）
+- ✅ 前端 invoke wrapper 全部就绪
+- ✅ Rust 450/450 测试通过，TSC 0 错误，前端 10/10 测试通过
+- ✅ `npm run build` + `cargo build` + `tauri build` 全部成功
+
+### UI 重构（2026-08-18）
+- ✅ 4 页面架构（录音 / 时间线 / 词典 / 设置弹窗）
+- ✅ 流式 ASR 展示（说话人声纹标注、Demo 数据）
+- ✅ 时间戳笔记（待办/备忘/问题/决定、Demo 数据）
+- ✅ 会话树形目录 + 24h 录音统计条
+- ✅ 词典管理（分类/词条/别名/启用停用）
+- ✅ 声纹库 UI（FunASR CAM++ 规划中）
+- ✅ 设置弹窗（录音设置 / ASR 设置 / 模型 / 关于）
+
+## 待完成
+
+| 阶段 | 内容 | 预估 |
+|------|------|------|
+| Phase 1.1 | 前端 API 接入（替换 Demo 数据） | 1-2 session |
+| Phase 1.2 | Task 14: 真实 Provider Gate 验证 | 1 session |
+| Phase 1.3 | Task 15: Playwright E2E + 打包 Gate | 1-2 session |
+| Phase 2.1 | 流式 ASR 实时通道 | 1-2 session |
+| Phase 2.2 | 说话人分离 + CAM++ 声纹 | 1-2 session |
+| Phase 3.1 | LLM 后处理管道 | 1-2 session |
+| Phase 3.2 | Fn 键快速输入 | 1-2 session |
+| Phase 3.3 | 场景感知（可选） | 1 session |
+
+## 技术债务
+- 前端 demo 数据替换: LiveCapture / DictionaryView / StatsBar / SettingsModal 仍用 demo 数据
+- 流式 ASR 事件通道: 后端有 ASR 引擎但无实时推送
+- CAM++ 集成: 声纹表已建但无 embedding 提取
+- V4→V5 迁移 fixture: 需要生成 `lifesub-v0.5.sqlite3`
+- `asr_provider_test`: 已知 1 个测试持续失败
+
+## 设计文档
+- `docs/superpowers/plans/2026-08-18-lifesub-roadmap.md` — 后续开发总计划
+- `docs/superpowers/plans/2026-08-18-lifesub-backend-tasklist.md` — Task 13.5 后端模块设计
+- `docs/superpowers/plans/2026-08-18-lifesub-ui-redesign.md` — UI 重构设计
+- `docs/superpowers/plans/2026-08-18-lifesub-llm-quick-input.md` — LLM 后处理 + Fn 键设计

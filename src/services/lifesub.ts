@@ -225,3 +225,13 @@ export function getRecordingConfig() {
 export function setRecordingConfig(config: CoreRecordingConfig) {
   return invoke('set_recording_config', { config })
 }
+
+// ── Phase 2.1: Streaming capture ─────────────────────────────────────────
+
+export function startStreamingCapture() {
+  return invoke('start_streaming_capture')
+}
+
+export function stopStreamingCapture() {
+  return invoke('stop_streaming_capture')
+}

@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { CirclePause, Square, Plus, Copy } from 'lucide-react'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { NotePanel } from './NotePanel'
 import { loadNotes, createNoteAdapter, deleteNoteAdapter } from '../data/adapter'
+import { startStreamingCapture, stopStreamingCapture, isTauriRuntime } from '../services/lifesub'
 import type { CaptureMode, CaptureState, LiveSegment, CaptureNote } from '../domain'
 
 interface LiveCaptureProps {
@@ -22,11 +24,15 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
   const [segments, setSegments] = useState<LiveSegment[]>([])
   const [notes, setNotes] = useState<CaptureNote[]>([])
   const [showDemo, setShowDemo] = useState(false)
+  const unlistenRef = useRef<UnlistenFn | null>(null)
 
   useEffect(() => {
     loadNotes('current').then((loaded) => {
       if (loaded.length > 0) setNotes(loaded)
     })
+    return () => {
+      if (unlistenRef.current) unlistenRef.current()
+    }
   }, [])
 
   const formatTime = (ms: number) => {
@@ -34,18 +40,47 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
     return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
   }
 
-  const startCapture = () => {
+  const startCapture = async () => {
     setCaptureState('recording')
     setSegments([])
     setNotes([])
-    setTimeout(() => {
-      setSegments(DEMO_SEGMENTS)
-      setShowDemo(true)
-    }, 1000)
+
+    if (isTauriRuntime()) {
+      try {
+        // Listen for streaming ASR segments from the backend
+        const unlisten = await listen<LiveSegment>('asr-live-segment', (event) => {
+          setSegments((prev) => [...prev, event.payload].sort((a, b) => a.startMs - b.startMs))
+        })
+        unlistenRef.current = unlisten
+        await startStreamingCapture()
+      } catch {
+        // Fallback to demo if streaming fails
+        setTimeout(() => {
+          setSegments(DEMO_SEGMENTS)
+          setShowDemo(true)
+        }, 1000)
+      }
+    } else {
+      // Non-Tauri: use demo segments
+      setTimeout(() => {
+        setSegments(DEMO_SEGMENTS)
+        setShowDemo(true)
+      }, 1000)
+    }
   }
 
-  const stopCapture = () => {
+  const stopCapture = async () => {
     setCaptureState('stopped')
+
+    if (unlistenRef.current) {
+      unlistenRef.current()
+      unlistenRef.current = null
+    }
+    try {
+      await stopStreamingCapture()
+    } catch {
+      // stop silently if not running
+    }
     onNotice('录音已保存，可在时间线页面查看。')
   }
 
@@ -84,7 +119,7 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
             <strong>
               {captureState === 'idle' ? '准备就绪' : captureState === 'recording' ? '正在记录' : captureState === 'paused' ? '已暂停' : '记录已封存'}
             </strong>
-            <small>{captureMode === 'smart' ? '智能路由 · 单声道 · 未检测到通话' : '仅麦克风'}</small>
+            <small>{isTauriRuntime() ? '流式 ASR · 实时' : captureMode === 'smart' ? '智能路由 · 单声道 · 未检测到通话' : '仅麦克风'}</small>
           </div>
         </div>
         <div className="live-capture__asr">

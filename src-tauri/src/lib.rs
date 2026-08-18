@@ -1,5 +1,7 @@
 pub mod api;
 pub mod asr;
+#[cfg(feature = "desktop")]
+pub mod capture;
 pub mod catalog;
 pub mod domain;
 pub mod service;
@@ -82,6 +84,9 @@ pub fn run() {
             commands::set_asr_config,
             commands::get_recording_config,
             commands::set_recording_config,
+            // Phase 2.1 streaming
+            commands::start_streaming_capture,
+            commands::stop_streaming_capture,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LifeSub desktop app");

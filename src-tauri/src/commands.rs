@@ -1,8 +1,10 @@
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::capture::StreamingCapture;
 use crate::catalog::Catalog;
 use crate::domain::{
     AudioChunk, CaptureNote, CaptureSession, CaptureState, DictionaryCategory, DictionaryEntry,
@@ -12,6 +14,7 @@ use crate::service::{CoreRuntime, EvidenceService, parse_evidence_uri};
 
 pub struct AppState {
     runtime: CoreRuntime,
+    streaming: Mutex<StreamingCapture>,
 }
 
 #[derive(Serialize)]
@@ -34,8 +37,7 @@ impl AppState {
 
     fn initialize_at(data_dir: PathBuf) -> Result<Self, String> {
         let runtime = CoreRuntime::initialize(&data_dir).map_err(|error| format!("{error:?}"))?;
-        // Task 11 replaces secondary failure with socket connection and structured Tauri errors.
-        Ok(Self { runtime })
+        Ok(Self { runtime, streaming: Mutex::new(StreamingCapture::default()) })
     }
 
     fn with_current_catalog<T>(
@@ -826,4 +828,23 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .collect()
     }
+}
+
+// ── Phase 2.1: Streaming capture ─────────────────────────────────────────
+
+#[tauri::command]
+pub fn start_streaming_capture(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let mut streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
+    if streaming.is_running() {
+        return Err("streaming capture already running".into());
+    }
+    streaming.start(app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn stop_streaming_capture(state: State<'_, AppState>) -> Result<(), String> {
+    let mut streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
+    streaming.stop();
+    Ok(())
 }

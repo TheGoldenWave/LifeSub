@@ -123,7 +123,7 @@ impl AnchoredFs {
         remove_entry_at(parent.as_raw_fd(), &name)
     }
 
-    fn remove_file(&self, relative: &Path) -> Result<(), ManagerError> {
+    pub(super) fn remove_file(&self, relative: &Path) -> Result<(), ManagerError> {
         let Some((parent, name)) = self.parent_and_name(relative)? else {
             return Err(ManagerError::structural("cannot remove anchored root"));
         };

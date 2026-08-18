@@ -162,3 +162,40 @@ fn anchored_directory_creation_syncs_each_parent_and_deepest_directory() {
         vec!["", "one", "one/two", "one/two/three"]
     );
 }
+
+#[test]
+fn anchored_delete_stays_on_held_root_after_entry_swap() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("data");
+    let held = parent.path().join("held");
+    let install_dir = root.join("models/asr/whisper/delete-me/1-bundle");
+    fs::create_dir_all(&install_dir).unwrap();
+    fs::write(install_dir.join("model.onnx"), b"held-model").unwrap();
+    let catalog = Catalog::in_memory().unwrap();
+    catalog
+        .publish_installation(&StoredInstallation {
+            model_id: "delete-me".to_owned(),
+            provider: "whisper".to_owned(),
+            manifest_version: "1".to_owned(),
+            bundle_identity: "bundle".to_owned(),
+            install_dir: install_dir.clone(),
+            state: "runtime_qualified".to_owned(),
+            runtime_identity_json: Some("{}".to_owned()),
+        })
+        .unwrap();
+    let manager = ModelManager::new_anchored(
+        &root,
+        std::fs::File::open(&root).unwrap(),
+        ScriptedTransport::default(),
+        catalog,
+    );
+
+    fs::rename(&root, &held).unwrap();
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("sentinel"), b"replacement").unwrap();
+
+    manager.delete("delete-me", &install_dir).unwrap();
+
+    assert_eq!(fs::read(root.join("sentinel")).unwrap(), b"replacement");
+    assert!(!held.join("models/asr/whisper/delete-me/1-bundle").exists());
+}

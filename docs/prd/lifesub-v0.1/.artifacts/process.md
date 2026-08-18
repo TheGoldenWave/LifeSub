@@ -14,5 +14,6 @@ source: codex-goal
 - 治理截图：`output/playwright/lifesub-design-governance-desktop.png`、`lifesub-design-governance-tablet.png`、`lifesub-design-governance-mobile.png`。
 - 重新打包：`src-tauri/target/release/bundle/dmg/LifeSub_0.1.0_aarch64-signed.dmg`；DMG checksum 与镜像内 `.app` bundle 签名均验证通过。
 - GitHub 同步：2026-08-18 已完成提交前安全扫描与质量检查，当前项目快照准备同步至 `origin/main`。
+- README 更新：2026-08-18 已按 V0.1 实际交付、V0.2 本地 ASR 计划和后续云端 ASR 方向重整产品入口、开发指南、架构分层与路线图口径。
 - 下一步：接入真实本地 ASR Provider，并实现 ScreenCaptureKit + AVAudioEngine 双路 Capture Adapter。
 - 阻塞项：无首版阻塞；原生双路录音仍需 macOS 权限、签名和实机长时测试。

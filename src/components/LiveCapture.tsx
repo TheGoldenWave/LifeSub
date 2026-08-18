@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { CirclePause, Square, Plus, Copy } from 'lucide-react'
 import { NotePanel } from './NotePanel'
+import { loadNotes, createNoteAdapter, deleteNoteAdapter } from '../data/adapter'
 import type { CaptureMode, CaptureState, LiveSegment, CaptureNote } from '../domain'
 
 interface LiveCaptureProps {
@@ -21,6 +22,12 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
   const [segments, setSegments] = useState<LiveSegment[]>([])
   const [notes, setNotes] = useState<CaptureNote[]>([])
   const [showDemo, setShowDemo] = useState(false)
+
+  useEffect(() => {
+    loadNotes('current').then((loaded) => {
+      if (loaded.length > 0) setNotes(loaded)
+    })
+  }, [])
 
   const formatTime = (ms: number) => {
     const s = Math.floor(ms / 1000)
@@ -44,10 +51,12 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
 
   const addNote = (note: CaptureNote) => {
     setNotes((prev) => [...prev, note].sort((a, b) => a.timestampMs - b.timestampMs))
+    createNoteAdapter('current', note.content, note.timestampMs, note.tag, note.segmentId)
   }
 
   const deleteNote = (id: string) => {
     setNotes((prev) => prev.filter((n) => n.id !== id))
+    deleteNoteAdapter(id)
   }
 
   const copyAll = async () => {

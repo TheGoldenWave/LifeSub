@@ -4,7 +4,7 @@ import { LiveCapture } from './components/LiveCapture'
 import { TimelineView } from './components/TimelineView'
 import { DictionaryView } from './components/DictionaryView'
 import { SettingsModal } from './components/SettingsModal'
-import { demoRecords, demoCategories, demoEntries } from './data/demo'
+import { demoRecords } from './data/demo'
 import type { EvidenceRecord } from './domain'
 
 export default function App() {
@@ -40,13 +40,7 @@ export default function App() {
             onNotice={setNotice}
           />
         )}
-        {activePage === 'dictionary' && (
-          <DictionaryView
-            categories={demoCategories}
-            entries={demoEntries}
-            onNotice={setNotice}
-          />
-        )}
+        {activePage === 'dictionary' && <DictionaryView onNotice={setNotice} />}
       </section>
       <SettingsModal
         open={settingsOpen}

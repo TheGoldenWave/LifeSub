@@ -1,4 +1,17 @@
+import { useState, useEffect } from 'react'
+import { loadRecordingConfig } from '../data/adapter'
+import type { CoreRecordingConfig } from '../services/lifesub'
+
 export function RecordingSettings() {
+  const [config, setConfig] = useState<CoreRecordingConfig | null>(null)
+
+  useEffect(() => {
+    loadRecordingConfig().then(setConfig)
+  }, [])
+
+  const modeLabel = (m: string) =>
+    m === 'smart' ? '智能路由（推荐）' : m === 'mic_only' ? '仅麦克风' : m === 'system_only' ? '仅系统音频' : m
+
   return (
     <div className="settings-tab-content">
       <span className="eyebrow">RECORDING</span>
@@ -8,24 +21,22 @@ export function RecordingSettings() {
         <h2>捕获模式</h2>
         <div className="setting-row">
           <label>默认模式</label>
-          <select className="dictionary-view__scope">
-            <option value="smart">智能路由（推荐）</option>
-            <option value="mic-only">仅麦克风</option>
-            <option value="system-only">仅系统音频</option>
-          </select>
+          <span>{config ? modeLabel(config.capture_mode) : '加载中...'}</span>
         </div>
         <div className="setting-row">
           <label>IM 通话检测</label>
-          <span className="status-pill">启用</span>
-          <small>微信 / 钉钉 / 飞书 / Teams / Zoom / QQ</small>
+          <span className={`status-pill ${config?.im_detection_enabled ? '' : 'status-pill--quiet'}`}>
+            {config?.im_detection_enabled ? '启用' : '停用'}
+          </span>
+          {config?.im_apps && <small>{config.im_apps.join(' / ')}</small>}
         </div>
         <div className="setting-row">
           <label>检测响应时间</label>
-          <span>3 秒</span>
+          <span>{config?.detection_delay_secs ?? '—'} 秒</span>
         </div>
         <div className="setting-row">
           <label>通话结束恢复</label>
-          <span>5 秒</span>
+          <span>{config?.recovery_delay_secs ?? '—'} 秒</span>
         </div>
       </section>
 
@@ -37,7 +48,7 @@ export function RecordingSettings() {
         </div>
         <div className="setting-row">
           <label>采样率</label>
-          <span>16 kHz</span>
+          <span>{config?.sample_rate ?? '—'} Hz</span>
         </div>
         <div className="setting-row">
           <label>默认声道</label>
@@ -54,7 +65,7 @@ export function RecordingSettings() {
         <h2>存储</h2>
         <div className="setting-row">
           <label>录音目录</label>
-          <code>~/.lifesub/recordings/</code>
+          <code>{config?.storage_path ?? '~/.lifesub/recordings/'}</code>
         </div>
       </section>
     </div>

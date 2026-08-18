@@ -1,10 +1,21 @@
+import { useState, useEffect } from 'react'
 import type { StatsSnapshot } from '../domain'
+import { loadStats } from '../data/adapter'
 
 interface StatsBarProps {
-  stats: StatsSnapshot
+  stats?: StatsSnapshot
 }
 
-export function StatsBar({ stats }: StatsBarProps) {
+export function StatsBar({ stats: externalStats }: StatsBarProps) {
+  const [stats, setStats] = useState<StatsSnapshot | null>(externalStats ?? null)
+
+  useEffect(() => {
+    if (externalStats) return
+    loadStats().then(setStats)
+  }, [externalStats])
+
+  if (!stats) return <footer className="stats-bar">加载中...</footer>
+
   const maxMinutes = Math.max(...stats.hourlySlots.map((s) => s.minutes), 1)
 
   return (

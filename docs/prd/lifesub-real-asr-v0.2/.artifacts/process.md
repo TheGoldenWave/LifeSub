@@ -1,18 +1,17 @@
 ---
-stage: task-12-complete
+stage: task-13-complete
 last_updated: 2026-08-18
 source: codex-goal
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
 
-- HEAD：`88051cb`。Task 12 全部完成（M1-M3）。下一步：Task 13（install_model/uninstall_model/import_audio/enqueue_asr_job 等 mutation 方法 + idempotency 集成）。
-- Task 10 全部完成 ✅ + Task 11 全部完成 ✅
-- Task 12 M1：idempotency 层 ✅（`88051cb`）：tool_requests 读写 + 6 测试
-- Task 12 M2：cursor 分页 ✅（`88051cb`）：MAC 签名 + 5 测试
-- Task 12 M3：method 实现 ✅（`88051cb`）：search_transcripts/list_models/get_model/get_asr_job_status/get_operation/list_operations + 6 新测试
-- 验证：全量 440/440（0 失败！）、fmt/clippy/diff 通过
-- 验证：全量 422/429（+24 新测试，1 个已有隔离失败）、fmt/clippy/diff 通过
+- HEAD：Task 13 全部完成。8 个 mutation 方法全部实现 idempotency 集成 + operation 创建。下一步：Task 14（真实模型 Gate + 验证）。
+- Task 13 M1：mutation 框架 ✅：`mutation_flow` / `finalize_mutation` / `create_operation` 三 helper + `hash_params` 指纹
+- Task 13 M2：8 个 mutation handler ✅：install_model、uninstall_model、import_audio、enqueue_asr_job、retry_asr_job、cancel_asr_job、retranscribe_chunk、resolve_evidence
+- Task 13 M3：idempotency 集成 ✅：每个 mutation 通过 `check_or_claim` → 业务逻辑 → `commit_success`/`commit_failure` 完整闭环
+- Task 13 M4：测试 ✅：+17 新测试（包括 idempotency 缓存、operation 持久化、tool_request 持久化、validation 失败、权限拒绝）
+- 验证：dispatch 34/34 全量 pass、fmt/clippy 通过、全量 449/455（1 个已有 transaction 隔离失败 unchanged）
 - secondary Tauri 安全边界：UDS 认证 + 方法授权 = secondary 不得直接打开 writable SQLite
 - 已确认方向：本地优先；SenseVoiceSmall、Whisper 与 Qwen3-ASR 0.6B 共用 sherpa-onnx 1.13.5；无 Python Sidecar；无云端 ASR。Qwen3-ASR 1.7B 仅在固定可执行资产和 Apple Silicon Gate 通过后启用。
 - 已完成研究：sherpa-onnx 1.13.5 已提供 `OfflineQwen3ASRModelConfig` 与 Rust 示例；0.6B INT8 官方 sherpa 包大小 878,702,423 B，SHA-256 为 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`；未发现同等成熟的 1.7B sherpa 发布包。

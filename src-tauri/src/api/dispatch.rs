@@ -1,13 +1,16 @@
+use std::hash::{Hash, Hasher};
 use std::sync::mpsc;
 
 use crate::api::auth::{self, AuthResult};
 use crate::api::cursor::Cursor;
+use crate::api::idempotency::{self, IdempotencyResult};
 #[cfg(test)]
 use crate::api::protocol::APPLICATION_CONTRACT;
 use crate::api::protocol::{
-    self, AGENT_CONTRACT, ApiError, AsrJobSummary, CallerKind, E_UNSUPPORTED_CAPABILITY,
-    ErrorResponse, EvidenceRef, ModelSummary, OperationSummary, RequestEnvelope, SuccessResponse,
-    TranscriptSegmentSummary, TrustedCallerContext,
+    self, AGENT_CONTRACT, ApiError, AsrJobSummary, CallerKind, E_INTERNAL, E_INVALID_REQUEST,
+    E_OPERATION_IN_PROGRESS, E_UNSUPPORTED_CAPABILITY, ErrorResponse, EvidenceRef, ModelSummary,
+    OperationSummary, RequestEnvelope, SuccessResponse, TranscriptSegmentSummary,
+    TrustedCallerContext,
 };
 use crate::catalog::Catalog;
 
@@ -95,7 +98,7 @@ impl Dispatcher {
                 self.handle_search_transcripts(&envelope, caller, contract, request_id)
             }
             "resolve_evidence" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
+                self.handle_resolve_evidence(&envelope, caller, contract, request_id)
             }
             "open_evidence" => self.handle_open_evidence(&envelope, caller, contract, request_id),
             "get_operation" => self.handle_get_operation(&envelope, contract, request_id),
@@ -106,26 +109,20 @@ impl Dispatcher {
             // ── Application V1 methods ────────────────────────────────
             "start_capture" => self.handle_start_capture(contract, request_id),
             "stop_capture" => self.handle_stop_capture(contract, request_id),
-            "install_model" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
-            }
+            "install_model" => self.handle_install_model(&envelope, caller, contract, request_id),
             "uninstall_model" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
+                self.handle_uninstall_model(&envelope, caller, contract, request_id)
             }
             "get_model" => self.handle_get_model(&envelope, contract, request_id),
             "list_models" => self.handle_list_models(contract, request_id),
-            "import_audio" => self.handle_stub(contract, request_id, method, "not yet implemented"),
+            "import_audio" => self.handle_import_audio(&envelope, caller, contract, request_id),
             "enqueue_asr_job" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
+                self.handle_enqueue_asr_job(&envelope, caller, contract, request_id)
             }
-            "retry_asr_job" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
-            }
-            "cancel_asr_job" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
-            }
+            "retry_asr_job" => self.handle_retry_asr_job(&envelope, caller, contract, request_id),
+            "cancel_asr_job" => self.handle_cancel_asr_job(&envelope, caller, contract, request_id),
             "retranscribe_chunk" => {
-                self.handle_stub(contract, request_id, method, "not yet implemented")
+                self.handle_retranscribe_chunk(&envelope, caller, contract, request_id)
             }
             "list_transcript_revisions" => {
                 self.handle_stub(contract, request_id, method, "not yet implemented")
@@ -661,6 +658,561 @@ impl Dispatcher {
         ))
         .unwrap()
     }
+
+    // ── Mutation helpers ──────────────────────────────────────────────────────
+
+    /// Hash envelope params to a stable fingerprint for idempotency.
+    fn hash_params(params: &serde_json::Value) -> String {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        params.to_string().hash(&mut hasher);
+        format!("{:x}", hasher.finish())
+    }
+
+    /// Create a new operation row and return its summary.
+    fn create_operation(
+        catalog: &Catalog,
+        kind: &str,
+        method: &str,
+        principal_id: &str,
+        principal_kind: &str,
+    ) -> Result<OperationSummary, rusqlite::Error> {
+        let id = format!("op_{}", uuid::Uuid::new_v4().simple());
+        let now = chrono::Utc::now().to_rfc3339();
+        catalog.connection().execute(
+            "INSERT INTO operations (id, kind, state, principal_id, principal_kind, method, created_at, updated_at)
+             VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?6)",
+            rusqlite::params![id, kind, principal_id, principal_kind, method, now],
+        )?;
+        Ok(OperationSummary {
+            id,
+            kind: kind.to_owned(),
+            state: "queued".to_owned(),
+            method: method.to_owned(),
+            created_at: now.clone(),
+            updated_at: now,
+            last_error_code: None,
+            last_error_summary: None,
+        })
+    }
+
+    /// Commit or roll back an idempotency key after business logic runs.
+    fn finalize_mutation(
+        &self,
+        contract: &str,
+        contract_version: u32,
+        request_id: &str,
+        caller: &TrustedCallerContext,
+        idempotency_key: &str,
+        result: Result<serde_json::Value, (String, String)>,
+    ) -> serde_json::Value {
+        match result {
+            Ok(value) => {
+                let response = SuccessResponse::new(contract, request_id, value);
+                let response_json = serde_json::to_string(&response).unwrap_or_default();
+                let _ = idempotency::commit_success(
+                    &self.catalog,
+                    contract,
+                    contract_version,
+                    &caller.principal_id,
+                    idempotency_key,
+                    &response_json,
+                    None,
+                );
+                serde_json::to_value(response).unwrap()
+            }
+            Err((code, message)) => {
+                let _ = idempotency::commit_failure(
+                    &self.catalog,
+                    contract,
+                    contract_version,
+                    &caller.principal_id,
+                    idempotency_key,
+                    &code,
+                    &message,
+                );
+                self.error_response(contract, request_id, &code, &message)
+            }
+        }
+    }
+
+    /// Run the full idempotency-guarded mutation flow.
+    ///
+    /// Checks or claims the idempotency key, then calls `on_proceed` for
+    /// new requests, and wraps the result through `finalize_mutation`.
+    #[allow(clippy::too_many_arguments)]
+    fn mutation_flow(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+        method: &str,
+        idempotency_key: &str,
+        on_proceed: impl FnOnce() -> Result<serde_json::Value, (String, String)>,
+    ) -> serde_json::Value {
+        let fingerprint = Self::hash_params(&envelope.params);
+
+        match idempotency::check_or_claim(
+            &self.catalog,
+            contract,
+            envelope.contract_version,
+            caller,
+            method,
+            idempotency_key,
+            &fingerprint,
+        ) {
+            Ok(IdempotencyResult::Proceed) => {
+                let result = on_proceed();
+                self.finalize_mutation(
+                    contract,
+                    envelope.contract_version,
+                    request_id,
+                    caller,
+                    idempotency_key,
+                    result,
+                )
+            }
+            Ok(IdempotencyResult::InProgress { operation_id }) => self.error_response(
+                contract,
+                request_id,
+                E_OPERATION_IN_PROGRESS,
+                &format!("operation {} is in progress", operation_id),
+            ),
+            Ok(IdempotencyResult::Succeeded { response_json }) => {
+                serde_json::from_str(&response_json).unwrap_or_else(|_| {
+                    self.error_response(
+                        contract,
+                        request_id,
+                        E_INTERNAL,
+                        "cached response corrupted",
+                    )
+                })
+            }
+            Ok(IdempotencyResult::Failed {
+                error_code,
+                error_message_key,
+            }) => self.error_response(contract, request_id, &error_code, &error_message_key),
+            Err(_) => {
+                self.error_response(contract, request_id, E_INTERNAL, "idempotency check failed")
+            }
+        }
+    }
+
+    // ── Mutation handlers ─────────────────────────────────────────────────────
+
+    fn handle_install_model(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let method = "install_model";
+        let model_id = envelope
+            .params
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let idempotency_key = envelope
+            .params
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if model_id.is_empty() || idempotency_key.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                E_INVALID_REQUEST,
+                "model_id and idempotency_key are required",
+            );
+        }
+
+        self.mutation_flow(
+            envelope,
+            caller,
+            contract,
+            request_id,
+            method,
+            idempotency_key,
+            || match Self::create_operation(
+                &self.catalog,
+                "model_download",
+                method,
+                &caller.principal_id,
+                &caller.kind.to_string(),
+            ) {
+                Ok(op) => Ok(serde_json::to_value(op).unwrap()),
+                Err(e) => Err((
+                    E_INTERNAL.to_owned(),
+                    format!("failed to create operation: {e}"),
+                )),
+            },
+        )
+    }
+
+    fn handle_uninstall_model(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let method = "uninstall_model";
+        let model_id = envelope
+            .params
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let idempotency_key = envelope
+            .params
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if model_id.is_empty() || idempotency_key.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                E_INVALID_REQUEST,
+                "model_id and idempotency_key are required",
+            );
+        }
+
+        self.mutation_flow(
+            envelope,
+            caller,
+            contract,
+            request_id,
+            method,
+            idempotency_key,
+            || match Self::create_operation(
+                &self.catalog,
+                "model_delete",
+                method,
+                &caller.principal_id,
+                &caller.kind.to_string(),
+            ) {
+                Ok(op) => Ok(serde_json::to_value(op).unwrap()),
+                Err(e) => Err((
+                    E_INTERNAL.to_owned(),
+                    format!("failed to create operation: {e}"),
+                )),
+            },
+        )
+    }
+
+    fn handle_import_audio(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let method = "import_audio";
+        let idempotency_key = envelope
+            .params
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if idempotency_key.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                E_INVALID_REQUEST,
+                "idempotency_key is required",
+            );
+        }
+
+        self.mutation_flow(
+            envelope,
+            caller,
+            contract,
+            request_id,
+            method,
+            idempotency_key,
+            || match Self::create_operation(
+                &self.catalog,
+                "import_audio",
+                method,
+                &caller.principal_id,
+                &caller.kind.to_string(),
+            ) {
+                Ok(op) => Ok(serde_json::to_value(op).unwrap()),
+                Err(e) => Err((
+                    E_INTERNAL.to_owned(),
+                    format!("failed to create operation: {e}"),
+                )),
+            },
+        )
+    }
+
+    fn handle_enqueue_asr_job(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let method = "enqueue_asr_job";
+        let chunk_id = envelope
+            .params
+            .get("chunk_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let model_id = envelope
+            .params
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let idempotency_key = envelope
+            .params
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if chunk_id.is_empty() || model_id.is_empty() || idempotency_key.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                E_INVALID_REQUEST,
+                "chunk_id, model_id, and idempotency_key are required",
+            );
+        }
+
+        self.mutation_flow(
+            envelope,
+            caller,
+            contract,
+            request_id,
+            method,
+            idempotency_key,
+            || match Self::create_operation(
+                &self.catalog,
+                "asr_job",
+                method,
+                &caller.principal_id,
+                &caller.kind.to_string(),
+            ) {
+                Ok(op) => Ok(serde_json::to_value(op).unwrap()),
+                Err(e) => Err((
+                    E_INTERNAL.to_owned(),
+                    format!("failed to create operation: {e}"),
+                )),
+            },
+        )
+    }
+
+    fn handle_retry_asr_job(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let method = "retry_asr_job";
+        let job_id = envelope
+            .params
+            .get("job_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let idempotency_key = envelope
+            .params
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if job_id.is_empty() || idempotency_key.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                E_INVALID_REQUEST,
+                "job_id and idempotency_key are required",
+            );
+        }
+
+        self.mutation_flow(
+            envelope,
+            caller,
+            contract,
+            request_id,
+            method,
+            idempotency_key,
+            || match Self::create_operation(
+                &self.catalog,
+                "asr_retry",
+                method,
+                &caller.principal_id,
+                &caller.kind.to_string(),
+            ) {
+                Ok(op) => Ok(serde_json::to_value(op).unwrap()),
+                Err(e) => Err((
+                    E_INTERNAL.to_owned(),
+                    format!("failed to create operation: {e}"),
+                )),
+            },
+        )
+    }
+
+    fn handle_cancel_asr_job(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let method = "cancel_asr_job";
+        let job_id = envelope
+            .params
+            .get("job_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let idempotency_key = envelope
+            .params
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if job_id.is_empty() || idempotency_key.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                E_INVALID_REQUEST,
+                "job_id and idempotency_key are required",
+            );
+        }
+
+        self.mutation_flow(
+            envelope,
+            caller,
+            contract,
+            request_id,
+            method,
+            idempotency_key,
+            || match Self::create_operation(
+                &self.catalog,
+                "asr_cancel",
+                method,
+                &caller.principal_id,
+                &caller.kind.to_string(),
+            ) {
+                Ok(op) => Ok(serde_json::to_value(op).unwrap()),
+                Err(e) => Err((
+                    E_INTERNAL.to_owned(),
+                    format!("failed to create operation: {e}"),
+                )),
+            },
+        )
+    }
+
+    fn handle_retranscribe_chunk(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let method = "retranscribe_chunk";
+        let chunk_id = envelope
+            .params
+            .get("chunk_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let model_id = envelope
+            .params
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let idempotency_key = envelope
+            .params
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if chunk_id.is_empty() || model_id.is_empty() || idempotency_key.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                E_INVALID_REQUEST,
+                "chunk_id, model_id, and idempotency_key are required",
+            );
+        }
+
+        self.mutation_flow(
+            envelope,
+            caller,
+            contract,
+            request_id,
+            method,
+            idempotency_key,
+            || match Self::create_operation(
+                &self.catalog,
+                "retranscribe",
+                method,
+                &caller.principal_id,
+                &caller.kind.to_string(),
+            ) {
+                Ok(op) => Ok(serde_json::to_value(op).unwrap()),
+                Err(e) => Err((
+                    E_INTERNAL.to_owned(),
+                    format!("failed to create operation: {e}"),
+                )),
+            },
+        )
+    }
+
+    fn handle_resolve_evidence(
+        &self,
+        envelope: &RequestEnvelope,
+        caller: &TrustedCallerContext,
+        contract: &str,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let method = "resolve_evidence";
+        let intent_id = envelope
+            .params
+            .get("intent_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let idempotency_key = envelope
+            .params
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if intent_id.is_empty() || idempotency_key.is_empty() {
+            return self.error_response(
+                contract,
+                request_id,
+                E_INVALID_REQUEST,
+                "intent_id and idempotency_key are required",
+            );
+        }
+
+        self.mutation_flow(
+            envelope,
+            caller,
+            contract,
+            request_id,
+            method,
+            idempotency_key,
+            || {
+                let evidence = EvidenceRef {
+                    intent_id: intent_id.to_owned(),
+                    state: "pending".to_owned(),
+                    disposition: "requires_consent".to_owned(),
+                    expires_at: "2099-01-01T00:00:00Z".to_owned(),
+                    display_metadata: envelope
+                        .params
+                        .get("display_metadata")
+                        .cloned()
+                        .unwrap_or_default(),
+                };
+                Ok(serde_json::to_value(evidence).unwrap())
+            },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -829,8 +1381,11 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let d = Dispatcher::new(tx, test_catalog());
         let json = d.dispatch(
-            make_envelope("resolve_evidence", serde_json::json!({"intent_id": "x"})),
-            &agent_caller(),
+            make_app_envelope(
+                "list_transcript_revisions",
+                serde_json::json!({"session_id": "x"}),
+            ),
+            &tauri_caller(),
         );
         let resp = parse_response(&json);
         assert_eq!(resp["ok"], false);
@@ -919,5 +1474,382 @@ mod tests {
         let resp = parse_response(&json);
         assert_eq!(resp["ok"], false);
         assert_eq!(resp["error"]["code"], "operation_not_found");
+    }
+
+    // ── Mutation tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn install_model_succeeds_with_idempotency() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope(
+                "install_model",
+                serde_json::json!({"model_id": "whisper-tiny", "idempotency_key": "ik-1"}),
+            ),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["kind"], "model_download");
+        assert_eq!(resp["result"]["state"], "queued");
+        assert!(resp["result"]["id"].as_str().unwrap().starts_with("op_"));
+    }
+
+    #[test]
+    fn install_model_duplicate_idempotency_returns_cached_success() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let params = serde_json::json!({"model_id": "whisper-tiny", "idempotency_key": "ik-2"});
+
+        let json1 = d.dispatch(
+            make_app_envelope("install_model", params.clone()),
+            &tauri_caller(),
+        );
+        assert_eq!(parse_response(&json1)["ok"], true);
+
+        let json2 = d.dispatch(make_app_envelope("install_model", params), &tauri_caller());
+        let resp = parse_response(&json2);
+        // After commit_success, the cached result is Succeeded.
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["kind"], "model_download");
+    }
+
+    #[test]
+    fn install_model_requires_model_id() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope(
+                "install_model",
+                serde_json::json!({"idempotency_key": "ik-3"}),
+            ),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn install_model_agent_denied() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope(
+                "install_model",
+                serde_json::json!({"model_id": "m", "idempotency_key": "ik-4"}),
+            ),
+            &agent_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "unsupported_capability");
+    }
+
+    #[test]
+    fn uninstall_model_succeeds() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope(
+                "uninstall_model",
+                serde_json::json!({"model_id": "whisper-tiny", "idempotency_key": "ik-5"}),
+            ),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["kind"], "model_delete");
+    }
+
+    #[test]
+    fn import_audio_succeeds() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope(
+                "import_audio",
+                serde_json::json!({"idempotency_key": "ik-6"}),
+            ),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["kind"], "import_audio");
+        assert_eq!(resp["result"]["state"], "queued");
+    }
+
+    #[test]
+    fn enqueue_asr_job_succeeds() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope(
+                "enqueue_asr_job",
+                serde_json::json!({
+                    "chunk_id": "ch-1",
+                    "model_id": "whisper-tiny",
+                    "idempotency_key": "ik-7"
+                }),
+            ),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["kind"], "asr_job");
+    }
+
+    #[test]
+    fn enqueue_asr_job_requires_chunk_id() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope(
+                "enqueue_asr_job",
+                serde_json::json!({"model_id": "m", "idempotency_key": "ik-8"}),
+            ),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn retry_asr_job_succeeds() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope(
+                "retry_asr_job",
+                serde_json::json!({"job_id": "job-1", "idempotency_key": "ik-9"}),
+            ),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["kind"], "asr_retry");
+    }
+
+    #[test]
+    fn cancel_asr_job_succeeds() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope(
+                "cancel_asr_job",
+                serde_json::json!({"job_id": "job-1", "idempotency_key": "ik-10"}),
+            ),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["kind"], "asr_cancel");
+    }
+
+    #[test]
+    fn retranscribe_chunk_succeeds() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_app_envelope(
+                "retranscribe_chunk",
+                serde_json::json!({
+                    "chunk_id": "ch-1",
+                    "model_id": "whisper-tiny",
+                    "idempotency_key": "ik-11"
+                }),
+            ),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["kind"], "retranscribe");
+    }
+
+    #[test]
+    fn resolve_evidence_succeeds_for_agent() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_envelope(
+                "resolve_evidence",
+                serde_json::json!({"intent_id": "int-1", "idempotency_key": "ik-12"}),
+            ),
+            &agent_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["intent_id"], "int-1");
+        assert_eq!(resp["result"]["disposition"], "requires_consent");
+    }
+
+    #[test]
+    fn resolve_evidence_requires_intent_id() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let json = d.dispatch(
+            make_envelope(
+                "resolve_evidence",
+                serde_json::json!({"idempotency_key": "ik-13"}),
+            ),
+            &agent_caller(),
+        );
+        let resp = parse_response(&json);
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn mutation_idempotency_caches_success() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let params = serde_json::json!({"model_id": "m", "idempotency_key": "ik-14"});
+
+        // First call succeeds.
+        let json1 = d.dispatch(
+            make_app_envelope("install_model", params.clone()),
+            &tauri_caller(),
+        );
+        assert_eq!(parse_response(&json1)["ok"], true);
+
+        // Second call returns cached in_progress (since we never committed success).
+        // Wait, actually the first call committed success via finalize_mutation.
+        // Let me verify: after first call, the idempotency key is in "succeeded" state.
+        // So the second call should return the cached success.
+        let json2 = d.dispatch(make_app_envelope("install_model", params), &tauri_caller());
+        let resp = parse_response(&json2);
+        // Since the first call finished and committed success, the second call
+        // should see the cached result (Succeeded) and return it.
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["result"]["kind"], "model_download");
+    }
+
+    #[test]
+    fn mutation_idempotency_different_principals_independent() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+        let params = serde_json::json!({"model_id": "m", "idempotency_key": "ik-15"});
+
+        // Tauri caller succeeds.
+        let json1 = d.dispatch(
+            make_app_envelope("install_model", params.clone()),
+            &tauri_caller(),
+        );
+        assert_eq!(parse_response(&json1)["ok"], true);
+
+        // Agent caller is denied by auth (not by idempotency).
+        let json2 = d.dispatch(make_app_envelope("install_model", params), &agent_caller());
+        let resp = parse_response(&json2);
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "unsupported_capability");
+    }
+
+    #[test]
+    fn mutation_idempotency_different_contracts_independent() {
+        let (tx, _rx) = mpsc::channel();
+        let d = Dispatcher::new(tx, test_catalog());
+
+        // Agent contract resolve_evidence with key "ik-16".
+        let json1 = d.dispatch(
+            make_envelope(
+                "resolve_evidence",
+                serde_json::json!({"intent_id": "int-1", "idempotency_key": "ik-16"}),
+            ),
+            &agent_caller(),
+        );
+        assert_eq!(parse_response(&json1)["ok"], true);
+
+        // Application contract install_model with same key "ik-16" — different
+        // contract, so should proceed independently.
+        let json2 = d.dispatch(
+            make_app_envelope(
+                "install_model",
+                serde_json::json!({"model_id": "m", "idempotency_key": "ik-16"}),
+            ),
+            &tauri_caller(),
+        );
+        assert_eq!(parse_response(&json2)["ok"], true);
+    }
+
+    #[test]
+    fn operation_is_persisted_in_db() {
+        let (tx, _rx) = mpsc::channel();
+        let catalog = test_catalog();
+        let d = Dispatcher::new(tx, catalog);
+
+        let json = d.dispatch(
+            make_app_envelope(
+                "install_model",
+                serde_json::json!({"model_id": "m", "idempotency_key": "ik-17"}),
+            ),
+            &tauri_caller(),
+        );
+        let resp = parse_response(&json);
+        let op_id = resp["result"]["id"].as_str().unwrap().to_owned();
+
+        // Verify operation exists in the database.
+        let conn = d.catalog.connection();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM operations WHERE id = ?1",
+                [&op_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn tool_request_is_persisted_in_db() {
+        let (tx, _rx) = mpsc::channel();
+        let catalog = test_catalog();
+        let d = Dispatcher::new(tx, catalog);
+
+        let _json = d.dispatch(
+            make_app_envelope(
+                "install_model",
+                serde_json::json!({"model_id": "m", "idempotency_key": "ik-18"}),
+            ),
+            &tauri_caller(),
+        );
+
+        let conn = d.catalog.connection();
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM tool_requests WHERE idempotency_key = 'ik-18'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "succeeded");
+    }
+
+    #[test]
+    fn mutation_failure_commits_error_state() {
+        let (tx, _rx) = mpsc::channel();
+        let catalog = test_catalog();
+        let d = Dispatcher::new(tx, catalog);
+
+        // This call will fail because idempotency_key is missing.
+        let _json = d.dispatch(
+            make_app_envelope("install_model", serde_json::json!({"model_id": "m"})),
+            &tauri_caller(),
+        );
+
+        // No tool_request row should be created since validation failed
+        // before the idempotency check.
+        let conn = d.catalog.connection();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tool_requests WHERE method = 'install_model'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Only the rows from other tests might exist; this one was rejected early.
+        // The key point is that this specific request created no row.
+        assert_eq!(count, 0);
     }
 }

@@ -61,20 +61,15 @@ source: codex
 
 | 阶段 | 内容 | 预估 |
 |------|------|------|
-| Phase 1.1 | 前端 API 接入（替换 Demo 数据） | 1-2 session |
-| Phase 1.2 | Task 14: 真实 Provider Gate 验证 | 1 session |
-| Phase 1.3 | Task 15: Playwright E2E + 打包 Gate | 1-2 session |
-| Phase 2.1 | 流式 ASR 实时通道 | 1-2 session |
 | Phase 2.2 | 说话人分离 + CAM++ 声纹 | 1-2 session |
 | Phase 3.1 | LLM 后处理管道 | 1-2 session |
 | Phase 3.2 | Fn 键快速输入 | 1-2 session |
 | Phase 3.3 | 场景感知（可选） | 1 session |
 
 ## 技术债务
-- 前端 demo 数据替换: LiveCapture / DictionaryView / StatsBar / SettingsModal 仍用 demo 数据
-- 流式 ASR 事件通道: 后端有 ASR 引擎但无实时推送
 - CAM++ 集成: 声纹表已建但无 embedding 提取
 - V4→V5 迁移 fixture: 需要生成 `lifesub-v0.5.sqlite3`
+- Gate 二进制: 指标协议已实现，待生产设备上集成真实 ASR provider
 - `asr_provider_test`: 已知 1 个测试持续失败
 
 ## 设计文档

@@ -87,6 +87,8 @@ pub fn run() {
             // Phase 2.1 streaming
             commands::start_streaming_capture,
             commands::stop_streaming_capture,
+            commands::pause_streaming_capture,
+            commands::resume_streaming_capture,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LifeSub desktop app");

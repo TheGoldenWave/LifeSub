@@ -1,20 +1,39 @@
 import { useState, useEffect } from 'react'
-import { loadVoiceprints, loadAsrConfig } from '../data/adapter'
+import { loadVoiceprints, loadAsrConfig, saveAsrConfig } from '../data/adapter'
 import type { CoreVoiceprint, CoreAsrConfig } from '../services/lifesub'
 
 export function AsrSettings() {
   const [voiceprints, setVoiceprints] = useState<CoreVoiceprint[]>([])
   const [config, setConfig] = useState<CoreAsrConfig | null>(null)
+  const [saved, setSaved] = useState(false)
 
   useEffect(() => {
     loadVoiceprints().then(setVoiceprints)
     loadAsrConfig().then(setConfig)
   }, [])
 
-  const providerLabel = (p: string) =>
-    p === 'sense_voice' ? 'SenseVoice（推荐）' : p === 'whisper' ? 'Whisper' : p === 'qwen3_asr' ? 'Qwen3-ASR' : p
+  const handleSave = async () => {
+    if (!config) return
+    await saveAsrConfig(config)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
 
-  const langLabel = (l: string) => l === 'zh' ? '中文' : l === 'en' ? 'English' : l === 'auto' ? '自动检测' : l
+  const set = <K extends keyof CoreAsrConfig>(key: K, value: CoreAsrConfig[K]) => {
+    setConfig((prev) => prev ? { ...prev, [key]: value } : null)
+  }
+
+  const providers: { value: string; label: string }[] = [
+    { value: 'sense_voice', label: 'SenseVoice（推荐）' },
+    { value: 'whisper', label: 'Whisper' },
+    { value: 'qwen3_asr', label: 'Qwen3-ASR' },
+  ]
+
+  const languages: { value: string; label: string }[] = [
+    { value: 'zh', label: '中文' },
+    { value: 'en', label: 'English' },
+    { value: 'auto', label: '自动检测' },
+  ]
 
   return (
     <div className="settings-tab-content">
@@ -25,7 +44,11 @@ export function AsrSettings() {
         <h2>Provider</h2>
         <div className="setting-row">
           <label>当前 Provider</label>
-          <span>{config ? providerLabel(config.provider) : '加载中...'}</span>
+          {config ? (
+            <select className="dictionary-view__scope" value={config.provider} onChange={(e) => set('provider', e.target.value)}>
+              {providers.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+            </select>
+          ) : <span>加载中...</span>}
         </div>
       </section>
 
@@ -33,17 +56,26 @@ export function AsrSettings() {
         <h2>语言与行为</h2>
         <div className="setting-row">
           <label>识别语言</label>
-          <span>{config ? langLabel(config.language) : '加载中...'}</span>
+          {config ? (
+            <select className="dictionary-view__scope" value={config.language} onChange={(e) => set('language', e.target.value)}>
+              {languages.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+            </select>
+          ) : <span>加载中...</span>}
         </div>
         <div className="setting-row">
           <label>自动转写</label>
-          <span className={`status-pill ${config?.auto_transcribe ? '' : 'status-pill--quiet'}`}>
-            {config?.auto_transcribe ? '启用' : '停用'}
-          </span>
+          <label className="toggle">
+            <input type="checkbox" checked={config?.auto_transcribe ?? false} onChange={(e) => set('auto_transcribe', e.target.checked)} />
+            <span className={`status-pill ${config?.auto_transcribe ? '' : 'status-pill--quiet'}`}>
+              {config?.auto_transcribe ? '启用' : '停用'}
+            </span>
+          </label>
         </div>
         <div className="setting-row">
           <label>线程数</label>
-          <span>{config?.threads ?? '—'}</span>
+          {config ? (
+            <input type="number" className="setting-input" min={1} max={16} value={config.threads} onChange={(e) => set('threads', Number(e.target.value))} />
+          ) : <span>—</span>}
         </div>
       </section>
 
@@ -51,17 +83,24 @@ export function AsrSettings() {
         <h2>VAD 设置</h2>
         <div className="setting-row">
           <label>VAD</label>
-          <span className={`status-pill ${config?.vad_enabled ? '' : 'status-pill--quiet'}`}>
-            {config?.vad_enabled ? '启用' : '停用'}
-          </span>
+          <label className="toggle">
+            <input type="checkbox" checked={config?.vad_enabled ?? false} onChange={(e) => set('vad_enabled', e.target.checked)} />
+            <span className={`status-pill ${config?.vad_enabled ? '' : 'status-pill--quiet'}`}>
+              {config?.vad_enabled ? '启用' : '停用'}
+            </span>
+          </label>
         </div>
         <div className="setting-row">
-          <label>最小语音长度</label>
-          <span>{config?.vad_min_speech_ms ?? '—'} ms</span>
+          <label>最小语音长度 (ms)</label>
+          {config ? (
+            <input type="number" className="setting-input" min={100} max={5000} step={100} value={config.vad_min_speech_ms} onChange={(e) => set('vad_min_speech_ms', Number(e.target.value))} />
+          ) : <span>—</span>}
         </div>
         <div className="setting-row">
-          <label>静音阈值</label>
-          <span>{config?.vad_silence_ms ?? '—'} ms</span>
+          <label>静音阈值 (ms)</label>
+          {config ? (
+            <input type="number" className="setting-input" min={200} max={10000} step={100} value={config.vad_silence_ms} onChange={(e) => set('vad_silence_ms', Number(e.target.value))} />
+          ) : <span>—</span>}
         </div>
       </section>
 
@@ -69,9 +108,12 @@ export function AsrSettings() {
         <h2>Provider 专属选项</h2>
         <div className="setting-row">
           <label>ITN（逆文本正则化）</label>
-          <span className={`status-pill ${config?.itn_enabled ? '' : 'status-pill--quiet'}`}>
-            {config?.itn_enabled ? '启用' : '停用'}
-          </span>
+          <label className="toggle">
+            <input type="checkbox" checked={config?.itn_enabled ?? false} onChange={(e) => set('itn_enabled', e.target.checked)} />
+            <span className={`status-pill ${config?.itn_enabled ? '' : 'status-pill--quiet'}`}>
+              {config?.itn_enabled ? '启用' : '停用'}
+            </span>
+          </label>
         </div>
       </section>
 
@@ -99,6 +141,12 @@ export function AsrSettings() {
         )}
         <button className="text-button" style={{ marginTop: 'var(--spacing-2)' }}>+ 注册新声纹</button>
       </section>
+
+      <div className="settings-actions">
+        <button className="button button--primary" onClick={handleSave}>
+          {saved ? '✓ 已保存' : '保存设置'}
+        </button>
+      </div>
     </div>
   )
 }

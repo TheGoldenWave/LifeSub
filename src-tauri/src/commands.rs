@@ -848,3 +848,23 @@ pub fn stop_streaming_capture(state: State<'_, AppState>) -> Result<(), String> 
     streaming.stop();
     Ok(())
 }
+
+#[tauri::command]
+pub fn pause_streaming_capture(state: State<'_, AppState>) -> Result<(), String> {
+    let streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
+    if !streaming.is_running() {
+        return Err("streaming capture not running".into());
+    }
+    streaming.pause();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn resume_streaming_capture(state: State<'_, AppState>) -> Result<(), String> {
+    let streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
+    if !streaming.is_running() {
+        return Err("streaming capture not running".into());
+    }
+    streaming.resume();
+    Ok(())
+}

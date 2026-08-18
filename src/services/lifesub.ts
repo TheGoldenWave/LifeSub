@@ -235,3 +235,11 @@ export function startStreamingCapture() {
 export function stopStreamingCapture() {
   return invoke('stop_streaming_capture')
 }
+
+export function pauseStreamingCapture() {
+  return invoke('pause_streaming_capture')
+}
+
+export function resumeStreamingCapture() {
+  return invoke('resume_streaming_capture')
+}

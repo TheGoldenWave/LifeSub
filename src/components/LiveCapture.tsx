@@ -3,7 +3,7 @@ import { CirclePause, Square, Plus, Copy } from 'lucide-react'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { NotePanel } from './NotePanel'
 import { loadNotes, createNoteAdapter, deleteNoteAdapter } from '../data/adapter'
-import { startStreamingCapture, stopStreamingCapture, isTauriRuntime } from '../services/lifesub'
+import { startStreamingCapture, stopStreamingCapture, pauseStreamingCapture, resumeStreamingCapture, isTauriRuntime } from '../services/lifesub'
 import type { CaptureMode, CaptureState, LiveSegment, CaptureNote } from '../domain'
 
 interface LiveCaptureProps {
@@ -84,6 +84,24 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
     onNotice('录音已保存，可在时间线页面查看。')
   }
 
+  const togglePause = async () => {
+    if (captureState === 'recording') {
+      setCaptureState('paused')
+      try {
+        await pauseStreamingCapture()
+      } catch {
+        // fallback: backend pause not available
+      }
+    } else {
+      setCaptureState('recording')
+      try {
+        await resumeStreamingCapture()
+      } catch {
+        // fallback: backend resume not available
+      }
+    }
+  }
+
   const addNote = (note: CaptureNote) => {
     setNotes((prev) => [...prev, note].sort((a, b) => a.timestampMs - b.timestampMs))
     createNoteAdapter('current', note.content, note.timestampMs, note.tag, note.segmentId)
@@ -133,7 +151,7 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
           )}
           {captureState === 'recording' && (
             <>
-              <button className="button" onClick={() => setCaptureState('paused')}>
+              <button className="button" onClick={togglePause}>
                 <CirclePause size={17} />暂停
               </button>
               <button className="button" onClick={() => addNote({
@@ -145,6 +163,16 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
                 createdAt: new Date().toISOString(),
               })}>
                 <Plus size={17} />笔记
+              </button>
+              <button className="button button--danger" onClick={stopCapture}>
+                <Square size={15} />停止
+              </button>
+            </>
+          )}
+          {captureState === 'paused' && (
+            <>
+              <button className="button button--primary" onClick={togglePause}>
+                <CirclePause size={17} />继续
               </button>
               <button className="button button--danger" onClick={stopCapture}>
                 <Square size={15} />停止

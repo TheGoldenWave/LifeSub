@@ -1,16 +1,33 @@
 import { useState, useEffect } from 'react'
-import { loadRecordingConfig } from '../data/adapter'
+import { loadRecordingConfig, saveRecordingConfig } from '../data/adapter'
 import type { CoreRecordingConfig } from '../services/lifesub'
 
 export function RecordingSettings() {
   const [config, setConfig] = useState<CoreRecordingConfig | null>(null)
+  const [saved, setSaved] = useState(false)
 
   useEffect(() => {
     loadRecordingConfig().then(setConfig)
   }, [])
 
-  const modeLabel = (m: string) =>
-    m === 'smart' ? '智能路由（推荐）' : m === 'mic_only' ? '仅麦克风' : m === 'system_only' ? '仅系统音频' : m
+  const handleSave = async () => {
+    if (!config) return
+    await saveRecordingConfig(config)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  const set = <K extends keyof CoreRecordingConfig>(key: K, value: CoreRecordingConfig[K]) => {
+    setConfig((prev) => prev ? { ...prev, [key]: value } : null)
+  }
+
+  const modes: { value: string; label: string }[] = [
+    { value: 'smart', label: '智能路由（推荐）' },
+    { value: 'mic_only', label: '仅麦克风' },
+    { value: 'system_only', label: '仅系统音频' },
+  ]
+
+  const imApps = ['wechat', 'dingtalk', 'feishu', 'teams', 'zoom', 'qq']
 
   return (
     <div className="settings-tab-content">
@@ -21,22 +38,54 @@ export function RecordingSettings() {
         <h2>捕获模式</h2>
         <div className="setting-row">
           <label>默认模式</label>
-          <span>{config ? modeLabel(config.capture_mode) : '加载中...'}</span>
+          {config ? (
+            <select className="dictionary-view__scope" value={config.capture_mode} onChange={(e) => set('capture_mode', e.target.value)}>
+              {modes.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+          ) : <span>加载中...</span>}
         </div>
         <div className="setting-row">
           <label>IM 通话检测</label>
-          <span className={`status-pill ${config?.im_detection_enabled ? '' : 'status-pill--quiet'}`}>
-            {config?.im_detection_enabled ? '启用' : '停用'}
-          </span>
-          {config?.im_apps && <small>{config.im_apps.join(' / ')}</small>}
+          <label className="toggle">
+            <input type="checkbox" checked={config?.im_detection_enabled ?? false} onChange={(e) => set('im_detection_enabled', e.target.checked)} />
+            <span className={`status-pill ${config?.im_detection_enabled ? '' : 'status-pill--quiet'}`}>
+              {config?.im_detection_enabled ? '启用' : '停用'}
+            </span>
+          </label>
+        </div>
+        {config?.im_detection_enabled && (
+          <div className="setting-row">
+            <label>检测应用</label>
+            <div className="im-apps-checkboxes">
+              {imApps.map((app) => (
+                <label key={app} className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={config.im_apps.includes(app)}
+                    onChange={(e) => {
+                      const apps = e.target.checked
+                        ? [...config.im_apps, app]
+                        : config.im_apps.filter((a) => a !== app)
+                      set('im_apps', apps)
+                    }}
+                  />
+                  <span>{app}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="setting-row">
+          <label>检测响应时间 (秒)</label>
+          {config ? (
+            <input type="number" className="setting-input" min={1} max={30} value={config.detection_delay_secs} onChange={(e) => set('detection_delay_secs', Number(e.target.value))} />
+          ) : <span>—</span>}
         </div>
         <div className="setting-row">
-          <label>检测响应时间</label>
-          <span>{config?.detection_delay_secs ?? '—'} 秒</span>
-        </div>
-        <div className="setting-row">
-          <label>通话结束恢复</label>
-          <span>{config?.recovery_delay_secs ?? '—'} 秒</span>
+          <label>通话结束恢复 (秒)</label>
+          {config ? (
+            <input type="number" className="setting-input" min={1} max={60} value={config.recovery_delay_secs} onChange={(e) => set('recovery_delay_secs', Number(e.target.value))} />
+          ) : <span>—</span>}
         </div>
       </section>
 
@@ -48,7 +97,14 @@ export function RecordingSettings() {
         </div>
         <div className="setting-row">
           <label>采样率</label>
-          <span>{config?.sample_rate ?? '—'} Hz</span>
+          {config ? (
+            <select className="dictionary-view__scope" value={String(config.sample_rate)} onChange={(e) => set('sample_rate', Number(e.target.value))}>
+              <option value="8000">8 kHz</option>
+              <option value="16000">16 kHz</option>
+              <option value="44100">44.1 kHz</option>
+              <option value="48000">48 kHz</option>
+            </select>
+          ) : <span>—</span>}
         </div>
         <div className="setting-row">
           <label>默认声道</label>
@@ -65,9 +121,17 @@ export function RecordingSettings() {
         <h2>存储</h2>
         <div className="setting-row">
           <label>录音目录</label>
-          <code>{config?.storage_path ?? '~/.lifesub/recordings/'}</code>
+          {config ? (
+            <input type="text" className="setting-input" value={config.storage_path} onChange={(e) => set('storage_path', e.target.value)} />
+          ) : <code>~/.lifesub/recordings/</code>}
         </div>
       </section>
+
+      <div className="settings-actions">
+        <button className="button button--primary" onClick={handleSave}>
+          {saved ? '✓ 已保存' : '保存设置'}
+        </button>
+      </div>
     </div>
   )
 }

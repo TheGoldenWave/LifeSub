@@ -59,6 +59,7 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
 
   const handleDeleteCategory = async () => {
     if (!selectedCategoryId) return
+    if (!window.confirm('确定要删除此分类及其所有词条？')) return
     await deleteCategoryAdapter(selectedCategoryId)
     setCategories((prev) => prev.filter((c) => c.id !== selectedCategoryId))
     setSelectedCategoryId(categories[0]?.id ?? '')
@@ -84,6 +85,7 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
 
   const handleDeleteEntry = async () => {
     if (!selectedEntry) return
+    if (!window.confirm(`确定删除词条「${selectedEntry.term}」？`)) return
     await deleteEntryAdapter(selectedEntry.id)
     setEntries((prev) => prev.filter((e) => e.id !== selectedEntry.id))
     setSelectedEntryId(null)

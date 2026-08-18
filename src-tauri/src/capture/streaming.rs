@@ -96,6 +96,7 @@ impl StreamingSource for MockStreamingSource {
 /// Running state of the streaming capture loop.
 struct StreamingLoop {
     stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     handle: JoinHandle<()>,
 }
 
@@ -115,37 +116,65 @@ impl StreamingCapture {
         self.loop_handle.is_some()
     }
 
+    pub fn is_paused(&self) -> bool {
+        self.loop_handle
+            .as_ref()
+            .map(|l| l.pause.load(Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
     pub fn start(&mut self, app: AppHandle) {
         if self.loop_handle.is_some() {
             return;
         }
         let stop = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
+        let pause_clone = pause.clone();
         let handle = thread::spawn(move || {
-            run_streaming_loop(app, stop_clone, MockStreamingSource::new());
+            run_streaming_loop(app, stop_clone, pause_clone, MockStreamingSource::new());
         });
-        self.loop_handle = Some(StreamingLoop { stop, handle });
+        self.loop_handle = Some(StreamingLoop { stop, pause, handle });
+    }
+
+    pub fn pause(&self) {
+        if let Some(ref streaming) = self.loop_handle {
+            streaming.pause.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub fn resume(&self) {
+        if let Some(ref streaming) = self.loop_handle {
+            streaming.pause.store(false, Ordering::SeqCst);
+        }
     }
 
     pub fn stop(&mut self) {
         if let Some(streaming) = self.loop_handle.take() {
             streaming.stop.store(true, Ordering::SeqCst);
-            // The loop wakes frequently, so a bounded join is safe.
+            streaming.pause.store(false, Ordering::SeqCst); // unblock paused thread
             let _ = streaming.handle.join();
         }
     }
 }
 
-fn run_streaming_loop<S: StreamingSource>(app: AppHandle, stop: Arc<AtomicBool>, mut source: S) {
+fn run_streaming_loop<S: StreamingSource>(
+    app: AppHandle,
+    stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
+    mut source: S,
+) {
     let mut sequence: u64 = 0;
     while !stop.load(Ordering::SeqCst) {
+        if pause.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
         sequence += 1;
         if let Some(segment) = source.next_segment(sequence) {
             if app.emit(LIVE_SEGMENT_EVENT, &segment).is_err() {
                 // No listener attached; continue until stopped.
             }
-        } else {
-            // Mock source exhausted; keep the loop alive briefly then idle.
         }
         // 2-second cadence keeps development visible and production cheap.
         thread::sleep(Duration::from_millis(2000));

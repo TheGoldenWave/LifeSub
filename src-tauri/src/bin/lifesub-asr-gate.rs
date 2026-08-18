@@ -5,6 +5,10 @@
 //! On macOS arm64 with Metal, the Gate additionally requires `--qwen17-model-dir <path>`.
 //! The Gate writes a JSON result file containing all scenario metrics and runtime identities.
 //! It exits non-zero when any mandatory scenario fails, is absent, or a fallback is detected.
+//!
+//! ⚠️ PENDING PRODUCTION VERIFICATION: The `run_scenario` function is scaffolded with
+//! the CER/WER/RTF metrics protocol but the real ASR provider integration is deferred
+//! to the production verification run on the M4/24GB device. See `scripts/verify-asr-gate.sh`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -427,10 +431,9 @@ fn run_scenario(
     _model_dir: Option<&Path>,
     _qwen17_model_dir: Option<&Path>,
 ) -> Result<ScenarioResult, String> {
-    // TODO: Integrate with LifeSub ASR provider infrastructure.
-    // For now, the Gate validates fixture hashes and produces the correct
-    // output structure. Real ASR inference is deferred to the production
-    // verification run on the M4/24GB device.
+    // PENDING PRODUCTION VERIFICATION: Integrate with LifeSub ASR provider infrastructure
+    // (ProviderFactory, ModelManager, device-qualified installations) on the M4/24GB device.
+    // See the Gate docblock above and scripts/verify-asr-gate.sh.
 
     let _audio_path = fixtures_dir.join(&entry.file);
 

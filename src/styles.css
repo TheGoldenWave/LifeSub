@@ -509,6 +509,50 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .setting-row code { font-family: var(--typography-fontFamily-mono); font-size: var(--typography-fontSize-xs); }
 .setting-row small { grid-column: 2; margin-top: 0; }
 
+/* settings inputs */
+.setting-input {
+  font-family: var(--typography-fontFamily-mono);
+  font-size: var(--typography-fontSize-sm);
+  padding: var(--spacing-1) var(--spacing-2);
+  border: 1px solid var(--colors-brand-border);
+  border-radius: var(--radii-sm);
+  background: var(--colors-brand-surface);
+  color: var(--colors-brand-text);
+  width: 120px;
+}
+.setting-input:focus { outline: 2px solid var(--colors-brand-primary); outline-offset: -1px; }
+
+.settings-actions {
+  margin-top: var(--spacing-4);
+  padding-top: var(--spacing-3);
+  border-top: 1px solid var(--colors-brand-border);
+}
+
+.im-apps-checkboxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+}
+.im-apps-checkboxes label {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  font-family: var(--typography-fontFamily-mono);
+  font-size: var(--typography-fontSize-xs);
+  color: var(--colors-brand-textSecondary);
+}
+
+/* toggle checkbox */
+label.toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  cursor: pointer;
+}
+label.toggle input[type="checkbox"] {
+  accent-color: var(--colors-brand-primary);
+}
+
 /* ── Voiceprint cards ─────────────────────────────────────────────────── */
 
 .voiceprint-list { display: grid; gap: var(--spacing-2); margin-top: var(--spacing-3); }

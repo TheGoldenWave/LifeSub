@@ -1,9 +1,7 @@
-pub mod audio;
+pub mod job;
 pub mod manifest;
 pub mod model_lookup;
-pub mod model_manager;
 pub mod settings;
-pub mod vad;
 
 #[cfg(feature = "asr-runtime")]
 pub fn runtime_version() -> &'static str { "1.13.5" }

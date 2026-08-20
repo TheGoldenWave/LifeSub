@@ -175,9 +175,9 @@ GitHub 不作为全天音频和转写的主存储或同步通道。未来同步�
 
 ## 待定技术选型
 
-- 首选本地 ASR 模型及最低硬件要求。
+- ~~首选本地 ASR 模型及最低硬件要求。~~ → V0.2 已确定：SenseVoiceSmall INT8 + Whisper Tiny/Base/Small，通过 sherpa-onnx 1.13.5 静态链接。
 - 音频编码、Chunk 时长和长期归档策略。
-- V0.1 是否包含匿名 Speaker Diarization，还是延后到 V0.3。
+- ~~V0.1 是否包含匿名 Speaker Diarization，还是延后到 V0.3。~~ → 延后至 V0.3+。
 - 多设备来源归并、时钟校准和 ASR 冲突治理（V0.3）。
 - Evidence Contract 的首个正式 Schema、错误码和兼容范围。
 - 加密对象同步的后端与密钥恢复方案。

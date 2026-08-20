@@ -1,0 +1,37 @@
+# LifeSub ASR Quality Gate — version-controlled source paths
+#
+# Each path is relative to the project root. The Gate computes a deterministic
+# digest of these files (sorted, individually hashed, concatenated, final hash).
+# Any modification to a listed path invalidates existing Gate evidence.
+# Unrelated dirty files outside this scope do not invalidate the Gate.
+#
+# One path per line. Lines starting with # are comments. Blank lines are ignored.
+
+# ASR core modules
+src-tauri/src/asr/audio.rs
+src-tauri/src/asr/gate_metrics.rs
+src-tauri/src/asr/manifest.rs
+src-tauri/src/asr/mod.rs
+src-tauri/src/asr/model_lookup.rs
+src-tauri/src/asr/provider.rs
+src-tauri/src/asr/sense_voice.rs
+src-tauri/src/asr/settings.rs
+src-tauri/src/asr/vad.rs
+src-tauri/src/asr/whisper.rs
+
+# Gate binary
+src-tauri/src/bin/lifesub-asr-gate.rs
+
+# Test file
+src-tauri/src/asr_runtime_test.rs
+
+# Fixtures
+tests/fixtures/asr/fixture-manifest.json
+
+# Build configuration
+src-tauri/Cargo.toml
+src-tauri/Cargo.lock
+
+# Gate script
+scripts/verify-asr-gate.sh
+scripts/asr-gate-scope.txt

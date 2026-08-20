@@ -4,7 +4,7 @@
 
 LifeSub（中文名：旁白）是一个本地优先的长时音频与 ASR 证据管理系统。它负责采集、音频分片、转写 revision、Markdown 投影、基础检索与来源定位，让“谁在什么时候说了什么，原始音频和文本在哪里”始终可以被验证。
 
-**当前阶段：V0.1 Evidence 闭环已完成 · V0.2 真实本地 ASR 已完成设计、待实现**
+**当前阶段：V0.1 Evidence 闭环已完成 · V0.2 真实本地 ASR 已完成实现与验证**
 
 ![LifeSub V0.1 桌面界面](output/playwright/lifesub-design-governance-desktop.png)
 
@@ -36,10 +36,24 @@ V0.1 已形成一个可运行的纵向闭环：
 | 可再生 Markdown 导出 | 已实现 |
 | Provider、隐私和数据位置状态展示/设置入口 | 已实现 |
 | 浏览器演示模式与 Tauri 桌面写入模式 | 已实现；历史数据重载界面待完善 |
-| 真实本地 SenseVoice / Whisper ASR | V0.2 待实现 |
+| 真实本地 SenseVoice / Whisper ASR | V0.2 已实现 |
 | ScreenCaptureKit + AVAudioEngine 原生双路采集 | 待实现 |
 
 当前内置的是确定性演示 ASR Provider，用于验证完整 Evidence 流程，不应被视为真实模型转写。桌面版已能将会话、导入音频和 revision 写入本地 Catalog，但当前时间线仍从演示数据初始化，应用重启后的历史 Evidence 重载界面尚待完善。当前检索和导出针对界面中已加载的记录可用。
+
+### V0.2 真实本地 ASR
+
+V0.2 已实现 SenseVoiceSmall 与 Whisper 可切换的真实离线转写：
+
+- **运行时**：sherpa-onnx 1.13.5 静态链接，无 Python Sidecar，无云端依赖。
+- **模型**：SenseVoiceSmall INT8 (163 MB)、Whisper Tiny (116 MB)、Whisper Base (208 MB)、Whisper Small (639 MB)，全部本地处理。
+- **模型管理**：SHA-256 校验下载、安全解压、版本化安装、可恢复、可删除。
+- **ASR Job**：单例 worker 锁、租约、boot ID 隔离、claim-generation fencing、取消、有界重试。
+- **Revision**：成功结果原子发布 Receipt + Revision + Segment + FTS；重转写追加新 revision，不覆盖历史。
+- **设置**：Provider 切换、模型卡片、语言、线程、VAD、自动转写、ITN/任务控制。
+- **接受度**：通过桌面验收场景（heartbeat、cancel、recovery、packaged-smoke）。
+
+详细设计见 [`docs/superpowers/specs/2026-08-15-lifesub-real-asr-design.md`](docs/superpowers/specs/2026-08-15-lifesub-real-asr-design.md)。
 
 截至 **2026-08-18** 的验证快照：前端单元测试 6/6、Rust 单元测试 6/6、Playwright 验收 1/1，Vite 生产构建与 Tauri desktop feature 编译通过；arm64 DMG 已完成本地 checksum 与 `.app` bundle 签名验证。该产物不是公开 Release，也不代表已完成 Apple notarization。
 
@@ -76,9 +90,37 @@ npm run tauri -- dev --features desktop
 npm test
 npm run build
 npm run test:e2e
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
+SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" cargo test --manifest-path src-tauri/Cargo.toml --features asr-runtime
+SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" cargo test --manifest-path src-tauri/Cargo.toml --features desktop commands_test
+SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" cargo check --manifest-path src-tauri/Cargo.toml --features desktop
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+```
+
+### 真实模型 Gate
+
+```bash
+# 下载并验证模型后运行
+LIFESUB_ASR_MODEL_DIR="$HOME/Library/Application Support/com.goldenwave.lifesub/models" \
+  scripts/verify-asr-gate.sh
+```
+
+### 桌面验收
+
+```bash
+LIFESUB_ASR_MODEL_DIR="$HOME/Library/Application Support/com.goldenwave.lifesub/models" \
+  scripts/verify-desktop-asr.sh target
+```
+
+### DMG 构建与验证
+
+```bash
+SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)" \
+  npm run tauri -- build --features desktop
+otool -L src-tauri/target/release/bundle/macos/LifeSub.app/Contents/MacOS/lifesub
+codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/LifeSub.app
+scripts/verify-desktop-asr.sh dmg
 ```
 
 ## 架构

@@ -76,10 +76,19 @@
 - 默认策略：先做确定性时间对齐、音频质量评估、重叠检测和来源优先级；ASR 冲突需要保留来源，不能静默选择“看起来更好”的文本。
 - 删除与保留：本版本不自动删除低质量来源；用户确认的合并结果与来源保留策略另行建模。
 
+## D-013：本地 ASR 技术栈
+
+- 状态：已确认（V0.2 已实现）
+- 决定：采用 sherpa-onnx 1.13.5 静态链接，统一支持 SenseVoiceSmall INT8 与 Whisper Tiny/Base/Small 模型。
+- 原因：同一 Rust API 覆盖两种 Provider；无 Python Sidecar；模型下载、校验、安装和切换统一管理。
+- 模型规格：SenseVoiceSmall 163 MB（默认中文/中英混合），Whisper Tiny 116 MB、Base 208 MB、Small 639 MB，Silero VAD 0.6 MB。
+- 边界：不接入云端 ASR；不引入 whisper.cpp 双运行时；不复制 GPLv3 参考代码。
+- 详情：见 [`docs/superpowers/specs/2026-08-15-lifesub-real-asr-design.md`](../superpowers/specs/2026-08-15-lifesub-real-asr-design.md)。
+
 ## 待决事项
 
 - 技术栈与进程边界。
-- 首选本地 ASR 模型和最低硬件要求。
+- ~~首选本地 ASR 模型和最低硬件要求。~~ → D-013 已确认。
 - 记忆 schema、敏感级别和授权生命周期。
 - 搜索与引用的精确工具契约。
 - GitHub 加密与密钥恢复方案。

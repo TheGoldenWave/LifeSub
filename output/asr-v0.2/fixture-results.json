@@ -1,0 +1,17 @@
+{
+  "description": "LifeSub real local ASR Gate evidence — placeholder. Run scripts/verify-asr-gate.sh with LIFESUB_ASR_MODEL_DIR set to generate real results.",
+  "tested_commit": "0000000000000000000000000000000000000000",
+  "scoped_source_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "executable_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "runtime_version": "1.13.5",
+  "runtime_git_sha1": "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5",
+  "native_archive_hash": null,
+  "model_hashes": {},
+  "vad_hash": null,
+  "fixture_hashes": {},
+  "metrics": [],
+  "all_pass": false,
+  "failures": [
+    "Placeholder — run scripts/verify-asr-gate.sh to generate real evidence"
+  ]
+}

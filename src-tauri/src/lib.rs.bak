@@ -13,19 +13,19 @@ mod desktop_api;
 use tauri::Manager;
 
 #[cfg(test)]
-// mod asr_audio_test;
+mod asr_audio_test;
 #[cfg(test)]
-// mod asr_job_test;
+mod asr_job_test;
 #[cfg(test)]
 mod asr_manifest_test;
 #[cfg(test)]
-// mod asr_model_manager_test;
+mod asr_model_manager_test;
 #[cfg(test)]
-// mod asr_provider_test;
+mod asr_provider_test;
 #[cfg(test)]
 mod asr_runtime_test;
 #[cfg(test)]
-// mod asr_service_test;
+mod asr_service_test;
 #[cfg(test)]
 mod asr_settings_test;
 #[cfg(test)]
@@ -33,7 +33,7 @@ mod catalog_migration_test;
 #[cfg(test)]
 mod catalog_test;
 #[cfg(test)]
-// mod commands_test;
+mod commands_test;
 #[cfg(test)]
 mod domain_test;
 #[cfg(test)]

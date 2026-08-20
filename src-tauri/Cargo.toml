@@ -51,3 +51,8 @@ tempfile = "3"
 default = []
 asr-runtime = ["dep:sherpa-onnx"]
 desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "asr-runtime"]
+
+[[bin]]
+name = "lifesub-asr-gate"
+path = "src/bin/lifesub-asr-gate.rs"
+required-features = ["asr-runtime"]

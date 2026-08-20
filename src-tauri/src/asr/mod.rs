@@ -4,9 +4,19 @@
 //! `asr-runtime` feature is enabled. Future modules (settings, manifest,
 //! model manager, audio, VAD, providers, jobs, service) will be added here.
 
+pub mod audio;
+pub mod gate_metrics;
 pub mod manifest;
 pub mod model_lookup;
+pub mod provider;
 pub mod settings;
+pub mod vad;
+
+#[cfg(feature = "asr-runtime")]
+pub mod sense_voice;
+
+#[cfg(feature = "asr-runtime")]
+pub mod whisper;
 
 /// Returns the pinned sherpa-onnx runtime version string.
 ///

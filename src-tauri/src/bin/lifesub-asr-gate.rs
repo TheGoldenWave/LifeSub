@@ -23,10 +23,10 @@ use std::process;
 
 use lifesub_lib::asr::audio::decode_audio;
 use lifesub_lib::asr::gate_metrics::{
-    compute_metrics, GateFixture, GateManifest, FixtureMetrics,
+    compute_metrics, GateManifest, FixtureMetrics,
 };
 use lifesub_lib::asr::provider::{AsrProvider, AsrRequest, AudioSlice, CancellationToken};
-use lifesub_lib::asr::settings::{AsrLanguage, AsrProviderKind, AsrProviderOptions, WhisperTask};
+use lifesub_lib::asr::settings::{AsrLanguage, AsrProviderOptions, WhisperTask};
 
 // ---------------------------------------------------------------------------
 // Result types

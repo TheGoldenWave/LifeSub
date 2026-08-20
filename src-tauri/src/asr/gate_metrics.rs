@@ -203,9 +203,29 @@ pub fn wer_tokens(text: &str) -> Vec<String> {
 }
 
 /// Normalize text for key phrase matching: NFKC, lowercase, punctuation→spaces,
-/// whitespace collapse. Returns token sequence.
+/// whitespace collapse. Then tokenize into grapheme clusters for language-agnostic
+/// subsequence matching (works for both space-separated languages and CJK).
 pub fn key_phrase_tokens(text: &str) -> Vec<String> {
-    wer_tokens(text) // Same normalization as WER tokens
+    let normalized = normalize_text(text);
+    // Replace punctuation with spaces, then collapse whitespace
+    let spaced: String = normalized
+        .chars()
+        .map(|c| {
+            if c.is_ascii_punctuation() {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    // Collapse whitespace: filter out spaces and keep only non-whitespace
+    // grapheme clusters. This preserves word boundaries for English while
+    // allowing CJK character-level matching.
+    let no_spaces: String = spaced.chars().filter(|c| !c.is_whitespace()).collect();
+    no_spaces
+        .graphemes(true)
+        .map(|g| g.to_string())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +796,7 @@ mod tests {
         let metrics = compute_metrics(&fixture, &predicted, "sense_voice", "test-model");
         assert!(metrics.all_pass);
         assert!(metrics.cer_pass);
+        assert!(metrics.wer_pass);
         assert!(metrics.key_phrase_pass);
         assert!(metrics.boundary_pass);
     }

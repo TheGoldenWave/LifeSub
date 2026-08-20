@@ -23,9 +23,31 @@ tauri = { version = "2", features = [], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# ASR runtime: sherpa-onnx 1.13.5 static link for local SenseVoice and Whisper
+sherpa-onnx = { version = "=1.13.5", default-features = false, features = ["static"], optional = true }
+
+# Audio decoding, downmix, and resampling
+symphonia = { version = "0.6.1", features = ["aac", "flac", "isomp4", "mp3", "ogg", "vorbis", "wav"] }
+rubato = "5.0.0"
+
+# Model download (blocking HTTP with rustls — no OpenSSL dependency)
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+# Model archive extraction
+tar = "0.4"
+bzip2 = "0.5"
+
+# Advisory file locking for the singleton ASR worker
+fs2 = "0.4.3"
+
+# Unicode normalization for ASR metric computation
+unicode-normalization = "0.1"
+unicode-segmentation = "1"
+
 [dev-dependencies]
 tempfile = "3"
 
 [features]
 default = []
-desktop = ["dep:tauri", "dep:tauri-plugin-dialog"]
+asr-runtime = ["dep:sherpa-onnx"]
+desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "asr-runtime"]

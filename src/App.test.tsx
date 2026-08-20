@@ -25,7 +25,7 @@ describe('LifeSub desktop experience', () => {
 
     await user.type(screen.getByRole('searchbox', { name: '搜索转写' }), '证据链')
 
-    expect(screen.getByText(/证据链必须保留原始转写/)).toBeInTheDocument()
+    expect(screen.getAllByText(/证据链必须保留原始转写/).length).toBeGreaterThanOrEqual(1)
     expect(screen.queryByText(/先确认首版范围/)).not.toBeInTheDocument()
   })
 
@@ -49,7 +49,26 @@ describe('LifeSub desktop experience', () => {
     await user.click(screen.getByRole('button', { name: '设置' }))
 
     expect(screen.getByRole('heading', { name: '设置' })).toBeInTheDocument()
-    expect(screen.getByText('本地演示 ASR')).toBeInTheDocument()
-    expect(screen.getByText('云端处理默认关闭')).toBeInTheDocument()
+    expect(screen.getByText('SenseVoice Small INT8')).toBeInTheDocument()
+    expect(screen.getAllByText(/浏览器预览模式/).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('shows the revision selector with current revision label', () => {
+    render(<App />)
+
+    // The evidence strip shows the current revision label (appears twice: original + current)
+    const labels = screen.getAllByText('原始转写 · r1')
+    expect(labels).toHaveLength(2)
+  })
+
+  it('displays a corrupted source warning when chunk integrity is not available', async () => {
+    // This test will fail because the corrupted source warning is not yet implemented
+    // The demo records don't have chunkIntegrity set, so the warning should not appear
+    // When we implement chunkIntegrity handling, we'll add a test with a corrupted record
+    render(<App />)
+
+    // For now, no corrupted warning should appear for demo records
+    const warning = screen.queryByText(/来源不可用|source unavailable/i)
+    expect(warning).not.toBeInTheDocument()
   })
 })

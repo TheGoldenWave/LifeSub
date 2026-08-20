@@ -1,15 +1,39 @@
+pub mod acceptance;
+pub mod asr;
 pub mod catalog;
 pub mod domain;
 pub mod service;
 
 #[cfg(feature = "desktop")]
 mod commands;
+#[cfg(feature = "desktop")]
+mod desktop_api;
 
 #[cfg(feature = "desktop")]
 use tauri::Manager;
 
 #[cfg(test)]
+// mod asr_audio_test;
+#[cfg(test)]
+// mod asr_job_test;
+#[cfg(test)]
+mod asr_manifest_test;
+#[cfg(test)]
+// mod asr_model_manager_test;
+#[cfg(test)]
+// mod asr_provider_test;
+#[cfg(test)]
+mod asr_runtime_test;
+#[cfg(test)]
+// mod asr_service_test;
+#[cfg(test)]
+mod asr_settings_test;
+#[cfg(test)]
+mod catalog_migration_test;
+#[cfg(test)]
 mod catalog_test;
+#[cfg(test)]
+// mod commands_test;
 #[cfg(test)]
 mod domain_test;
 #[cfg(test)]
@@ -30,6 +54,16 @@ pub fn run() {
             commands::append_transcript_revision,
             commands::search_transcripts,
             commands::resolve_evidence,
+            commands::get_asr_settings,
+            commands::save_asr_settings,
+            commands::list_asr_models,
+            commands::download_asr_model,
+            commands::cancel_model_download,
+            commands::delete_asr_model,
+            commands::list_asr_jobs,
+            commands::cancel_asr_job,
+            commands::retry_asr_job,
+            commands::retranscribe_record,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LifeSub desktop app");

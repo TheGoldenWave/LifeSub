@@ -36,7 +36,17 @@ LifeSub 的差异不应只是“再做一支录音笔”，而是统一会议内
 - 音频处理：WebRTC 降噪、回声消除与 VAD。
 - 音频压缩：Opus 适合降低存储和上传成本。
 
-具体组件需要通过中文会议、混合语言、远近场、多人重叠和 Apple Silicon 性能测试后确定。
+### V0.2 已选方案
+
+LifeSub V0.2 采用 sherpa-onnx 1.13.5 统一运行时，静态链接 SenseVoiceSmall INT8 与 Whisper Tiny/Base/Small 模型：
+
+- **SenseVoiceSmall INT8**：163 MB，支持 zh/en/ja/ko/yue，默认中文/中英混合模型。
+- **Whisper Tiny**：116 MB，快速验证和低资源场景。
+- **Whisper Base**：208 MB，默认 Whisper 平衡档。
+- **Whisper Small**：639 MB，更高质量，较高资源需求。
+- **Silero VAD**：0.6 MB，语音活动检测，200 ms padding，25 秒最大窗口。
+
+不依赖 Python、不启动本地 HTTP 服务、不向云端发送音频。具体组件通过中文会议、混合语言、远近场、多人重叠和 Apple Silicon 性能测试后确定。
 
 ## 长期硬件方向
 

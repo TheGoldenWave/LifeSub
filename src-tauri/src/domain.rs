@@ -45,6 +45,11 @@ pub struct TranscriptSegment {
     pub end_ms: i64,
     pub source: AudioSource,
     pub text: String,
+    pub chunk_id: Option<String>,
+    pub chunk_start_ms: Option<i64>,
+    pub chunk_end_ms: Option<i64>,
+    pub session_start_ms: Option<i64>,
+    pub session_end_ms: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -229,7 +234,20 @@ impl TranscriptSegment {
             end_ms,
             source,
             text: text.into(),
+            chunk_id: None, chunk_start_ms: None, chunk_end_ms: None,
+            session_start_ms: None, session_end_ms: None,
         }
+    }
+
+    pub fn with_chunk_provenance(mut self, chunk_id: impl Into<String>, chunk_start_ms: i64, chunk_end_ms: i64, session_offset_ms: i64) -> Self {
+        self.chunk_id = Some(chunk_id.into());
+        self.chunk_start_ms = Some(chunk_start_ms);
+        self.chunk_end_ms = Some(chunk_end_ms);
+        self.session_start_ms = Some(session_offset_ms + chunk_start_ms);
+        self.session_end_ms = Some(session_offset_ms + chunk_end_ms);
+        self.start_ms = self.session_start_ms.unwrap();
+        self.end_ms = self.session_end_ms.unwrap();
+        self
     }
 
     pub fn evidence_uri(&self, revision: i64) -> String {

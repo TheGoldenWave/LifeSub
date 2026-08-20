@@ -10,7 +10,7 @@ mod commands;
 use tauri::Manager;
 
 #[cfg(test)]
-mod asr_job_test;
+mod asr_manifest_test;
 #[cfg(test)]
 mod asr_runtime_test;
 #[cfg(test)]
@@ -28,11 +28,17 @@ mod service_test;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| { app.manage(commands::AppState::initialize(app.handle())?); Ok(()) })
+        .setup(|app| {
+            app.manage(commands::AppState::initialize(app.handle())?);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
-            commands::create_capture_session, commands::transition_capture_session,
-            commands::import_audio_file, commands::append_transcript_revision,
-            commands::search_transcripts, commands::resolve_evidence,
+            commands::create_capture_session,
+            commands::transition_capture_session,
+            commands::import_audio_file,
+            commands::append_transcript_revision,
+            commands::search_transcripts,
+            commands::resolve_evidence,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LifeSub desktop app");

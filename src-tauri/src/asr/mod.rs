@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod manifest;
 pub mod model_lookup;
+pub mod model_manager;
 pub mod settings;
 pub mod vad;
 

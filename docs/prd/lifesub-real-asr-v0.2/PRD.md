@@ -1,15 +1,17 @@
 # PRD - LifeSub 真实本地 ASR V0.2
 
+> **当前发布映射（2026-08-20）**：本 PRD 的真实本地 ASR、模型管理、Job、Receipt、Revision 与重转写范围作为 V0.2.1 交付。真实麦克风/系统音频采集拆至 V0.2.2；Diarization 拆至 V0.3；CAM++ 声纹身份拆至 V0.3.1。
+
 ## 1. 业务目标
 
 | 维度 | 内容 |
 |---|---|
-| 项目名称 | LifeSub 真实本地 ASR V0.2 |
+| 项目名称 | LifeSub 真实本地 ASR V0.2.1（沿用 V0.2 文档目录） |
 | 目标用户 | 在 macOS 本机保存、转写和检索个人音频证据的 LifeSub 用户 |
 | 核心价值 | 使用可切换的真实本地模型生成可定位、可追溯、可重转写的 Transcript Revision |
 | 成功指标 | SenseVoice 与 Whisper 均完成真实样本转写；设置切换、模型管理、自动转写和重转写流程通过验收 |
 | 预估用户量级 | 本地单用户桌面应用，不涉及服务端并发 |
-| 预计上线 | 设计与真实模型 Gate 通过后发布 V0.2 |
+| 预计上线 | 设计与真实模型 Gate 通过后发布 V0.2.1 |
 
 ## 2. User Journey Map
 
@@ -361,6 +363,17 @@ ui --> user: 展示真实转写和来源
 - [ ] 前端单测、Rust 单测、真实模型集成测试、Playwright 验收、生产构建和 Tauri desktop 编译全部通过。
 - [ ] 发布 bundle 静态链接 sherpa-onnx；`otool -L` 无缺失 native 动态库，运行时版本、签名和 DMG 验证通过。
 - [ ] TypeScript/JavaScript 源码不存在 `console.log`。
+
+### 9.1 V0.2.1 验收证据矩阵
+
+| 验收类别 | 变更类型 | 风险级别 | 验证层级 | 通过标准 | 必需环境与 fixture | RED/GREEN | 证据路径或命令 |
+|---|---|---|---|---|---|---|---|
+| Job、Receipt、Revision | 行为、数据、接口契约 | Critical | Rust 集成、故障注入、重启恢复 | 状态确定；成功原子发布；失败无半条 Evidence | v1 Catalog、损坏音频、取消、过期 lease、重启 fixture | 必须 | focused tests；Tier 2 结果写入 `.artifacts/process.md` |
+| 真实 Provider 与质量 | 模型运行时、量化质量 | Important | 真实模型集成和量化 Gate | CER/WER、关键短语、时间误差满足本节阈值 | macOS 14+ Apple Silicon；固定中/英/混合音频和模型 hash | Provider 行为必须；量化 Gate 另行执行 | `scripts/verify-asr-gate.sh`、fixture digest、质量报告 |
+| 模型下载与安装 | 行为、数据、供应链安全 | Critical | 集成、负向用例、启动 reconciliation | 中断、低空间、hash 错误或不完整安装不进入 ready；可恢复 | 隔离模型目录和对应故障 fixture | 必须 | model-manager tests、安装 manifest、诊断截图 |
+| UI 与重转写 | 行为、交互可访问性 | Important | 组件测试和 Playwright | 设置持久化；状态准确；重转写保留历史；无伪成功 | 浏览器映射 fixture + Tauri acceptance backend | 行为必须 | frontend tests、`tests/specs/lifesub-real-asr-v0.2.spec.ts`、截图 |
+| 性能与取消 | 性能、资源 | Important | heartbeat/cancel 量化测试 | 满足本节 P95、可见和停止时间阈值 | M1/16GB、固定 5 分钟音频和真实模型 | 行为必须；性能 Gate 另行执行 | 性能报告和命令输出写入 `.artifacts/process.md` |
+| 发布安装包 | 配置、生成物、真实环境 | Critical | 构建、签名/动态库检查、DMG smoke | 镜像内签名通过；无缺失库；两个 Provider 执行成功 | macOS 14+ Apple Silicon；release DMG、固定模型/音频 | 不制造合成 RED；必须有 smoke 证据 | checksum、`codesign`、`otool -L`、packaged smoke 日志 |
 
 ## 10. 关联文档
 

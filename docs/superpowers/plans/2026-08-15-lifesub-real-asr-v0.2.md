@@ -1,5 +1,7 @@
 # LifeSub Real Local ASR V0.2 Implementation Plan
 
+> **Current release mapping (2026-08-20):** This approved plan now implements the V0.2.1 release boundary. Native microphone/system capture is V0.2.2; Diarization is V0.3; CAM++ speaker identity is V0.3.1. Those later capabilities are not release gates for this plan.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the demo transcript path with real, local SenseVoice and Whisper transcription, model switching, persistent ASR settings, recoverable jobs, immutable revisions, and a complete settings experience.

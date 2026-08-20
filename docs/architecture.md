@@ -83,7 +83,7 @@ LifeSub/
 - 执行证据访问授权和读取、导出、删除、撤回审计。
 - 通过 Evidence Contract 提供稳定 API。
 
-### Multi-Device Evidence Reconciler（V0.3 规划）
+### Multi-Device Evidence Reconciler（后续重新排期）
 
 - 将 Mac、手机、手表等设备的录音登记为同一事件的候选来源。
 - 使用设备时间、录音时间、音频指纹、采样率、连续性和质量信息进行确定性对齐。
@@ -139,8 +139,8 @@ LifeSub 不根据主题、决定、行动项、人物关系或 Project 做语义
   -> 形成 LogicalTranscriptSegment
   -> 渲染可再生 Markdown 与可选 navigation_summary
 -> 更新 FTS5 和 Evidence Catalog
-  -> 多设备来源归并与时间校准（V0.3）
-  -> 生成新的合并 Audio/Transcript Revision（V0.3）
+  -> 多设备来源归并与时间校准（后续重新排期）
+  -> 生成新的合并 Audio/Transcript Revision（后续重新排期）
   -> Malow 通过 Evidence Ref 读取获授权片段
   -> Malow / Human Review 形成候选
   -> GoldenWave 独立完成正式治理
@@ -177,7 +177,7 @@ GitHub 不作为全天音频和转写的主存储或同步通道。未来同步�
 
 - 首选本地 ASR 模型及最低硬件要求。
 - 音频编码、Chunk 时长和长期归档策略。
-- V0.1 是否包含匿名 Speaker Diarization，还是延后到 V0.3。
-- 多设备来源归并、时钟校准和 ASR 冲突治理（V0.3）。
+- 匿名 Speaker Diarization 进入 V0.3，CAM++ 身份匹配进入 V0.3.1。
+- 多设备来源归并、时钟校准和 ASR 冲突治理在说话人能力之后重新排期。
 - Evidence Contract 的首个正式 Schema、错误码和兼容范围。
 - 加密对象同步的后端与密钥恢复方案。

@@ -6,7 +6,8 @@ Your goal is to meticulously audit the code for quality, security, and adherence
 ## Core Directives for Review:
 1. **Security First**: Check for exposed secrets, SQL injections, and XSS vulnerabilities.
 2. **Architecture Alignment**: Ensure the code aligns with the principles defined in `docs/context/project/`.
-3. **No Code Edits**: Do not write or edit the code directly. Output a structured Markdown report with severity levels (Critical, Important, Minor) and actionable suggestions.
+3. **Verification Fit**: Read `docs/testing-and-review-policy.md`. Judge whether the evidence matches the change type; do not require unit tests for pure visual, documentation, configuration, or generated-artifact changes when the policy's corresponding evidence exists.
+4. **No Code Edits**: Do not write or edit the code directly. Output a structured Markdown report with severity levels (Critical, Important, Minor) and actionable suggestions.
 
 ## Balanced Review Cadence
 
@@ -42,4 +43,5 @@ Every finding must include:
 - Timebox each review round to 10 minutes where the environment permits.
 - If analysis exceeds the timebox, report the current findings instead of continuing silently.
 - A Task may proceed when focused tests, relevant build/feature checks, and `git diff --check` pass; Critical is zero; Important findings are fixed or explicitly scoped out; and Minor findings are recorded.
+- “No new unit test” is not a standalone finding. Identify the missing risk evidence instead: RED/GREEN for behavior, browser/accessibility/screenshots for UI, or parsing/build/artifact checks for configuration and docs.
 - Use the next Task for unrelated cleanup. Do not block delivery on broad refactors.

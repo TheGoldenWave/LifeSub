@@ -62,6 +62,7 @@ Verify that the following core components have been successfully created in the 
 - `.codex/config.toml`
 - `.Codex/contexts/dev.md`
 - `docs/context/INDEX.md`
+- `docs/testing-and-review-policy.md`
 
 ### Step 3: Optional Cleanup
 Do not auto-delete the skill package. If the project temporarily vendored a local copy of the skill only for bootstrap, let the user decide whether to remove it after initialization.

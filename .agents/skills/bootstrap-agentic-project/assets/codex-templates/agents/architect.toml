@@ -13,6 +13,7 @@ developer_instructions = """
 1. 阅读项目根 AGENTS.md 或 CLAUDE.md，确认当前路由和协作规则
 2. 如存在 `.claude/contexts/review.md`，先读取它获取 Review 关注点
 3. 读取 `.claude/rules/common/coding-style.md`
+4. 读取 `docs/testing-and-review-policy.md`
 4. 做架构决策前，先查阅 `docs/context/INDEX.md`（结构化表格索引，按分类检索：架构决策、Bug 模式、设计模式、领域知识、环境工具）与 `docs/context/project/experience/`，避免重复决策
 5. 检查 `docs/context/wiki/entities/` 和 `docs/context/wiki/concepts/` 中是否有相关技术的已有知识页面
 6. 如需深入了解某个技术，可查阅 `.sources/.converted/` 中的完整转换文档
@@ -21,7 +22,7 @@ developer_instructions = """
 代码审查重点：
 - 样式硬编码：是否出现未走 Token 的颜色、间距、字号
 - 异常处理：无网、权限不足、空数据等边界场景是否覆盖
-- 测试覆盖：是否绕过 `tests/specs/` 中的验收测试
+- 验证适配性：行为类是否有 RED/GREEN；视觉、文档、配置和生成物是否有匹配的可重复证据
 - 职责边界：dev-agent 是否越权修改架构文件或 PRD
 - 安全与性能：SQL 注入、XSS、密钥泄露、N+1、阻塞与内存泄漏
 - 接口契约：API 变更是否向后兼容，模块边界是否清晰

@@ -34,7 +34,9 @@
   - 严禁在代码中硬编码颜色、间距等样式值，必须引用 `docs/design/tokens/base.json` 中的 Token。
   - 项目设计规范存储在 `docs/design/tokens/impeccable.md`，与 `base.json` 同目录，由 ui-agent 通过 `teach-impeccable` Skill 建立，不要移动该文件。
 - **🕵️ 测试与验收 (QA 视窗)** → `tests/`
-  - 开发完毕后，前往 `tests/specs/` 编写或执行对应的验收脚本。
+  - 测试与审查的单一政策源：`docs/testing-and-review-policy.md`。
+  - 行为、数据、安全和接口契约变更必须 RED/GREEN；纯视觉、文档、配置和生成物使用与风险匹配的可重复验证。
+  - 跨模块用户路径放在 `tests/specs/`；模块测试靠近模块；视觉证据存入 `output/playwright/`。
 - **🔌 外部系统扩展 (MCP)**
   - Claude Code → `.claude/mcp-servers.json`
   - Codex CLI → `.codex/config.toml`（`[mcp_servers.*]` 部分）
@@ -50,10 +52,10 @@
 |-------|---------|------------|-----------|
 | `pm-agent` | 需求澄清、双路径工作流（业务提需/产品自发）、PRD 维护 | `/prd [需求描述]` | 明确要求使用 `pm` 自定义 subagent |
 | `project-manager-agent` | 项目排期、进度追踪、阻塞管理、状态报告 | `/progress [指令]` | 明确要求使用 `project-manager` 自定义 subagent |
-| `dev-agent` | 业务代码实现、TDD 开发循环 | 直接 @提及 | 明确要求使用 `dev` 自定义 subagent |
+| `dev-agent` | 业务代码实现、按风险选择验证策略 | 直接 @提及 | 明确要求使用 `dev` 自定义 subagent |
 | `ui-agent` | 设计规范建设（teach-impeccable）、Design Token 维护、PRD 双视窗创建 | 直接 @提及 | 明确要求使用 `ui` 自定义 subagent |
 | `architect-agent` | 系统设计、架构决策、Code Review | 直接 @提及 | 明确要求使用 `architect` 自定义 subagent |
-| `qa-agent` | TDD/BDD 测试用例、质量评估 | 直接 @提及 | 明确要求使用 `qa` 自定义 subagent |
+| `qa-agent` | 验收策略、自动化与视觉/真实环境质量评估 | 直接 @提及 | 明确要求使用 `qa` 自定义 subagent |
 
 ---
 
@@ -64,6 +66,8 @@
 你在编写任何代码前，必须确保遵守引擎目录下 `rules/common/coding-style.md` 中定义的全局规范：
 - Claude Code 路径：`.claude/rules/common/coding-style.md`
 - Codex 路径：优先读取 `.claude/rules/common/coding-style.md`
+
+测试、验收与审查必须遵守 `docs/testing-and-review-policy.md`。任何角色文件中的简写若与该政策冲突，以该政策为准。
 
 ### 动态上下文（按需激活）
 

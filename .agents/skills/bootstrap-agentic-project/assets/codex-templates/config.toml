@@ -80,7 +80,7 @@ description = "产品经理：需求澄清、PRD 撰写、验收标准维护与 
 config_file = "agents/pm.toml"
 
 [agents.dev]
-description = "全栈工程师：业务代码实现、TDD 开发循环、代码维护与多 Agent 协作。"
+description = "全栈工程师：业务代码实现、风险匹配验证、代码维护与多 Agent 协作。"
 config_file = "agents/dev.toml"
 
 [agents.architect]
@@ -92,7 +92,7 @@ description = "UI 工程师：设计规范建设、Design Token 维护、双视�
 config_file = "agents/ui.toml"
 
 [agents.qa]
-description = "QA 测试工程师：先写验收测试、执行自动化测试并维护质量门禁。"
+description = "QA 测试工程师：制定风险匹配的验收策略，执行自动化、视觉与真实环境验证并维护质量门禁。"
 config_file = "agents/qa.toml"
 
 [agents.project-manager]

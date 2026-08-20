@@ -1,4 +1,6 @@
-# LifeSub 多设备 Evidence 合并 V0.3 规划
+# LifeSub 多设备 Evidence 合并规划（历史 V0.3，待重新排期）
+
+> 2026-08-20 路线调整：V0.3 现用于匿名说话人分离，V0.3.1 用于 CAM++ 声纹身份。本文件保留为多设备能力的研究与拆解输入，但在重新编号并完成新的 PRD/实施计划审查前不得执行。
 
 ## 目标
 
@@ -31,19 +33,19 @@
 
 ## 分阶段实施
 
-### V0.3-A：来源和时间模型
+### 阶段 A：来源和时间模型
 
 - 扩展录音/Chunk provenance，记录设备标识和采集时钟。
 - 建立同一事件的来源候选集和人工确认入口。
 - 实现确定性时钟偏移估计、漂移记录和不确定范围。
 
-### V0.3-B：音频与 ASR 对齐
+### 阶段 B：音频与 ASR 对齐
 
 - 实现重叠、缺口、重复和音频质量分析。
 - 将各来源 ASR Segment 映射到统一时间轴。
 - 保存 ASR 冲突、来源优先级和治理诊断。
 
-### V0.3-C：合并 Revision 与发布
+### 阶段 C：合并 Revision 与发布
 
 - 生成新的合并 Audio/Transcript Revision。
 - 更新 FTS 和 `lifesub://` Evidence Ref，使最终片段可定位且可追溯。
@@ -60,6 +62,6 @@
 - 合并 Markdown 可从 Catalog 和来源关系重新生成。
 - 删除或撤回合并 Revision 不会删除原始来源，且下游能看到 Evidence 状态变化。
 
-## 与 V0.2 的关系
+## 与真实 ASR、采集和说话人版本的关系
 
-V0.2 先完成单 Chunk 的真实本地 ASR、模型切换、Receipt、Revision、时间范围和 Evidence Contract。V0.3 只在这些不可变来源和 provenance 能力之上增加合并层，不改变原始 ASR 的可信边界。
+V0.2.1 先完成单 Chunk 的真实本地 ASR、模型切换、Receipt、Revision、时间范围和 Evidence Contract；V0.2.2 再接通真实双路采集；V0.3/V0.3.1 完成匿名说话人与可选身份。多设备合并只在这些不可变来源和 provenance 能力之上增加合并层，不改变原始 ASR 或说话人 Evidence 的可信边界。

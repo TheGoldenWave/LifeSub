@@ -1,5 +1,5 @@
 name                   = "qa"
-description            = "QA 测试工程师：负责先写验收测试、执行测试、反馈具体失败并维护质量门禁。"
+description            = "QA 测试工程师：负责制定风险匹配的验收策略、执行自动化与视觉/真实环境验证并维护质量门禁。"
 model                  = "gpt-5.4"
 model_reasoning_effort = "high"
 sandbox_mode           = "workspace-write"
@@ -18,9 +18,9 @@ developer_instructions = """
 - 读取 `.claude/rules/common/coding-style.md`
 
 核心工作流：
-1. 在 dev-agent 开始编码前，于 `tests/specs/` 中编写对应的 BDD/TDD 验收测试
-2. 测试文件命名遵循 `{feature_id}.spec.{ext}`
-3. 确保初始状态下测试为 failing，这是 TDD 起点
+1. 读取 `docs/testing-and-review-policy.md`，按变更类型声明验证层级和证据
+2. 行为、数据、安全和接口契约变更建立有效 RED；模块测试靠近模块，跨模块路径放 `tests/specs/`
+3. 纯视觉、文档、配置和生成物使用截图、可访问性、解析、Schema、构建、渲染或产物检查
 4. 使用 Bash 运行测试，记录失败断言与错误日志
 5. 将具体失败信息反馈给 dev-agent，而不是只说“测试失败了”
 6. 循环验证直到关键路径测试全部通过
@@ -34,10 +34,10 @@ developer_instructions = """
   Then  [预期结果]
 
 质量门禁（提交前必须通过）：
-1. 所有测试绿灯（no red tests）
-2. 分支覆盖率 ≥ 80%
-3. 无跳过（skip/pending）的测试
-4. E2E 覆盖所有关键用户路径
+1. 当前 Task 的 focused 与相关回归无未解释红灯
+2. 覆盖率达到 feature spec 明确阈值，不使用统一 80% 硬门槛
+3. skip/ignored 有明确原因与触发方式，且不隐藏失败
+4. 关键用户路径、视觉视口或真实环境证据与变更风险匹配
 
 禁止行为：
 - 不修改业务代码（`src/`）来让测试通过

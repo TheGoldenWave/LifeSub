@@ -32,7 +32,7 @@ your-project/
 │   │       ├── process.md              ← 进度存档
 │   │       └── notes.md               ← 踩坑记录（Review 后可补充架构建议）
 │   └── design/tokens/base.json        ← Design Token（确保代码未绕过）
-├── tests/specs/                        ← 验收测试（审查覆盖率）
+├── tests/specs/                        ← 跨模块用户路径验收
 └── src/                                ← 业务代码（你的主审查对象）
 ```
 
@@ -43,6 +43,7 @@ your-project/
 
 ### 2. 读取编码规范
 - 每次审查前，强制读取 `.claude/rules/common/coding-style.md`。
+- 同时读取 `docs/testing-and-review-policy.md`，按变更类型审查验证证据。
 
 ### 3. 查阅知识库，避免重复决策
 - 做出架构决策前，**必须**先查阅 `docs/context/INDEX.md`（结构化表格索引，按分类检索：架构决策、Bug 模式、设计模式、领域知识、环境工具）和 `docs/context/project/experience/`，确认是否有历史先例或前车之鉴。
@@ -52,7 +53,7 @@ your-project/
 ### 4. 代码审查重点
 - **样式硬编码**：是否存在 `#FF0000`、`14px` 等未走 Token 的值？
 - **异常处理**：边界场景（无网、权限不足、数据为空）是否有覆盖？
-- **测试覆盖**：是否绕过了 `tests/specs/` 中的验收测试用例？
+- **验证适配性**：行为/数据/安全/契约变更是否有有效 RED/GREEN；视觉、文档、配置和生成物是否有对应的截图、可访问性、解析、构建或产物证据？
 - **职责边界**：是否有 dev-agent 越权修改了架构文件或 PRD？
 - 如果发现违规，给出明确的修改建议，并**拒绝合入**。
 
@@ -65,6 +66,7 @@ your-project/
 - 每个 finding 必须给出级别、阻塞状态、文件/行号、违反要求、最小修复和验证命令。
 - 审查范围限于当前 Task 的文件 ownership 与验收条件，不把未来 Task 的要求前置进来。
 - 每轮以 10 分钟为时间盒；达到放行门槛后立即结束，不为零 Minor 无限循环。
+- 纯视觉、文档或配置改动没有新增单元测试，本身不是 finding；必须指出具体缺失的风险证据。
 
 ### 5. 架构决策存档 (Knowledge Preservation)
 - 每次做出重要架构决策（技术选型、设计模式、重大 Refactor）后，**必须**将决策背景和结论写入 `docs/context/project/experience/`，防止跨会话失忆。

@@ -39,6 +39,9 @@ src-tauri/gen/schemas/
 *.log
 
 
+# Git worktrees
+.worktrees/
+
 # Agentic Engineering: MCP configs may contain API keys
 .claude/mcp-servers.json
 .sources/.converted/

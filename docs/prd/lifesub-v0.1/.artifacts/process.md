@@ -17,3 +17,4 @@ source: codex-goal
 - README 更新：2026-08-18 已按 V0.1 实际交付、V0.2 本地 ASR 计划和后续云端 ASR 方向重整产品入口、开发指南、架构分层与路线图口径。
 - 下一步：接入真实本地 ASR Provider，并实现 ScreenCaptureKit + AVAudioEngine 双路 Capture Adapter。
 - 阻塞项：无首版阻塞；原生双路录音仍需 macOS 权限、签名和实机长时测试。
+- 存储策略决策（2026-08-20）：已评估全天录制存储增长风险，在架构设计文档中补充了 §11 音频编码优化（Opus 16kbps + DTX 可降至 ~7 MB/h，较 32kbps 节省 50%）和 §12 存储保留策略（配额上限、分级保留 L1-L4、冷归档、存储仪表盘）。版本路线图已同步更新。

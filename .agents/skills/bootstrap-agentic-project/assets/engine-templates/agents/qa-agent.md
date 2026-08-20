@@ -27,7 +27,8 @@ your-project/
 │   │       ├── process.md             ← 会话进度存档（必须维护）
 │   │       └── notes.md              ← 踩坑记录（测试失败原因记录在此）
 │   └── design/tokens/base.json       ← Design Token（UI 测试的对照基准）
-└── tests/specs/                       ← 你的主战场（验收测试存放处）
+├── tests/specs/                       ← 跨模块用户路径验收
+└── output/playwright/                 ← 视觉与多视口验收证据
 ```
 
 ## 🎯 核心工作流
@@ -36,15 +37,16 @@ your-project/
 - 开始前，**必须**先读取 `docs/prd/{feature_id}/PRD.md`，从中提炼所有验收标准（Acceptance Criteria）。
 - 查阅 `docs/context/INDEX.md`（结构化表格索引，按分类检索：架构决策、Bug 模式、设计模式、领域知识、环境工具）和 `docs/context/project/experience/` 中的历史踩坑，针对性地补充边界 case（如：空状态、权限异常、网络错误等）。
 
-### 2. 测试先行 (Test First)
-- 在 dev-agent 开始编码**之前**，在 `tests/specs/` 中编写对应的 BDD/TDD 验收测试用例。
-- 测试文件命名规范：`{feature_id}.spec.{ext}`（如 `user-login.spec.ts`）。
-- 确保初始状态下所有测试为 **failing**（红灯），这是 TDD 的起点。
+### 2. 变更分类与验证先行
+- 读取 `docs/testing-and-review-policy.md`，先声明每项 AC 的变更类型、验证层级和证据。
+- 行为、数据、安全和接口契约变更建立有效 RED；模块测试靠近模块，跨模块路径放 `tests/specs/`。
+- 纯视觉、文档、配置和生成物使用多视口截图、可访问性、解析、Schema、构建、渲染或产物检查。
+- RED 必须因目标缺陷失败，不能是错误 mock 或环境未启动。
 
 ### 3. 执行测试并验证
 - 使用 Bash 工具运行测试套件，记录失败的断言和错误日志。
 - 将**具体的失败信息**（测试名 + 错误堆栈）提供给 dev-agent，而不仅仅是"测试失败了"。
-- 循环验证直到所有测试 **100% 通过**（绿灯）才宣告完成。
+- 循环验证直到当前 Task 的必需证据全部通过。
 
 ### 4. 防失忆存档 (State Saving)
 - 发现的 bug 规律、测试覆盖盲区，记录到 `docs/prd/{feature_id}/.artifacts/notes.md`。

@@ -1,4 +1,4 @@
-import { FileAudio, Search } from 'lucide-react'
+import { FileAudio, Search, Upload } from 'lucide-react'
 import type { EvidenceRecord } from '../domain'
 
 interface RecordListProps {
@@ -7,15 +7,21 @@ interface RecordListProps {
   query: string
   onQueryChange: (query: string) => void
   onSelect: (id: string) => void
+  onImport?: () => void
 }
 
-export function RecordList({ records, selectedId, query, onQueryChange, onSelect }: RecordListProps) {
+export function RecordList({ records, selectedId, query, onQueryChange, onSelect, onImport }: RecordListProps) {
   return (
     <aside className="record-list">
       <div className="search-field">
         <Search size={16} aria-hidden="true" />
         <input type="search" aria-label="搜索转写" placeholder="搜索原话、来源或时间…" value={query} onChange={(event) => onQueryChange(event.target.value)} />
       </div>
+      {onImport && (
+        <button className="button" style={{ width: '100%', marginTop: 'var(--spacing-2)' }} onClick={onImport}>
+          <Upload size={16} />导入音频
+        </button>
+      )}
       <div className="record-list__heading"><span>最近记录</span><small>{records.length} 条</small></div>
       <div className="record-list__items">
         {records.map((record) => (

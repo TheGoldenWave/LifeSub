@@ -379,7 +379,181 @@ V0.1 已包含以下可靠性能力：
 - V0.1 通过 8 小时与 24 小时 soak，以及至少 20 次随机崩溃注入；已封存分片损失和损坏均为 0，未封存音频最大允许损失不超过 5 秒，启动对账恢复率为 100%。
 - Apple Silicon M1 / 16GB 基线下，capture-only 平均 CPU 不高于 10%，常驻内存不高于 350MB，24 小时运行无持续内存增长；ASR 资源另行按模型记录且不得阻塞采集。
 
-## 11. 同步与多端
+## 11. 音频编码优化
+
+全天录制场景下，编码选择对存储成本有数量级的影响。LifeSub 的音频编码策略必须同时满足 ASR 精度、长期存储效率和磁盘保护三个目标。
+
+### 11.1 编码器选择：Opus
+
+Opus（RFC 6716）是当前语音/音频编码的最优选择，理由如下：
+
+| 维度 | Opus 优势 | 对比 |
+|---|---|---|
+| 语音质量 | 12 kbps 即可达到窄带语音透明质量，24 kbps 达到全频带语音透明 | AAC-LC 在 32 kbps 以下语音质量显著下降 |
+| 比特率范围 | 6–510 kbps，支持 CBR/VBR/CVBR | MP3 最低 32 kbps，低于此值时质量崩溃 |
+| 延迟 | 算法延迟 2.5–60 ms 可调 | 远低于 HE-AAC 的典型 40–60 ms |
+| 许可 | BSD 三条款，无专利负担 | AAC 涉及专利池 |
+| 静音处理 | 原生 DTX（不连续传输），静音段比特率可降至 ~2 kbps | 多数编码器需要外部 VAD + 静音帧丢弃 |
+| 抗丢包 | 内置 FEC（前向纠错），适合流式写入 | 多数编码器无内置抗丢包 |
+
+### 11.2 编码配置与 ASR 兼容性分析
+
+#### 11.2.1 模型原生输入要求
+
+LifeSub 当前及候选的 ASR 模型均以 **16kHz 单声道** 为原生输入：
+
+| 模型 | 输入要求 | 处理管线 | 来源 |
+|---|---|---|---|
+| **SenseVoice** | 16kHz 单声道 PCM | FBank 特征提取 → Transformer | sherpa-onnx FeatureExtractorConfig `sampling_rate=16000` |
+| **Whisper** | 16kHz 单声道 PCM | 80 维 log-Mel 频谱 → Encoder-Decoder | OpenAI Whisper 特征提取器，输入自动重采样到 16kHz |
+| **Qwen3-ASR** | 16kHz 单声道 PCM | 80 维 log-Mel 频谱 → Whisper 风格 Encoder → Qwen3 LLM Decoder | HuggingFace `Qwen3ASRFeatureExtractor` 默认 `sampling_rate=16000`，[技术报告 arxiv 2601.21337](https://arxiv.org/abs/2601.21337) |
+
+关于 Qwen3-ASR：
+
+- **架构**：采用 Whisper 风格音频 Encoder + Qwen3 LLM Decoder，是 End-to-End 模型而非纯 CTC/Attention。提供 0.6B 和 1.7B 两个参数量级。
+- **精度**：在 52 语言 Fleurs 基准上，1.7B 版本的整体 WER 低于 Whisper Large v3 和 GPT-4o-Transcribe，中文表现尤其突出。
+- **许可**：Apache 2.0，无商用限制。
+- **运行时**：已有 Rust 绑定（[qwen3_asr_rs](https://github.com/second-state/qwen3_asr_rs)）和 ONNX 导出（[andrewleech/qwen3-asr-0.6b-onnx](https://huggingface.co/andrewleech/qwen3-asr-0.6b-onnx)），但尚未进入 sherpa-onnx 主分支。LifeSub 可将其列为 V0.4+ 的第三 Provider 候选。
+- **模型体积**：0.6B ONNX 约 1.2GB，1.7B 约 3.4GB——远大于 SenseVoiceSmall（163MB）和 Whisper Tiny（116MB），不适合作为默认 Provider，但可作为高精度选项供用户选择。
+- **与 LifeSub 编码策略的兼容性**：16kHz 输入要求与 SenseVoice、Whisper 完全一致，16kHz Opus 编码无需做任何调整即可兼容。
+
+- 16kHz 不是"降级"，而是模型的**原生采样率**。奈奎斯特频率 8kHz，覆盖了人类语音的全部关键频段（基频 85–300Hz，辅音特征 4–8kHz）。
+- 使用 48kHz 录制对 ASR 精度**无额外收益**，因为模型在下采样后只使用 0–8kHz 频段信息，高频部分被丢弃。
+- 使用 8kHz 录制则**会丢失 4–8kHz 的辅音区分信息**（如 /s/ vs /f/、/θ/ vs /t/），影响清晰度。
+
+#### 11.2.2 Opus 压缩对 ASR 精度的影响
+
+有损压缩对 ASR 的影响已被学术研究验证。Amazon Science 在 Interspeech 2021 发表的论文 "[Multi-channel Opus compression for far-field automatic speech recognition with a fixed bitrate budget](https://www.amazon.science/publications/multi-channel-opus-compression-for-far-field-automatic-speech-recognition-with-a-fixed-bitrate-budget)" 测试了 Opus 多档比特率下的远场 ASR 表现。其核心结论：
+
+| 比特率 | 相对 WER 退化（vs 无压缩 PCM） | 适用性 |
+|---|---|---|
+| **32 kbps 全频带** | **< 1% 相对退化** | 对 ASR 几乎无影响，可视为透明 |
+| **16 kbps 全频带** | **< 3–5% 相对退化** | 轻微退化，近距离语音几乎不可感知 |
+| 8 kbps | 退化显著 | 不推荐用于 ASR 证据 |
+
+关键发现：
+- Opus 在 16–32 kbps 区间对 ASR 的退化**远小于**同码率下的 MP3 或 AAC-LC，因为 Opus 的 SILK 层专为语音优化。
+- 退化主要出现在远场、重叠语音和强噪声场景；近讲单人语音（LifeSub 的主要场景）在 16 kbps 时退化可忽略。
+- VAD 分段 + 逐段转写进一步降低了压缩噪声对 ASR 的影响，因为静音段不参与转写。
+
+#### 11.2.3 LifeSub 编码配置
+
+基于三个 ASR 模型（SenseVoice、Whisper、Qwen3-ASR）均以 16kHz 单声道为原生输入，且 Opus 16kbps 对 ASR 精度影响可忽略，LifeSub 采用**单一编码配置**，不做多档切换：
+
+| 配置 | 比特率 | 采样率 | 声道 | 一小时体积 | ASR 影响 |
+|---|---|---|---|---|---|
+| **Opus Voice** | 16 kbps VBR | 16 kHz | Mono | **~7 MB** | 相对 WER 退化 < 3–5%，近讲不可感知 |
+
+- 统一配置消除了用户在不同场景下做编码决策的认知负担，也避免了"录制时选 HQ、事后发现不需要"的浪费。
+- 研究数据和模型输入要求均表明 16kHz 16kbps 已是最优平衡点，更高的采样率或比特率对 ASR 精度无实质增益。
+- 用户标记"重要"只影响**保留策略**（§12.2），不改变编码——因为编码质量对所有记录已经足够好。
+
+对比此前预估的 32 kbps Opus（~14 MB/h），默认配置降至 16 kbps 可再节省 **50%** 存储：
+
+| 场景 | 32 kbps Opus | 16 kbps Opus | 节省 |
+|---|---|---|---|
+| 8h 工作日双路 | ~230 MB/天 | ~115 MB/天 | 50% |
+| 30 天（22 工作日） | ~5 GB | ~2.5 GB | 50% |
+| 全年 24h 全天 | ~240 GB | ~120 GB | 50% |
+
+### 11.3 DTX 与静音优化
+
+LifeSub 必须启用 Opus DTX（不连续传输），结合 VAD（语音活动检测）实现：
+
+- 静音段：编解码器自动降低至 ~2 kbps 级比特率，而非固定 16 kbps。
+- 对典型的全天录音（有效语音占比约 30–50%），DTX 可额外节省 **20–40%** 存储。
+- DTX 帧与正常帧平铺在同一 Opus 流中，解码器透明处理，不影响 ASR 流程。
+- Audio Chunk 元数据记录实际编码配置（含 DTX 启用标记），使存储统计可审计。
+
+### 11.4 采样率与声道约束
+
+- **采样率**：语音 ASR 模型（SenseVoice、Whisper、Qwen3-ASR）的标准输入均为 16 kHz 单声道。使用 16 kHz 采集避免不必要的重采样，也避免 48 kHz 录制带来的 3× 存储浪费。
+- **声道**：麦克风和系统音频各自独立保存为单声道 Chunk，不在采集阶段不可逆混音。双路合计 2× 单声道，非 2× 立体声。
+- **ASR 工作副本**：原始 Opus 音频不解码转码为中间 PCM 文件；ASR 流程在内存中解码为 PCM 16kHz 送入模型，不在磁盘上产生派生音频文件。
+
+### 11.5 静音裁剪（可选增强）
+
+在 V0.1 已有的 VAD 分段基础上，未来可考虑：
+
+- 在 Audio Chunk 封存时，对连续超过 N 秒的静音段（< 阈值 dBFS）生成 `Discontinuity` 并停止写入音频帧，而非保留静音 Opus 帧。
+- 保留前后各 500ms 的上下文（padding），避免截断句首句尾。
+- 此策略不适合作为默认策略，因为 DTX 已大幅降低静音成本，且保留完整音频流在证据链中更有价值。用户可通过设置显式开启。
+
+### 11.6 编码升级路径
+
+- 未来 Opus 1.5+ 引入的 ML-based 语音增强编码（如 Deep Redundancy）可在不改变容器格式的前提下提升低比特率质量。
+- 原始音频 Chunk 不可变，编码升级只影响新采集的 Chunk。
+- 用户可随时在设置中切换编码配置；已封存 Chunk 不重新编码。
+
+---
+
+## 12. 存储保留策略
+
+LifeSub 全天录制的存储增长呈线性累积，必须建立明确的保留策略，让用户在磁盘空间和证据保存之间做出可控权衡。
+
+### 12.1 存储配额上限
+
+- 用户在设置中配置总存储上限（默认 50 GB，可选 20/50/100/200 GB 或自定义）。
+- 当存储使用量达到配额的 **90%** 时，系统发出一次非阻塞提醒。
+- 当存储使用量达到配额 **100%** 时，系统自动触发清理：按时间从最旧到最新删除原始音频 Chunk，直到使用量降至配额的 **80%**。
+- 清理只删除原始音频文件；对应的 Transcript、Segment、Provider Receipt 和 Evidence Ref **永久保留**。
+- 被清理的 Chunk 的 Evidence 状态更新为 `audio_archived`，产生 Tombstone。
+- 用户可以查看已清理 Chunk 的转写文本，但不能重新验证、重转写或导出音频。
+
+### 12.2 分级保留
+
+| 层级 | 数据 | 默认保留期 | 行为 |
+|---|---|---|---|
+| **L1 原始音频** | Audio Chunk（Opus 文件） | **30 天** | 到期后自动清理（除非标记为重要或配额未满） |
+| **L2 重要记录** | 用户标记为"重要"的记录的原始音频 | **永久** | 不计入配额清理范围，只能手动删除 |
+| **L3 转写文本** | Transcript Revision、Segment、Provider Receipt | **永久** | 体积极小（~10 KB/小时），不参与配额清理 |
+| **L4 Evidence** | Evidence Ref、Markdown 投影、FTS5 索引 | **永久** | 纯派生数据，可随时从 L3 重建 |
+
+- 用户可在设置中调整 L1 保留期（7/14/30/60/90 天）。
+- 用户可在记录详情页一键标记/取消"重要"。此操作只影响保留策略，不改变已封存的音频编码。
+- 重要记录的原始音频永不自动清理；用户手动删除时需二次确认。
+
+### 12.3 冷归档
+
+用户可将超过指定天数的原始音频自动迁移到外部存储：
+
+- **支持的目标**：外置硬盘、NAS（SMB/NFS 挂载路径）、网盘（本地同步目录）。
+- **归档时机**：当音频 Chunk 的创建时间超过保留期，或用户手动触发。
+- **归档操作**：将原始 Opus 文件复制到目标路径，校验 hash 一致后，原位置替换为占位符（symlink 或 stub 文件），Catalog 中记录归档路径和状态。
+- **隐私声明**：用户首次配置网盘目标时，系统必须展示隐私风险声明——"网盘同步可能将音频上传至第三方服务器，请确认已了解隐私风险"——并需要用户主动确认。
+- **回取**：用户访问已归档记录的音频时，系统检测归档路径是否可访问。若可访问，按需从归档位置读取；若不可访问，提示"音频已归档至 <路径>，当前无法访问"。
+- **归档状态**：`audio_cold_stored` — 原始音频不在本地热存储中，但可回取。区别于 `audio_archived`（已永久删除）。
+
+### 12.4 清理与归档的排除规则
+
+以下 Chunk 不会被自动清理或归档，除非用户手动操作：
+
+- 存在未完成的 ASR Job（状态为 `queued | preparing | transcribing | blocked_model`）。
+- 关联的记录被用户标记为"重要"。
+- Chunk 的创建时间在保留期（默认 30 天）内。
+
+### 12.5 存储仪表盘
+
+设置页提供存储概览：
+
+```
+┌─────────────────────────────────────────┐
+│  存储使用                                │
+│  ████████████░░░░░░░░  62.3 GB / 100 GB │
+│                                          │
+│  原始音频    58.2 GB  (L1, 保留 30 天)    │
+│  重要记录     3.8 GB  (L2, 永久保留)      │
+│  转写文本     0.02 GB (L3, 永久保留)      │
+│  其他        0.28 GB                      │
+│                                          │
+│  预计下次清理: 15 天后 (12.5 GB)           │
+│  归档状态: 未配置                          │
+└─────────────────────────────────────────┘
+```
+
+---
+
+## 13. 同步与多端
 
 全天音频不使用 GitHub 作为主同步通道。
 
@@ -398,7 +572,7 @@ iOS 无法承诺任意条件下全天后台录音；后续移动方案必须区�
 - 桌面常驻采集。
 - 外部录音设备或 LifeSub 可穿戴硬件。
 
-## 12. 跨系统一致性与故障边界
+## 14. 跨系统一致性与故障边界
 
 三系统不实现跨数据库分布式事务。跨项目写入使用 outbox / inbox、幂等键、回执和可重试状态。
 
@@ -408,22 +582,22 @@ iOS 无法承诺任意条件下全天后台录音；后续移动方案必须区�
 - 任一系统暂时离线时，上游保留 pending 状态，不伪造下游成功。
 - 未知 Contract 主版本 fail closed。
 
-## 13. 版本路线
+## 15. 版本路线
 
 | 版本 | 目标 | 核心能力 |
 |---|---|---|
 | V0.1 | 可靠证据闭环 | macOS 手动长时录音、双路采集、原子分片、崩溃恢复、磁盘保护、队列背压、本地 ASR、原始/校对 revision、基础热词、文本分片、Markdown、FTS5、Evidence API、Malow 最小消费 |
-| V0.2 | 质量与管理增强 | 高级音频质量检测、长期配额策略、冷归档、诊断导出、音频导入、字幕导出、完整词库管理、多 Provider 对比重跑 |
+| V0.2 | 质量与管理增强 | 高级音频质量检测、Opus 16kHz 16kbps 编码 + DTX 静音压缩、存储配额上限与自动清理、分级保留（L1-L4）、冷归档、诊断导出、音频导入、字幕导出、完整词库管理、多 Provider 对比重跑 |
 | V0.3 | 说话人证据 | 匿名说话人分离、人工纠错、可选本地声纹 Profile、身份撤回和匹配质量评测 |
-| V0.4 | 记录自动化 | 日历提醒、会议检测、确认式自动开始、结束提醒、后台状态 |
-| V0.5 | 多端与生态 | Windows/Linux Adapter、稳定 Contract、CLI、本地 API、更多 Evidence consumer |
+| V0.4 | 记录自动化 | 日历提醒、会议检测、确认式自动开始、结束提醒、后台状态、LLM 自动识别重要分片 |
+| V0.5 | 多端与生态 | Windows/Linux Adapter、稳定 Contract、CLI、本地 API、更多 Evidence consumer、Qwen3-ASR Provider 候选评估 |
 | V0.6 | 加密同步 | 多设备 manifest、加密对象同步、冲突和恢复 |
 | V1.0 | 日常长期记录 | 质量、功耗、存储、隐私和长期运行达到可持续使用标准 |
 | V2+ | 随身采集 | 移动 companion、现有录音设备、可穿戴硬件验证 |
 
 Malow 的 Organizer、Knowledge Patch Review 和 GoldenWave Governance 不作为 LifeSub 版本内功能，只作为集成 Gate。
 
-## 14. 参考项目取舍
+## 16. 参考项目取舍
 
 ### OpenWhispr
 
@@ -439,7 +613,7 @@ Malow 的 Organizer、Knowledge Patch Review 和 GoldenWave Governance 不作为
 
 TypeWhisper 使用 GPLv3；LifeSub 只做 clean-room 产品与架构借鉴，不复制其实现代码，除非未来明确接受 GPLv3 或取得商业许可。
 
-## 15. V0.1 架构护栏
+## 17. V0.1 架构护栏
 
 1. 所有持久领域对象由 Rust Core 管理。
 2. Capture Adapter 不包含 ASR、检索或知识治理逻辑。
@@ -455,9 +629,9 @@ TypeWhisper 使用 GPLv3；LifeSub 只做 clean-room 产品与架构借鉴，不
 12. 任何“记忆系统”需求先路由到 GoldenWave，不在 LifeSub 内扩展平行能力。
 13. Provider、Prompt、词库规则和声纹模型变更必须通过固定语料回放 Gate。
 
-## 16. 验收标准
+## 18. 验收标准
 
-### 16.1 V0.1 Gate
+### 18.1 V0.1 Gate
 
 - 可以连续录制并形成多个可校验音频分片。
 - 8 小时、24 小时和随机崩溃测试不会损坏已封存分片，未封存音频损失不超过 5 秒。
@@ -477,7 +651,7 @@ TypeWhisper 使用 GPLv3；LifeSub 只做 clean-room 产品与架构借鉴，不
 - 删除或撤回 Evidence 后，下游可以检测其不可用状态。
 - LifeSub 代码和数据模型中不存在 GoldenWave Profile、Persona、Knowledge 或 Malow Project/Matter 权威状态；V0.3 的 `SpeakerProfile` 仅是受限声纹身份对象。
 
-### 16.2 V0.3 Speaker Gate
+### 18.2 V0.3 Speaker Gate
 
 - 匿名说话人标签和实名声纹匹配有明确置信度，低置信度不会被强行命名。
 - Speaker benchmark 报告 DER / JER、已知识别准确率、未知说话人误认率和拒识率。

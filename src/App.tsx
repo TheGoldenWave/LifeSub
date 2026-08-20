@@ -1,4 +1,4 @@
-import { Archive, AudioLines, Import, Settings } from 'lucide-react'
+import { Archive, AudioLines, Settings } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { RecordList } from './components/RecordList'
 import { RecorderBar } from './components/RecorderBar'
@@ -103,13 +103,13 @@ export default function App() {
     <div className="app-shell">
       <nav className="sidebar" aria-label="主导航">
         <div className="brand"><span className="brand__mark"><AudioLines /></span><span><strong>LifeSub</strong><small>旁白</small></span></div>
-        <div className="nav-items"><button className={`nav-item ${view === 'timeline' ? 'nav-item--active' : ''}`} onClick={() => setView('timeline')}><Archive size={18} />时间线</button><button className="nav-item" onClick={handleImport}><Import size={18} />导入音频</button></div>
+        <div className="nav-items"><button className={`nav-item ${view === 'timeline' ? 'nav-item--active' : ''}`} onClick={() => setView('timeline')}><Archive size={18} />时间线</button></div>
         <button className={`nav-item nav-item--settings ${view === 'settings' ? 'nav-item--active' : ''}`} onClick={() => setView('settings')}><Settings size={18} />设置</button>
       </nav>
       <section className="workspace">
         {view === 'timeline' && <RecorderBar state={captureState} onStateChange={changeCaptureState} />}
         {notice && <div className="notice" role="status">{notice}<button aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div>}
-        {view === 'timeline' ? <div className="workspace__content"><RecordList records={records} selectedId={selectedId} query={query} onQueryChange={setQuery} onSelect={setSelectedId} /><TranscriptView record={selectedRecord} query={query} onRevisionChange={updateRevision} onNotice={setNotice} /></div> : <SettingsView />}
+        {view === 'timeline' ? <div className="workspace__content"><RecordList records={records} selectedId={selectedId} query={query} onQueryChange={setQuery} onSelect={setSelectedId} onImport={handleImport} /><TranscriptView record={selectedRecord} query={query} onRevisionChange={updateRevision} onNotice={setNotice} /></div> : <SettingsView />}
       </section>
     </div>
   )

@@ -25,10 +25,10 @@
 | 角色名 | 职责 | 调用方式 |
 |--------|------|---------|
 | `pm` | 需求澄清、PRD 维护 | “请使用 `pm` 自定义 subagent 先澄清需求并产出 PRD” |
-| `dev` | 业务代码实现、TDD | “请使用 `dev` 自定义 subagent 实现当前功能” |
+| `dev` | 业务代码实现、风险匹配验证 | “请使用 `dev` 自定义 subagent 实现当前功能” |
 | `architect` | Code Review、架构设计 | “请使用 `architect` 自定义 subagent 做审查或架构建议” |
 | `ui` | 界面实现、Design Token | “请使用 `ui` 自定义 subagent 处理视觉和设计规范” |
-| `qa` | 测试用例、质量评估 | “请使用 `qa` 自定义 subagent 编写或执行验收测试” |
+| `qa` | 验收策略、自动化/视觉/真实环境质量评估 | “请使用 `qa` 自定义 subagent 编写或执行验收测试” |
 
 详细角色配置：`.codex/agents/*.toml`
 
@@ -50,6 +50,7 @@
 2. **进度强制存档**：每次完成关键步骤或结束会话前，将进度更新到 `docs/prd/{feature_id}/.artifacts/process.md`
 3. **禁止硬编码样式**：颜色、间距、字体大小等必须引用 `docs/design/tokens/base.json`
 4. **不暴露密钥**：MCP API Key 存放于 `.codex/config.toml`，必须已加入 `.gitignore`
+5. **验证匹配风险**：遵循 `docs/testing-and-review-policy.md`；行为类 RED/GREEN，纯视觉/文档/配置使用对应证据
 
 ---
 

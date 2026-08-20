@@ -1,5 +1,7 @@
 # LifeSub README 更新设计
 
+> 历史设计记录：本文记录 2026-08-18 README 更新时的版本口径。2026-08-20 起，现行路线以 `docs/roadmap.md` 和 `docs/superpowers/plans/2026-08-20-lifesub-remaining-capabilities-roadmap.md` 为准。
+
 ## 目标
 
 将根目录 `README.md` 更新为同时面向产品访客与开发者的项目入口，并以最近的 PRD、进度存档、架构决策和实际代码状态为事实来源。

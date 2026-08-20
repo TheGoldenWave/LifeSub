@@ -32,7 +32,7 @@ your-project/
 │   │       ├── process.md              ← 进度存档
 │   │       └── notes.md               ← 踩坑记录（Review 后可补充架构建议）
 │   └── design/tokens/base.json        ← Design Token（确保代码未绕过）
-├── tests/specs/                        ← 验收测试（审查覆盖率）
+├── tests/specs/                        ← 跨模块用户路径验收
 └── src/                                ← 业务代码（你的主审查对象）
 ```
 
@@ -43,6 +43,7 @@ your-project/
 
 ### 2. 读取编码规范
 - 每次审查前，强制读取 `.claude/rules/common/coding-style.md`。
+- 同时读取 `docs/testing-and-review-policy.md`。
 
 ### 3. 查阅知识库，避免重复决策
 - 做出架构决策前，**必须**先查阅 `docs/context/INDEX.md`（结构化表格索引，按分类检索：架构决策、Bug 模式、设计模式、领域知识、环境工具）和 `docs/context/project/experience/`，确认是否有历史先例或前车之鉴。
@@ -52,7 +53,7 @@ your-project/
 ### 4. 代码审查重点
 - **样式硬编码**：是否存在 `#FF0000`、`14px` 等未走 Token 的值？
 - **异常处理**：边界场景（无网、权限不足、数据为空）是否有覆盖？
-- **测试覆盖**：是否绕过了 `tests/specs/` 中的验收测试用例？
+- **验证适配性**：行为类是否有 RED/GREEN；视觉、文档、配置和生成物是否有匹配的可重复证据？
 - **职责边界**：是否有 dev-agent 越权修改了架构文件或 PRD？
 - 如果发现违规，给出明确的修改建议，并**拒绝合入**。
 

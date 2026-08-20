@@ -43,6 +43,7 @@ bootstrap-agentic-project/
 │   ├── root-templates/
 │   │   └── AGENTS.md                 # 全局路由（Claude Code + Codex 通用）
 │   ├── docs-templates/
+│   │   ├── testing-and-review-policy.md # 风险匹配的测试与审查政策
 │   │   ├── INDEX.md                  # 知识库索引
 │   │   ├── log.md                    # 知识库操作日志模板
 │   │   ├── wiki/overview.md          # Wiki 知识总览模板

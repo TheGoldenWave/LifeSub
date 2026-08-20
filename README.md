@@ -4,7 +4,7 @@
 
 LifeSub（中文名：旁白）是一个本地优先的长时音频与 ASR 证据管理系统。它负责采集、音频分片、转写 revision、Markdown 投影、基础检索与来源定位，让“谁在什么时候说了什么，原始音频和文本在哪里”始终可以被验证。
 
-**当前阶段：V0.1 Evidence 闭环已完成 · V0.2 真实本地 ASR 已完成设计、待实现**
+**当前阶段：V0.1 Evidence 闭环已完成 · V0.2.1 真实本地 ASR 已完成设计、待实现**
 
 ![LifeSub V0.1 桌面界面](output/playwright/lifesub-design-governance-desktop.png)
 
@@ -36,8 +36,10 @@ V0.1 已形成一个可运行的纵向闭环：
 | 可再生 Markdown 导出 | 已实现 |
 | Provider、隐私和数据位置状态展示/设置入口 | 已实现 |
 | 浏览器演示模式与 Tauri 桌面写入模式 | 已实现；历史数据重载界面待完善 |
-| 真实本地 SenseVoice / Whisper ASR | V0.2 待实现 |
-| ScreenCaptureKit + AVAudioEngine 原生双路采集 | 待实现 |
+| 真实本地 SenseVoice / Whisper ASR | V0.2.1 待实现 |
+| ScreenCaptureKit + AVAudioEngine 原生双路采集 | V0.2.2 待实现 |
+| 匿名说话人分离 | V0.3 待实现 |
+| CAM++ 声纹身份 | V0.3.1 待实现 |
 
 当前内置的是确定性演示 ASR Provider，用于验证完整 Evidence 流程，不应被视为真实模型转写。桌面版已能将会话、导入音频和 revision 写入本地 Catalog，但当前时间线仍从演示数据初始化，应用重启后的历史 Evidence 重载界面尚待完善。当前检索和导出针对界面中已加载的记录可用。
 
@@ -51,7 +53,7 @@ V0.1 已形成一个可运行的纵向闭环：
 - 支持 Rust 2024 edition 的稳定 Rust 工具链。
 - 构建桌面应用需要 Tauri 2 对应的平台依赖。
 - 当前产品与已验证安装包聚焦 macOS Apple Silicon；浏览器演示模式可用于界面与流程预览。
-- V0.2 的首发验证目标为 macOS 14+ Apple Silicon，Intel 不作为该版本发布 Gate。
+- V0.2.1/V0.2.2 的首发验证目标为 macOS 14+ Apple Silicon，Intel 不作为该阶段发布 Gate。
 
 ### 浏览器演示
 
@@ -108,17 +110,18 @@ Rust Evidence Core
 目标架构是在同一个本地 Evidence Core 周围增加薄客户端与平台适配器：
 
 - **macOS Capture Adapter**：ScreenCaptureKit 采集系统音频，AVAudioEngine 采集麦克风，来源默认分开保存。
-- **ASR Pipeline**：V0.2 使用统一 sherpa-onnx Rust 运行时接入 SenseVoiceSmall 与 Whisper。
+- **ASR Pipeline**：V0.2.1 使用统一 sherpa-onnx Rust 运行时接入 SenseVoiceSmall 与 Whisper。
 - **Evidence Contract**：向 Malow、Codex 等获授权消费者提供版本化引用和状态解析。
-- **Multi-Device Reconciler**：V0.3 对齐多设备录音、标记重叠与冲突，并生成新的不可变合并 revision。
+- **Speaker Pipeline**：V0.3 生成匿名说话人 Revision，V0.3.1 使用 CAM++ 匹配经授权的本地 Speaker Profile。
+- **Multi-Device Reconciler**：保留为后续能力，版本将在实施前重新排期。
 
 完整设计见[系统架构](docs/architecture.md)。其中规划目录与未来组件是设计意图，不代表当前仓库已经全部实现。
 
 ## 路线图
 
-### V0.2：真实本地 ASR
+### V0.2.1：真实本地 ASR
 
-V0.2 已完成 PRD、技术设计和实施计划，下一步进入 TDD 实现：
+V0.2.1 复用已批准的 V0.2 PRD、技术设计和实施计划，聚焦最短可信闭环：
 
 - SenseVoiceSmall 与 Whisper 可切换的真实离线转写。
 - 统一 sherpa-onnx Rust 运行时，无 Python Sidecar。
@@ -126,15 +129,17 @@ V0.2 已完成 PRD、技术设计和实施计划，下一步进入 TDD 实现：
 - 可恢复 ASR Job、Provider Receipt、带时间戳 Segment 与重新转写。
 - 新结果追加为 revision，永不覆盖既有转写。
 
-V0.2 **不接入云端 ASR**。在本地模型链路稳定后，后续版本会增加可选云端 Provider；云端处理必须独立显式授权、展示数据去向、记录模型与输入 hash，并与本地 Provider 使用一致的 revision 和审计语义。
+V0.2.1 **不接入云端 ASR**。在本地模型链路稳定后，后续版本会增加可选云端 Provider；云端处理必须独立显式授权、展示数据去向、记录模型与输入 hash，并与本地 Provider 使用一致的 revision 和审计语义。
 
 ### 后续阶段
 
-- macOS 菜单栏手动长时录制与系统音频/麦克风双路采集。
+- V0.2.2：macOS 菜单栏手动长时录制与系统音频/麦克风双路采集。
 - 不可变、有界、可恢复的 Physical Audio Chunk。
 - 按时间戳、静音、长度和录制状态形成 Logical Transcript Segment，不做主题级语义切分。
 - 通过 FTS5 按时间、来源、设备和文本关键词检索。
-- V0.3 多设备时间校准、重复消除、ASR 冲突标注和合并 revision。
+- V0.3：匿名说话人分离、人工纠错和 Speaker Evidence。
+- V0.3.1：CAM++ 声纹 embedding、授权 Speaker Profile 与可撤回身份匹配。
+- 多设备时间校准、重复消除、ASR 冲突标注和合并 revision 重新排期。
 - 版本化 Evidence Contract、访问授权、撤回、删除与审计。
 - 移动 companion、外部录音设备和加密对象同步。
 

@@ -387,13 +387,12 @@ mod tests {
             end_ms: 30_000,
         }];
         let mut samples = vec![0.5f32; 480_000];
-        // Create energy dip at ~15 seconds
-        let dip_center = 240_000;
+        // Create energy dip near the 25s boundary (within search window: 23_000–25_000 ms)
+        let dip_center_ms = 24_000;
+        let dip_center = (dip_center_ms * TARGET_SAMPLE_RATE as u64 / 1000) as usize;
         let dip_width = 1600;
-        for i in dip_center - dip_width..dip_center + dip_width {
-            if i < samples.len() {
-                samples[i] = 0.0;
-            }
+        for i in dip_center.saturating_sub(dip_width)..(dip_center + dip_width).min(samples.len()) {
+            samples[i] = 0.0;
         }
 
         let windows = partition_audio(&samples, TARGET_SAMPLE_RATE, &segments, 30_000);
@@ -401,7 +400,7 @@ mod tests {
 
         let has_split_near_dip = windows.windows(2).any(|pair| {
             let split = pair[0].core_end_ms;
-            split >= 10_000 && split <= 20_000
+            split >= 23_000 && split <= 25_000
         });
         assert!(has_split_near_dip);
     }

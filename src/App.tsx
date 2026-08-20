@@ -6,8 +6,7 @@ import { TranscriptView } from './components/TranscriptView'
 import { SettingsView } from './components/SettingsView'
 import { demoRecords } from './data/demo'
 import type { CaptureState, EvidenceRecord, TranscriptRevision } from './domain'
-import { open } from '@tauri-apps/plugin-dialog'
-import { createCapture, importAudio, isTauriRuntime, transitionCapture, type CoreCaptureSession } from './services/lifesub'
+import { createCapture, isTauriRuntime, transitionCapture, type CoreCaptureSession } from './services/lifesub'
 
 export default function App() {
   const [captureState, setCaptureState] = useState<CaptureState>('idle')
@@ -39,54 +38,6 @@ export default function App() {
     } catch (error) {
       setCaptureState(previousState)
       setNotice(`录音状态未能保存：${String(error)}`)
-    }
-  }
-
-  const handleImport = async () => {
-    if (!isTauriRuntime()) {
-      setNotice('浏览器预览使用演示数据；在桌面版中可选择本机音频文件。')
-      return
-    }
-    try {
-      const path = await open({ multiple: false, filters: [{ name: '音频', extensions: ['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg'] }] })
-      if (!path) return
-      const filename = path.split('/').pop() ?? '音频文件'
-      const session = await createCapture(`导入 · ${filename}`)
-      const result = await importAudio(session, path)
-
-      const importedRecord: EvidenceRecord = {
-        id: session.id,
-        title: session.title,
-        startedAt: '刚刚',
-        duration: '待分析',
-        status: result.jobId ? 'processing' : 'available',
-        originalRevision: {
-          number: 1,
-          provider: '等待 ASR 处理',
-          label: '等待转写 · r1',
-          segments: [],
-          provenance: 'legacy_unverified',
-        },
-        revision: {
-          number: 1,
-          provider: '等待 ASR 处理',
-          label: '等待转写 · r1',
-          segments: [],
-          provenance: 'legacy_unverified',
-        },
-        allRevisions: [],
-        chunkIntegrity: 'available',
-      }
-      setRecords((current) => [importedRecord, ...current])
-      setSelectedId(importedRecord.id)
-
-      if (result.jobId) {
-        setNotice(`音频已导入，ASR 任务 ${result.jobId} 已加入队列。`)
-      } else {
-        setNotice('音频已复制到 LifeSub 本地 Evidence 目录，并完成内容校验。')
-      }
-    } catch (error) {
-      setNotice(`导入失败：${String(error)}`)
     }
   }
 

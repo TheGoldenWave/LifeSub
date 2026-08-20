@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
 use crate::domain::{
-    AudioChunk, AudioSource, CaptureSession, CaptureState, ChunkIntegrityState, TranscriptRevision,
-    TranscriptSegment,
+    AudioChunk, AudioSource, CaptureSession, CaptureState, ChunkIntegrityState, ProvenanceStatus,
+    TranscriptRevision, TranscriptSegment,
 };
 
 pub struct Catalog {
@@ -127,6 +127,7 @@ impl Catalog {
             session_id: session_id.to_owned(),
             number,
             provider: provider.to_owned(),
+            provenance_status: ProvenanceStatus::LegacyUnverified,
             created_at: Utc::now(),
             segments,
         };
@@ -161,6 +162,7 @@ impl Catalog {
                     session_id: session_id.to_owned(),
                     number: row.get(1)?,
                     provider: row.get(2)?,
+                    provenance_status: ProvenanceStatus::LegacyUnverified,
                     created_at: parse_time(&created_at)?,
                     segments: Vec::new(),
                 })

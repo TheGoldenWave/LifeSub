@@ -57,6 +57,14 @@ pub struct AudioChunk {
     pub byte_length: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkIntegrityState {
+    Available,
+    Corrupted,
+    Missing,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DomainError {
     InvalidCaptureTransition {

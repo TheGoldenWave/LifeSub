@@ -1,17 +1,22 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::catalog::Catalog;
-use crate::domain::{AudioChunk, AudioSource, CaptureSession, TranscriptRevision};
+use crate::domain::{
+    AudioChunk, AudioSource, CaptureSession, ChunkIntegrityState, TranscriptRevision,
+};
 
 #[derive(Debug)]
 pub enum ServiceError {
     Io(std::io::Error),
     Catalog(rusqlite::Error),
     InvalidEvidenceUri,
+    InputUnavailable,
+    InputIntegrityFailed,
 }
 
 impl From<std::io::Error> for ServiceError {
@@ -55,6 +60,14 @@ impl EvidenceService {
         }
     }
 
+    /// Returns a shared reference to the underlying Catalog for test assertions
+    /// and callers that need to inspect chunk integrity state after service operations.
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    const AUDIO_DIR: &str = "audio";
+
     pub fn import_audio(
         &self,
         session: &CaptureSession,
@@ -62,7 +75,8 @@ impl EvidenceService {
     ) -> Result<AudioChunk, ServiceError> {
         let source_path = source_path.as_ref();
         self.catalog.insert_session(session)?;
-        fs::create_dir_all(self.data_dir.join("audio"))?;
+        let audio_dir = self.data_dir.join(Self::AUDIO_DIR);
+        fs::create_dir_all(&audio_dir)?;
         let bytes = fs::read(source_path)?;
         let digest = hex::encode(Sha256::digest(&bytes));
         let extension = source_path
@@ -70,8 +84,24 @@ impl EvidenceService {
             .and_then(|value| value.to_str())
             .unwrap_or("audio");
         let id = format!("chk_{}", Uuid::new_v4().simple());
-        let relative_path = PathBuf::from("audio").join(format!("{id}.{extension}"));
-        fs::write(self.data_dir.join(&relative_path), &bytes)?;
+        let relative_path = PathBuf::from(Self::AUDIO_DIR).join(format!("{id}.{extension}"));
+        let final_path = self.data_dir.join(&relative_path);
+
+        // 写入同目录临时文件，写入过程中计算 hash
+        let temp_path = audio_dir.join(format!(".{id}.tmp"));
+        {
+            let mut temp_file = fs::File::create(&temp_path)?;
+            temp_file.write_all(&bytes)?;
+            // 强制刷新到磁盘，缩小崩溃窗口
+            temp_file.sync_all()?;
+        }
+
+        // 原子 rename 到最终路径
+        fs::rename(&temp_path, &final_path)?;
+        // fsync 父目录，确保 rename 被持久化
+        let parent_dir = final_path.parent().unwrap();
+        fs::File::open(parent_dir)?.sync_all()?;
+
         let chunk = AudioChunk {
             id,
             session_id: session.id.clone(),
@@ -82,6 +112,97 @@ impl EvidenceService {
         };
         self.catalog.insert_chunk(&chunk)?;
         Ok(chunk)
+    }
+
+    /// 在执行 ASR 之前重新计算文件 hash，与 chunk 记录的 hash 比较。
+    /// 不一致或文件缺失时更新 chunk 的 integrity state 并返回错误。
+    pub fn verify_chunk(&self, chunk_id: &str) -> Result<(), ServiceError> {
+        let chunks = self.catalog.list_chunks()?;
+        let chunk = chunks
+            .iter()
+            .find(|c| c.id == chunk_id)
+            .ok_or(ServiceError::InputUnavailable)?;
+        let file_path = self.data_dir.join(&chunk.path);
+        if !file_path.exists() {
+            self.catalog.update_chunk_integrity(
+                chunk_id,
+                ChunkIntegrityState::Missing,
+                Some("input_unavailable"),
+            )?;
+            return Err(ServiceError::InputUnavailable);
+        }
+        let bytes = fs::read(&file_path)?;
+        let actual_digest = hex::encode(Sha256::digest(&bytes));
+        if actual_digest != chunk.sha256 {
+            self.catalog.update_chunk_integrity(
+                chunk_id,
+                ChunkIntegrityState::Corrupted,
+                Some("input_integrity_failed"),
+            )?;
+            return Err(ServiceError::InputIntegrityFailed);
+        }
+        Ok(())
+    }
+
+    /// 启动时 reconciliation：清理孤儿临时文件，检测 chunk 文件状态。
+    /// 返回每个 chunk 的当前 integrity 状态。
+    pub fn reconcile_chunks(&self) -> Result<Vec<(String, ChunkIntegrityState)>, ServiceError> {
+        let audio_dir = self.data_dir.join(Self::AUDIO_DIR);
+        // 清理孤儿临时文件（未被 catalog 引用的 .tmp 文件）
+        if audio_dir.exists() {
+            for entry in fs::read_dir(&audio_dir)? {
+                let entry = entry?;
+                let file_name = entry.file_name();
+                let name = file_name.to_string_lossy();
+                if name.ends_with(".tmp") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+
+        let chunks = self.catalog.list_chunks()?;
+        let mut results = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            let file_path = self.data_dir.join(&chunk.path);
+            if !file_path.exists() {
+                self.catalog.update_chunk_integrity(
+                    &chunk.id,
+                    ChunkIntegrityState::Missing,
+                    Some("input_unavailable"),
+                )?;
+                results.push((chunk.id.clone(), ChunkIntegrityState::Missing));
+                continue;
+            }
+            let bytes = match fs::read(&file_path) {
+                Ok(b) => b,
+                Err(_) => {
+                    self.catalog.update_chunk_integrity(
+                        &chunk.id,
+                        ChunkIntegrityState::Corrupted,
+                        Some("input_integrity_failed"),
+                    )?;
+                    results.push((chunk.id.clone(), ChunkIntegrityState::Corrupted));
+                    continue;
+                }
+            };
+            let actual_digest = hex::encode(Sha256::digest(&bytes));
+            if actual_digest != chunk.sha256 {
+                self.catalog.update_chunk_integrity(
+                    &chunk.id,
+                    ChunkIntegrityState::Corrupted,
+                    Some("input_integrity_failed"),
+                )?;
+                results.push((chunk.id.clone(), ChunkIntegrityState::Corrupted));
+            } else {
+                results.push((chunk.id.clone(), ChunkIntegrityState::Available));
+            }
+        }
+        Ok(results)
+    }
+
+    /// 查询 chunk 的 integrity 状态，委托给 Catalog。
+    pub fn chunk_integrity(&self, chunk_id: &str) -> Result<ChunkIntegrityState, ServiceError> {
+        Ok(self.catalog.chunk_integrity(chunk_id)?)
     }
 
     pub fn render_markdown(

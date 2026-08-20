@@ -1,10 +1,13 @@
+pub mod migrations;
+
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
 use crate::domain::{
-    AudioChunk, AudioSource, CaptureSession, CaptureState, TranscriptRevision, TranscriptSegment,
+    AudioChunk, AudioSource, CaptureSession, CaptureState, ChunkIntegrityState, TranscriptRevision,
+    TranscriptSegment,
 };
 
 pub struct Catalog {
@@ -29,31 +32,8 @@ impl Catalog {
     }
 
     fn migrate(&self) -> rusqlite::Result<()> {
-        self.connection.lock().unwrap().execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS sessions (
-               id TEXT PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL,
-               started_at TEXT NOT NULL, ended_at TEXT
-             );
-             CREATE TABLE IF NOT EXISTS revisions (
-               id TEXT PRIMARY KEY, session_id TEXT NOT NULL, number INTEGER NOT NULL,
-               provider TEXT NOT NULL, created_at TEXT NOT NULL,
-               UNIQUE(session_id, number), FOREIGN KEY(session_id) REFERENCES sessions(id)
-             );
-             CREATE TABLE IF NOT EXISTS segments (
-               id TEXT NOT NULL, revision_id TEXT NOT NULL, start_ms INTEGER NOT NULL,
-               end_ms INTEGER NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL,
-               PRIMARY KEY(id, revision_id), FOREIGN KEY(revision_id) REFERENCES revisions(id)
-             );
-             CREATE TABLE IF NOT EXISTS chunks (
-               id TEXT PRIMARY KEY, session_id TEXT NOT NULL, source TEXT NOT NULL,
-               path TEXT NOT NULL, sha256 TEXT NOT NULL, byte_length INTEGER NOT NULL,
-               FOREIGN KEY(session_id) REFERENCES sessions(id)
-             );
-             CREATE VIRTUAL TABLE IF NOT EXISTS segment_search USING fts5(
-               segment_id UNINDEXED, revision_id UNINDEXED, text, tokenize='trigram'
-             );",
-        )
+        let conn = self.connection.lock().unwrap();
+        migrations::migrate(&conn)
     }
 
     pub fn insert_chunk(&self, chunk: &AudioChunk) -> rusqlite::Result<()> {
@@ -62,6 +42,50 @@ impl Catalog {
             params![chunk.id, chunk.session_id, source_name(chunk.source), chunk.path, chunk.sha256, chunk.byte_length],
         )?;
         Ok(())
+    }
+
+    pub fn chunk_integrity(&self, chunk_id: &str) -> rusqlite::Result<ChunkIntegrityState> {
+        self.connection.lock().unwrap().query_row(
+            "SELECT integrity_state FROM chunks WHERE id = ?1",
+            [chunk_id],
+            |row| {
+                let state: String = row.get(0)?;
+                Ok(parse_integrity(&state))
+            },
+        )
+    }
+
+    pub fn update_chunk_integrity(
+        &self,
+        chunk_id: &str,
+        state: ChunkIntegrityState,
+        error_code: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.connection.lock().unwrap().execute(
+            "UPDATE chunks SET integrity_state = ?2, last_error_code = ?3, last_error_at = ?4 WHERE id = ?1",
+            params![chunk_id, integrity_name(state), error_code, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_chunks(&self) -> rusqlite::Result<Vec<AudioChunk>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection
+            .prepare("SELECT id, session_id, source, path, sha256, byte_length FROM chunks")?;
+        statement
+            .query_map([], |row| {
+                let source: String = row.get(2)?;
+                Ok(AudioChunk {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    source: parse_source(&source),
+                    path: row.get(3)?,
+                    sha256: row.get(4)?,
+                    byte_length: row.get(5)?,
+                })
+            })?
+            .collect()
     }
 
     pub fn insert_session(&self, session: &CaptureSession) -> rusqlite::Result<()> {
@@ -202,4 +226,20 @@ fn parse_time(value: &str) -> rusqlite::Result<DateTime<Utc>> {
                 Box::new(error),
             )
         })
+}
+
+fn integrity_name(state: ChunkIntegrityState) -> &'static str {
+    match state {
+        ChunkIntegrityState::Available => "available",
+        ChunkIntegrityState::Corrupted => "corrupted",
+        ChunkIntegrityState::Missing => "missing",
+    }
+}
+
+fn parse_integrity(value: &str) -> ChunkIntegrityState {
+    match value {
+        "corrupted" => ChunkIntegrityState::Corrupted,
+        "missing" => ChunkIntegrityState::Missing,
+        _ => ChunkIntegrityState::Available,
+    }
 }

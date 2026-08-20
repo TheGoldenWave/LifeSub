@@ -10,7 +10,15 @@ mod commands;
 use tauri::Manager;
 
 #[cfg(test)]
+// mod asr_audio_test; // TODO: Task 7
+#[cfg(test)]
+mod asr_job_test;
+#[cfg(test)]
+// mod asr_model_manager_test; // TODO: Task 6
+#[cfg(test)]
 mod asr_runtime_test;
+#[cfg(test)]
+// mod asr_manifest_test; // TODO: Task 5
 #[cfg(test)]
 mod asr_settings_test;
 #[cfg(test)]

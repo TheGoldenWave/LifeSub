@@ -28,6 +28,13 @@ pub(super) fn classify_locked(connection: &Connection) -> rusqlite::Result<Schem
         4 => Err(migration_error("corrupt v4 catalog schema")),
         CURRENT_VERSION if is_v5(connection)? => Ok(SchemaKind::CurrentV5),
         CURRENT_VERSION => Err(migration_error("corrupt v5 catalog schema")),
+        newer if newer > CURRENT_VERSION => {
+            if is_v5_subset(connection)? {
+                Ok(SchemaKind::CompatibleNewer)
+            } else {
+                Ok(SchemaKind::Unknown)
+            }
+        }
         other => Err(migration_error(&format!(
             "incompatible catalog version {other}"
         ))),
@@ -434,4 +441,117 @@ pub(super) fn normalize_sql(sql: &str) -> String {
 
 fn is_token_character(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
+}
+
+/// Return true if the v5 contract is present as a subset — extra tables and
+/// indexes are allowed (future versions may add them). The base tables,
+/// ASR tables, and FTS shadows must still match their v5 schemas exactly.
+fn is_v5_subset(connection: &Connection) -> rusqlite::Result<bool> {
+    // Every check uses schema_sql_optional to avoid panicking on missing
+    // tables — a future database may have a higher user_version but be
+    // empty or partially formed.
+    let fts_ok = match schema_sql_optional(connection, FTS_TABLE)? {
+        Some(sql) => {
+            let expected = "CREATE VIRTUAL TABLE segment_search USING fts5(segment_id UNINDEXED, revision_id UNINDEXED, text, tokenize='trigram')";
+            normalize_sql(&sql) == normalize_sql(expected)
+        }
+        None => false,
+    };
+    if !fts_ok {
+        return Ok(false);
+    }
+    for (name, expected) in FTS_SHADOW_SCHEMA {
+        let Some(actual) = schema_sql_optional(connection, name)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(expected) {
+            return Ok(false);
+        }
+    }
+    for table in ["sessions", "revisions", "segments", "chunks"] {
+        let expected = statement_named(FRESH_BASE_SCHEMA, table)?;
+        let Some(actual) = schema_sql_optional(connection, table)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for table in [
+        "asr_settings",
+        "model_downloads",
+        "asr_jobs",
+        "provider_receipts",
+        "revision_receipts",
+    ] {
+        let expected = statement_named(ASR_SCHEMA, table)?;
+        let Some(actual) = schema_sql_optional(connection, table)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for table in ["model_installations", "model_download_artifacts"] {
+        let expected = statement_named(MODEL_MANAGER_V3_SCHEMA, table)?;
+        let Some(actual) = schema_sql_optional(connection, table)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for table in ["tool_requests", "operations", "open_intent_ledger"] {
+        let expected = statement_named(TOOL_API_V4_SCHEMA, table)?;
+        let Some(actual) = schema_sql_optional(connection, table)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for table in [
+        "notes",
+        "dictionary_categories",
+        "dictionary_entries",
+        "voiceprints",
+        "settings",
+    ] {
+        let expected = statement_named(V5_SCHEMA, table)?;
+        let Some(actual) = schema_sql_optional(connection, table)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for index in [
+        "model_downloads_one_active_model",
+        "asr_jobs_one_active_fingerprint",
+        "asr_jobs_claimable",
+    ] {
+        let expected = statement_named(ASR_SCHEMA, index)?;
+        let Some(actual) = schema_sql_optional(connection, index)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for (schema, index) in [
+        (MODEL_MANAGER_V3_SCHEMA, "model_download_artifacts_state"),
+        (TOOL_API_V4_SCHEMA, "operations_principal"),
+        (TOOL_API_V4_SCHEMA, "tool_requests_operation"),
+        (V5_SCHEMA, "notes_session"),
+        (V5_SCHEMA, "dictionary_entries_category"),
+    ] {
+        let expected = statement_named(schema, index)?;
+        let Some(actual) = schema_sql_optional(connection, index)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }

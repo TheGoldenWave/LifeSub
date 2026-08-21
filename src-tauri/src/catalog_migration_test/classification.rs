@@ -89,7 +89,7 @@ fn rejects_future_and_corrupt_current_catalogs() {
     let mut future = Connection::open_in_memory().unwrap();
     future.pragma_update(None, "user_version", 6).unwrap();
     let error = migrations::migrate(&mut future).unwrap_err();
-    assert!(error.to_string().contains("incompatible catalog version 6"));
+    assert!(error.to_string().contains("unknown or corrupt catalog schema"));
 
     let mut current = Connection::open_in_memory().unwrap();
     migrations::migrate(&mut current).unwrap();
@@ -98,6 +98,59 @@ fn rejects_future_and_corrupt_current_catalogs() {
         .unwrap();
     let error = migrations::migrate(&mut current).unwrap_err();
     assert!(error.to_string().contains("corrupt v5 catalog schema"));
+}
+
+#[test]
+fn compatible_newer_database_is_accepted_without_downgrade() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::migrate(&mut connection).unwrap();
+    // Simulate a future version that adds a new table while preserving v5.
+    connection
+        .execute_batch(
+            "CREATE TABLE future_feature_data (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO future_feature_data(id, value) VALUES('future_1', 'preserve me');
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
+
+    assert_eq!(
+        migrations::classify(&mut connection).unwrap(),
+        SchemaKind::CompatibleNewer
+    );
+
+    migrations::migrate(&mut connection).unwrap();
+
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 6);
+
+    let value: String = connection
+        .query_row(
+            "SELECT value FROM future_feature_data WHERE id = 'future_1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(value, "preserve me");
+}
+
+#[test]
+fn newer_database_missing_required_v5_schema_is_rejected() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE future_feature_data (id TEXT PRIMARY KEY);
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
+
+    assert_eq!(
+        migrations::classify(&mut connection).unwrap(),
+        SchemaKind::Unknown
+    );
+    let error = migrations::migrate(&mut connection).unwrap_err();
+    assert!(error.to_string().contains("unknown or corrupt catalog schema"));
 }
 
 #[test]

@@ -21,6 +21,8 @@ pub(crate) enum SchemaKind {
     CurrentV3,
     CurrentV4,
     CurrentV5,
+    /// A newer schema that still contains the complete v5 contract.
+    CompatibleNewer,
     Unknown,
 }
 
@@ -70,7 +72,7 @@ where
     let kind = classify_locked(&transaction)?;
     classification_hook()?;
     match kind {
-        SchemaKind::CurrentV5 => return transaction.commit(),
+        SchemaKind::CurrentV5 | SchemaKind::CompatibleNewer => return transaction.commit(),
         SchemaKind::Unknown => return Err(migration_error("unknown or corrupt catalog schema")),
         SchemaKind::Fresh
         | SchemaKind::LegacyV1
@@ -82,7 +84,7 @@ where
         SchemaKind::Fresh => transaction.execute_batch(FRESH_BASE_SCHEMA)?,
         SchemaKind::LegacyV1 => transaction.execute_batch(LEGACY_ALTERS)?,
         SchemaKind::CurrentV2 | SchemaKind::CurrentV3 | SchemaKind::CurrentV4 => {}
-        SchemaKind::CurrentV5 | SchemaKind::Unknown => unreachable!(),
+        SchemaKind::CurrentV5 | SchemaKind::CompatibleNewer | SchemaKind::Unknown => unreachable!(),
     }
     if matches!(kind, SchemaKind::Fresh | SchemaKind::LegacyV1) {
         transaction.execute_batch(ASR_SCHEMA)?;

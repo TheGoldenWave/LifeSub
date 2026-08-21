@@ -9,13 +9,19 @@ final class MicrophoneCapture: @unchecked Sendable, CaptureSourceAdapter {
     private let encoder: ChunkEncoder
     private let frames: BoundedAudioFrameQueue
     private let resampler = MonoPcm16Resampler()
+    private let failureHandler: @Sendable (CaptureFailure) -> Void
+    private let signalHandler: @Sendable (CaptureSourceSignal) -> Void
     private let running = OSAllocatedUnfairLock(initialState: false)
+    private var configurationObserver: NSObjectProtocol?
 
     init(
         encoder: ChunkEncoder,
-        failureHandler: @escaping @Sendable (any Error) -> Void
+        failureHandler: @escaping @Sendable (CaptureFailure) -> Void,
+        signalHandler: @escaping @Sendable (CaptureSourceSignal) -> Void
     ) {
         self.encoder = encoder
+        self.failureHandler = failureHandler
+        self.signalHandler = signalHandler
         frames = BoundedAudioFrameQueue(
             label: "com.lifesub.capture.microphone",
             consumer: { frame in
@@ -23,6 +29,28 @@ final class MicrophoneCapture: @unchecked Sendable, CaptureSourceAdapter {
             },
             failureHandler: failureHandler
         )
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+                self.signalHandler(
+                    .interrupted(
+                        source: .microphone,
+                        reason: "device_configuration_changed",
+                        recoverable: true
+                    )
+                )
+            } else {
+                self.signalHandler(.permissionRevoked(source: .microphone))
+            }
+        }
+    }
+
+    deinit {
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
     }
 
     func preflight() async throws {
@@ -45,6 +73,7 @@ final class MicrophoneCapture: @unchecked Sendable, CaptureSourceAdapter {
             state = true
             return true
         }) else { return }
+        frames.startAccepting()
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
@@ -77,6 +106,7 @@ final class MicrophoneCapture: @unchecked Sendable, CaptureSourceAdapter {
         }) else { return }
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
+        await frames.suspendAndDrain()
         try? await encoder.sealForDiscontinuity()
     }
 
@@ -94,11 +124,18 @@ final class MicrophoneCapture: @unchecked Sendable, CaptureSourceAdapter {
             for channel in 0 ..< channelCount { mixed += channels[channel][frame] }
             mono[frame] = mixed / Float(channelCount)
         }
+        let samples: [Int16]
         do {
-            let samples = try resampler.convert(
+            samples = try resampler.convert(
                 floatSamples: mono,
                 sampleRate: buffer.format.sampleRate
             )
+        } catch {
+            failureHandler(.conversionFailed)
+            Task { await stop() }
+            return
+        }
+        do {
             try frames.submit(CapturedPcmFrame(samples: samples, hostTime: hostTime))
         } catch {
             Task { await stop() }

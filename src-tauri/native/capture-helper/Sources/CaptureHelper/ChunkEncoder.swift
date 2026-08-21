@@ -31,6 +31,13 @@ enum AudioBackpressureError: Error {
     case stopped
 }
 
+enum CaptureFailure: String, Error, Equatable, Sendable {
+    case backpressure = "audio_backpressure"
+    case queueStopped = "audio_queue_stopped"
+    case conversionFailed = "audio_conversion_failed"
+    case encodingFailed = "audio_encoding_failed"
+}
+
 final class MonoPcm16Resampler: @unchecked Sendable {
     private let targetSampleRate: Double
     private let lock = NSLock()
@@ -97,7 +104,8 @@ final class BoundedAudioFrameQueue: @unchecked Sendable {
     private let slots: DispatchSemaphore
     private let queue: DispatchQueue
     private let consumer: @Sendable (CapturedPcmFrame) async throws -> Void
-    private let failureHandler: @Sendable (any Error) -> Void
+    private let failureHandler: @Sendable (CaptureFailure) -> Void
+    private let pending = DispatchGroup()
     private let lock = NSLock()
     private var accepting = true
 
@@ -105,7 +113,7 @@ final class BoundedAudioFrameQueue: @unchecked Sendable {
         capacity: Int = 64,
         label: String,
         consumer: @escaping @Sendable (CapturedPcmFrame) async throws -> Void,
-        failureHandler: @escaping @Sendable (any Error) -> Void
+        failureHandler: @escaping @Sendable (CaptureFailure) -> Void
     ) {
         slots = DispatchSemaphore(value: capacity)
         queue = DispatchQueue(label: label, qos: .userInitiated)
@@ -115,31 +123,51 @@ final class BoundedAudioFrameQueue: @unchecked Sendable {
 
     func submit(_ frame: CapturedPcmFrame) throws {
         lock.lock()
-        let isAccepting = accepting
-        lock.unlock()
-        guard isAccepting else { throw AudioBackpressureError.stopped }
-        guard slots.wait(timeout: .now()) == .success else {
-            throw AudioBackpressureError.queueFull
+        guard accepting else {
+            lock.unlock()
+            let error = AudioBackpressureError.stopped
+            failureHandler(.queueStopped)
+            throw error
         }
-        queue.async { [consumer, failureHandler, slots] in
+        guard slots.wait(timeout: .now()) == .success else {
+            lock.unlock()
+            let error = AudioBackpressureError.queueFull
+            failureHandler(.backpressure)
+            throw error
+        }
+        pending.enter()
+        lock.unlock()
+        queue.async { [consumer, failureHandler, pending, slots] in
             let completed = DispatchSemaphore(value: 0)
             Task {
                 do {
                     try await consumer(frame)
                 } catch {
-                    failureHandler(error)
+                    failureHandler(.encodingFailed)
                 }
                 completed.signal()
             }
             completed.wait()
             slots.signal()
+            pending.leave()
         }
     }
 
-    func stopAccepting() {
+    func startAccepting() {
         lock.lock()
-        accepting = false
+        accepting = true
         lock.unlock()
+    }
+
+    func suspendAndDrain() async {
+        lock.withLock { accepting = false }
+        await withCheckedContinuation { continuation in
+            pending.notify(queue: queue) { continuation.resume() }
+        }
+    }
+
+    func finish() async {
+        await suspendAndDrain()
     }
 }
 

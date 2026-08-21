@@ -5,19 +5,52 @@ import CoreMedia
 import Foundation
 import ScreenCaptureKit
 
-final class SystemAudioCapture: NSObject, @unchecked Sendable, CaptureSourceAdapter, SCStreamOutput {
+struct DecodedSystemAudio: Sendable {
+    let samples: [Float]
+    let sampleRate: Double
+    let hostTime: UInt64
+}
+
+enum SystemAudioSampleDecoder {
+    static func decodePlanarFloat(
+        channels: [[Float]],
+        sampleRate: Double,
+        hostTime: UInt64
+    ) throws -> DecodedSystemAudio {
+        guard
+            sampleRate > 0,
+            let frameCount = channels.first?.count,
+            frameCount > 0,
+            channels.allSatisfy({ $0.count == frameCount })
+        else { throw CaptureSourceError.sourceFailed }
+        var mono = [Float](repeating: 0, count: frameCount)
+        for channel in channels {
+            for frame in 0 ..< frameCount { mono[frame] += channel[frame] }
+        }
+        let divisor = Float(channels.count)
+        for frame in 0 ..< frameCount { mono[frame] /= divisor }
+        return DecodedSystemAudio(samples: mono, sampleRate: sampleRate, hostTime: hostTime)
+    }
+}
+
+final class SystemAudioCapture: NSObject, @unchecked Sendable, CaptureSourceAdapter, SCStreamOutput, SCStreamDelegate {
     let source: Source = .systemAudio
     private let encoder: ChunkEncoder
     private let frames: BoundedAudioFrameQueue
     private let sampleQueue = DispatchQueue(label: "com.lifesub.capture.system-audio.samples")
     private let resampler = MonoPcm16Resampler()
+    private let failureHandler: @Sendable (CaptureFailure) -> Void
+    private let signalHandler: @Sendable (CaptureSourceSignal) -> Void
     private var stream: SCStream?
 
     init(
         encoder: ChunkEncoder,
-        failureHandler: @escaping @Sendable (any Error) -> Void
+        failureHandler: @escaping @Sendable (CaptureFailure) -> Void,
+        signalHandler: @escaping @Sendable (CaptureSourceSignal) -> Void
     ) {
         self.encoder = encoder
+        self.failureHandler = failureHandler
+        self.signalHandler = signalHandler
         frames = BoundedAudioFrameQueue(
             label: "com.lifesub.capture.system-audio.encode",
             consumer: { frame in
@@ -36,6 +69,7 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, CaptureSourceAdap
     }
 
     func start() async throws {
+        frames.startAccepting()
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false,
@@ -54,7 +88,7 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, CaptureSourceAdap
             configuration.excludesCurrentProcessAudio = true
             configuration.sampleRate = 48_000
             configuration.channelCount = 2
-            let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
+            let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
             try await stream.startCapture()
             self.stream = stream
@@ -79,6 +113,7 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, CaptureSourceAdap
             try? stream.removeStreamOutput(self, type: .audio)
         }
         stream = nil
+        await frames.suspendAndDrain()
         try? await encoder.sealForDiscontinuity()
     }
 
@@ -91,75 +126,162 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, CaptureSourceAdap
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        guard
-            type == .audio,
-            sampleBuffer.isValid,
-            let decoded = Self.monoSamples(from: sampleBuffer),
-            let samples = try? resampler.convert(
+        guard type == .audio, sampleBuffer.isValid, let decoded = Self.monoSamples(from: sampleBuffer) else {
+            return
+        }
+        let samples: [Int16]
+        do {
+            samples = try resampler.convert(
                 floatSamples: decoded.samples,
                 sampleRate: decoded.sampleRate
             )
-        else {
+        } catch {
+            failureHandler(.conversionFailed)
+            Task { await stop() }
             return
         }
         do {
-            try frames.submit(CapturedPcmFrame(samples: samples, hostTime: mach_continuous_time()))
+            try frames.submit(CapturedPcmFrame(samples: samples, hostTime: decoded.hostTime))
         } catch {
             Task { await stop() }
         }
     }
 
+    func stream(_: SCStream, didStopWithError error: any Error) {
+        let permissionGranted = CGPreflightScreenCaptureAccess()
+        if permissionGranted {
+            signalHandler(
+                .interrupted(
+                    source: .systemAudio,
+                    reason: "stream_stopped",
+                    recoverable: true
+                )
+            )
+        } else {
+            signalHandler(.permissionRevoked(source: .systemAudio))
+        }
+        _ = error
+    }
+
     private static func monoSamples(
         from sampleBuffer: CMSampleBuffer
-    ) -> (samples: [Float], sampleRate: Double)? {
+    ) -> DecodedSystemAudio? {
         guard
             let formatDescription = sampleBuffer.formatDescription,
             let description = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee,
-            description.mFormatID == kAudioFormatLinearPCM,
-            let block = sampleBuffer.dataBuffer
+            description.mFormatID == kAudioFormatLinearPCM
         else { return nil }
         let channels = Int(description.mChannelsPerFrame)
         let frameCount = sampleBuffer.numSamples
         guard channels > 0, frameCount > 0 else { return nil }
-        var data = Data(count: CMBlockBufferGetDataLength(block))
-        let status = data.withUnsafeMutableBytes { bytes in
-            CMBlockBufferCopyDataBytes(
-                block,
-                atOffset: 0,
-                dataLength: bytes.count,
-                destination: bytes.baseAddress!
+        let presentationTime = sampleBuffer.presentationTimeStamp
+        guard presentationTime.isValid, presentationTime.value >= 0 else { return nil }
+        let hostTime = UInt64(
+            CMTimeConvertScale(presentationTime, timescale: 1_000_000_000, method: .default).value
+        )
+
+        var sizeNeeded = 0
+        var retainedBlock: CMBlockBuffer?
+        let sizeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &sizeNeeded,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: 0,
+            blockBufferOut: &retainedBlock
+        )
+        guard sizeStatus == noErr, sizeNeeded >= MemoryLayout<AudioBufferList>.size else { return nil }
+
+        return withUnsafeTemporaryAllocation(
+            byteCount: sizeNeeded,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        ) { storage in
+            let list = storage.baseAddress!.bindMemory(to: AudioBufferList.self, capacity: 1)
+            let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sampleBuffer,
+                bufferListSizeNeededOut: nil,
+                bufferListOut: list,
+                bufferListSize: sizeNeeded,
+                blockBufferAllocator: kCFAllocatorDefault,
+                blockBufferMemoryAllocator: kCFAllocatorDefault,
+                flags: 0,
+                blockBufferOut: &retainedBlock
+            )
+            guard status == noErr else { return nil }
+            let buffers = UnsafeMutableAudioBufferListPointer(list)
+            let planar = description.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
+            let decodedChannels: [[Float]]?
+            if description.mBitsPerChannel == 32,
+               description.mFormatFlags & kAudioFormatFlagIsFloat != 0 {
+                decodedChannels = decodeFloatBuffers(
+                    buffers,
+                    channelCount: channels,
+                    frameCount: frameCount,
+                    planar: planar
+                )
+            } else if description.mBitsPerChannel == 16,
+                      description.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0 {
+                decodedChannels = decodeInt16Buffers(
+                    buffers,
+                    channelCount: channels,
+                    frameCount: frameCount,
+                    planar: planar
+                )
+            } else {
+                decodedChannels = nil
+            }
+            guard let decodedChannels else { return nil }
+            return try? SystemAudioSampleDecoder.decodePlanarFloat(
+                channels: decodedChannels,
+                sampleRate: description.mSampleRate,
+                hostTime: hostTime
             )
         }
-        guard status == kCMBlockBufferNoErr else { return nil }
+    }
 
-        var mono = [Float](repeating: 0, count: frameCount)
-        if description.mBitsPerChannel == 32,
-           description.mFormatFlags & kAudioFormatFlagIsFloat != 0 {
-            data.withUnsafeBytes { bytes in
-                let values = bytes.bindMemory(to: Float.self)
-                guard values.count >= frameCount * channels else { return }
-                for frame in 0 ..< frameCount {
-                    var mixed: Float = 0
-                    for channel in 0 ..< channels { mixed += values[frame * channels + channel] }
-                    mixed = max(-1, min(1, mixed / Float(channels)))
-                    mono[frame] = mixed / Float(channels)
-                }
+    private static func decodeFloatBuffers(
+        _ buffers: UnsafeMutableAudioBufferListPointer,
+        channelCount: Int,
+        frameCount: Int,
+        planar: Bool
+    ) -> [[Float]]? {
+        if planar {
+            guard buffers.count >= channelCount else { return nil }
+            return (0 ..< channelCount).compactMap { channel in
+                guard let data = buffers[channel].mData else { return nil }
+                let values = data.assumingMemoryBound(to: Float.self)
+                return Array(UnsafeBufferPointer(start: values, count: frameCount))
             }
-            return (mono, description.mSampleRate)
         }
-        if description.mBitsPerChannel == 16,
-           description.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0 {
-            data.withUnsafeBytes { bytes in
-                let values = bytes.bindMemory(to: Int16.self)
-                guard values.count >= frameCount * channels else { return }
-                for frame in 0 ..< frameCount {
-                    var mixed = 0
-                    for channel in 0 ..< channels { mixed += Int(values[frame * channels + channel]) }
-                    mono[frame] = Float(mixed / channels) / Float(Int16.max)
-                }
+        guard let data = buffers.first?.mData else { return nil }
+        let values = data.assumingMemoryBound(to: Float.self)
+        return (0 ..< channelCount).map { channel in
+            (0 ..< frameCount).map { values[$0 * channelCount + channel] }
+        }
+    }
+
+    private static func decodeInt16Buffers(
+        _ buffers: UnsafeMutableAudioBufferListPointer,
+        channelCount: Int,
+        frameCount: Int,
+        planar: Bool
+    ) -> [[Float]]? {
+        if planar {
+            guard buffers.count >= channelCount else { return nil }
+            return (0 ..< channelCount).compactMap { channel in
+                guard let data = buffers[channel].mData else { return nil }
+                let values = data.assumingMemoryBound(to: Int16.self)
+                return (0 ..< frameCount).map { Float(values[$0]) / Float(Int16.max) }
             }
-            return (mono, description.mSampleRate)
         }
-        return nil
+        guard let data = buffers.first?.mData else { return nil }
+        let values = data.assumingMemoryBound(to: Int16.self)
+        return (0 ..< channelCount).map { channel in
+            (0 ..< frameCount).map {
+                Float(values[$0 * channelCount + channel]) / Float(Int16.max)
+            }
+        }
     }
 }

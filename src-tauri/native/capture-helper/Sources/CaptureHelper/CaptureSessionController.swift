@@ -32,6 +32,11 @@ enum CaptureControllerEvent: Equatable, Sendable {
     case permissionRevoked(source: Source)
 }
 
+enum CaptureSourceSignal: Sendable {
+    case interrupted(source: Source, reason: String, recoverable: Bool)
+    case permissionRevoked(source: Source)
+}
+
 protocol CaptureEventSink: Sendable {
     func emit(_ event: CaptureControllerEvent) async
 }
@@ -94,8 +99,13 @@ actor CaptureSessionController {
         guard case let .running(enabled) = state else {
             throw CaptureSourceError.sourceFailed
         }
-        for source in enabled.sorted(by: sourceOrder) {
-            try await sources[source]?.pause()
+        do {
+            for source in enabled.sorted(by: sourceOrder) {
+                try await sources[source]?.pause()
+            }
+        } catch {
+            await stopAfterTransitionFailure()
+            throw error
         }
         state = .paused(enabled: enabled)
     }
@@ -104,8 +114,13 @@ actor CaptureSessionController {
         guard case let .paused(enabled) = state else {
             throw CaptureSourceError.sourceFailed
         }
-        for source in enabled.sorted(by: sourceOrder) {
-            try await sources[source]?.resume()
+        do {
+            for source in enabled.sorted(by: sourceOrder) {
+                try await sources[source]?.resume()
+            }
+        } catch {
+            await stopAfterTransitionFailure()
+            throw error
         }
         state = .running(enabled: enabled)
     }
@@ -152,6 +167,14 @@ actor CaptureSessionController {
 
     func shutdown() async {
         try? await stop()
+    }
+
+    private func stopAfterTransitionFailure() async {
+        for source in enabledSources.sorted(by: sourceOrder) {
+            await sources[source]?.stop()
+        }
+        enabledSources.removeAll()
+        state = .failed
     }
 }
 

@@ -56,7 +56,13 @@ write_valid_fixture() {
     '[package]' \
     'name = "lifesub-fixture"' \
     'version = "0.2.1"' \
-    'edition = "2021"' >"$fixture/src-tauri/Cargo.toml"
+    'edition = "2021"' \
+    '' \
+    '[lib]' \
+    'name = "lifesub_lib"' \
+    '' \
+    '[features]' \
+    'desktop = []' >"$fixture/src-tauri/Cargo.toml"
   printf '%s\n' \
     '{' \
     '  "productName": "LifeSub Fixture",' \
@@ -70,11 +76,11 @@ write_valid_fixture() {
     "- Release source worktree: \`$fixture\`" \
     "- Release source branch: \`$FIXTURE_BRANCH\`" \
     "- Release version: \`$FIXTURE_VERSION\`" >"$fixture/docs/workspace-status.md"
-  printf '%s\n' >"$fixture/src-tauri/src/lib.rs"
-  write_commands "$fixture" valid
+  write_runtime_factory "$fixture" native
   cp "$VERIFIER" "$fixture/scripts/verify-release-source.sh"
   cp "$PROJECT_ROOT/src-tauri/tests/release_wiring.rs" \
     "$fixture/src-tauri/tests/release_wiring.rs"
+  cargo generate-lockfile --manifest-path "$fixture/src-tauri/Cargo.toml" >/dev/null
 
   git -C "$fixture" init -q
   git -C "$fixture" config user.email "release-source-test@example.invalid"
@@ -84,111 +90,52 @@ write_valid_fixture() {
   git -C "$fixture" commit -qm "fixture"
 }
 
-write_commands() {
+write_runtime_factory() {
   fixture=$1
   mode=$2
   case "$mode" in
-    valid)
-      printf '%s\n' \
-        'fn dead_code() {' \
-        '    // spawn_fail_closed_worker(runtime);' \
-        '    let _message = "run_unavailable_loop and StreamingCapture::default";' \
-        '}' \
-        'pub struct AppState;' \
-        'impl AppState {' \
-        '    fn initialize_at() {' \
-        '        let _capture = NativeCaptureCoordinator::new();' \
-        '        let _worker = spawn_native_worker();' \
-        '    }' \
-        '}' >"$fixture/src-tauri/src/commands.rs"
-      ;;
-    missing_capture)
-      printf '%s\n' \
-        'pub struct AppState;' \
-        'impl AppState {' \
-        '    fn initialize_at() {' \
-        '        let _worker = spawn_native_worker();' \
-        '    }' \
-        '}' >"$fixture/src-tauri/src/commands.rs"
-      ;;
-    missing_worker)
-      printf '%s\n' \
-        'pub struct AppState;' \
-        'impl AppState {' \
-        '    fn initialize_at() {' \
-        '        let _capture = NativeCaptureCoordinator::new();' \
-        '    }' \
-        '}' >"$fixture/src-tauri/src/commands.rs"
-      ;;
-    comment_only)
-      printf '%s\n' \
-        'pub struct AppState;' \
-        'impl AppState {' \
-        '    fn initialize_at() {' \
-        '        /* NativeCaptureCoordinator::new();' \
-        '           spawn_native_worker(); */' \
-        '    }' \
-        '}' >"$fixture/src-tauri/src/commands.rs"
-      ;;
-    dead_module)
-      printf '%s\n' \
-        'mod unused {' \
-        '    fn initialize_at() {' \
-        '        let _capture = NativeCaptureCoordinator::new();' \
-        '        let _worker = spawn_native_worker();' \
-        '    }' \
-        '}' \
-        '#[cfg(test)]' \
-        'mod tests {' \
-        '    fn native_wiring_test() {' \
-        '        let _capture = NativeCaptureCoordinator::new();' \
-        '        let _worker = spawn_native_worker();' \
-        '    }' \
-        '}' \
-        'pub struct AppState;' \
-        'impl AppState {' \
-        '    fn initialize_at() {}' \
-        '}' >"$fixture/src-tauri/src/commands.rs"
-      ;;
-    multiline_fail_closed)
-      printf '%s\n' \
-        'pub struct AppState;' \
-        'impl AppState {' \
-        '    fn initialize_at() {' \
-        '        let _capture = NativeCaptureCoordinator::new();' \
-        '        let _worker = spawn_native_worker();' \
-        '        crate::asr::worker::spawn_fail_closed_worker' \
-        '            (runtime);' \
-        '    }' \
-        '}' >"$fixture/src-tauri/src/commands.rs"
-      ;;
-    multiline_default_capture)
-      printf '%s\n' \
-        'pub struct AppState;' \
-        'impl AppState {' \
-        '    fn initialize_at() {' \
-        '        let _capture = NativeCaptureCoordinator::new();' \
-        '        let _worker = spawn_native_worker();' \
-        '        let _legacy = StreamingCapture' \
-        '            :: default' \
-        '            ();' \
-        '    }' \
-        '}' >"$fixture/src-tauri/src/commands.rs"
-      ;;
-    multiline_unavailable)
-      printf '%s\n' \
-        'pub struct AppState;' \
-        'impl AppState {' \
-        '    fn initialize_at() {' \
-        '        let _capture = NativeCaptureCoordinator::new();' \
-        '        let _worker = spawn_native_worker();' \
-        '        run_unavailable_loop' \
-        '            (app, stop, pause);' \
-        '    }' \
-        '}' >"$fixture/src-tauri/src/commands.rs"
-      ;;
-    *) fail "unknown commands fixture mode: $mode" ;;
+    native) production_factory=NativeDesktopRuntimeFactory ;;
+    capture_only) production_factory=CaptureOnlyDesktopRuntimeFactory ;;
+    asr_only) production_factory=AsrOnlyDesktopRuntimeFactory ;;
+    fail_closed) production_factory=FailClosedDesktopRuntimeFactory ;;
+    *) fail "unknown runtime factory fixture mode: $mode" ;;
   esac
+
+  printf '%s\n' \
+    '#[cfg(feature = "desktop")]' \
+    'pub mod desktop_runtime {' \
+    '    pub trait DesktopRuntimeFactory {' \
+    '        const USES_NATIVE_CAPTURE: bool;' \
+    '        const USES_NATIVE_ASR: bool;' \
+    '        fn create_capture() -> &'\''static str;' \
+    '        fn spawn_worker() -> &'\''static str;' \
+    '    }' \
+    '    pub struct NativeDesktopRuntimeFactory;' \
+    '    pub struct CaptureOnlyDesktopRuntimeFactory;' \
+    '    pub struct AsrOnlyDesktopRuntimeFactory;' \
+    '    pub struct FailClosedDesktopRuntimeFactory;' \
+    '    macro_rules! factory {' \
+    '        ($name:ty, $capture:expr, $asr:expr) => {' \
+    '            impl DesktopRuntimeFactory for $name {' \
+    '                const USES_NATIVE_CAPTURE: bool = $capture;' \
+    '                const USES_NATIVE_ASR: bool = $asr;' \
+    '                fn create_capture() -> &'\''static str { "capture" }' \
+    '                fn spawn_worker() -> &'\''static str { "worker" }' \
+    '            }' \
+    '        };' \
+    '    }' \
+    '    factory!(NativeDesktopRuntimeFactory, true, true);' \
+    '    factory!(CaptureOnlyDesktopRuntimeFactory, true, false);' \
+    '    factory!(AsrOnlyDesktopRuntimeFactory, false, true);' \
+    '    factory!(FailClosedDesktopRuntimeFactory, false, false);' \
+    "    pub type ProductionDesktopRuntimeFactory = $production_factory;" \
+    '    pub fn initialize_at() -> (&'\''static str, &'\''static str) {' \
+    '        (' \
+    '            ProductionDesktopRuntimeFactory::create_capture(),' \
+    '            ProductionDesktopRuntimeFactory::spawn_worker(),' \
+    '        )' \
+    '    }' \
+    '}' >"$fixture/src-tauri/src/lib.rs"
 }
 
 copy_fixture() {
@@ -223,6 +170,8 @@ assert_rejected() {
 }
 
 write_valid_fixture "$TMP_ROOT/valid"
+git -C "$TMP_ROOT/valid" ls-files --error-unmatch src-tauri/Cargo.lock >/dev/null || \
+  fail "fixture Cargo.lock was not committed before verification"
 
 evil_fixture=$(copy_fixture root-override-evil)
 trusted_fixture=$(copy_fixture root-override-trusted)
@@ -287,35 +236,36 @@ rm "$fixture/src-tauri/tauri.conf.json.bak"
 assert_rejected "$fixture" "tauri.conf.json version mismatch"
 
 fixture=$(copy_fixture missing-capture-marker)
-write_commands "$fixture" missing_capture
-assert_rejected "$fixture" "production release wiring gate failed"
+write_runtime_factory "$fixture" asr_only
+assert_rejected "$fixture" "production desktop runtime must select native capture"
 
 fixture=$(copy_fixture missing-native-engine-marker)
-write_commands "$fixture" missing_worker
-assert_rejected "$fixture" "production release wiring gate failed"
-
-fixture=$(copy_fixture unavailable-capture-selected)
-write_commands "$fixture" multiline_unavailable
-assert_rejected "$fixture" "run_unavailable_loop"
+write_runtime_factory "$fixture" capture_only
+assert_rejected "$fixture" "production desktop runtime must select native ASR"
 
 fixture=$(copy_fixture fail-closed-engine-selected)
-write_commands "$fixture" multiline_fail_closed
-assert_rejected "$fixture" "spawn_fail_closed_worker"
+write_runtime_factory "$fixture" fail_closed
+assert_rejected "$fixture" "production desktop runtime must select native capture"
 
-fixture=$(copy_fixture default-capture-selected)
-write_commands "$fixture" multiline_default_capture
-assert_rejected "$fixture" "StreamingCapture::default"
-
-fixture=$(copy_fixture comment-only-markers)
-write_commands "$fixture" comment_only
-assert_rejected "$fixture" "must directly select NativeCaptureCoordinator"
-
-fixture=$(copy_fixture dead-module-markers)
-write_commands "$fixture" dead_module
-assert_rejected "$fixture" "must directly select NativeCaptureCoordinator"
+fixture=$(copy_fixture stale-lockfile)
+lock_before=$(cksum "$fixture/src-tauri/Cargo.lock")
+mkdir -p "$fixture/src-tauri/fixture-helper/src"
+printf '%s\n' \
+  '[package]' \
+  'name = "fixture-helper"' \
+  'version = "0.1.0"' \
+  'edition = "2021"' >"$fixture/src-tauri/fixture-helper/Cargo.toml"
+printf '%s\n' >"$fixture/src-tauri/fixture-helper/src/lib.rs"
+printf '%s\n' \
+  '' \
+  '[dependencies]' \
+  'fixture-helper = { path = "fixture-helper" }' >>"$fixture/src-tauri/Cargo.toml"
+assert_rejected "$fixture" "--locked was passed"
+lock_after=$(cksum "$fixture/src-tauri/Cargo.lock")
+[ "$lock_before" = "$lock_after" ] || fail "--locked verification modified Cargo.lock"
 
 fixture=$(copy_fixture planned-audit)
-write_commands "$fixture" multiline_fail_closed
+write_runtime_factory "$fixture" fail_closed
 output=$(run_verifier "$fixture" LIFESUB_RELEASE_ALLOW_PLANNED=1) || \
   fail "planned development audit was rejected: $output"
 assert_contains "$output" "PLANNED AUDIT ONLY" "planned audit warning"

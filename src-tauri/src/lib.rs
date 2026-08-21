@@ -4,13 +4,12 @@ pub mod asr;
 pub mod capture;
 pub mod catalog;
 pub mod domain;
+#[cfg(feature = "desktop")]
+pub mod desktop_runtime;
 pub mod llm;
 #[cfg(feature = "desktop")]
 pub mod quick_input;
 pub mod service;
-
-#[cfg(feature = "desktop")]
-pub mod acceptance;
 
 #[cfg(feature = "desktop")]
 mod commands;
@@ -62,7 +61,9 @@ pub fn run() {
             commands::create_capture_session,
             commands::transition_capture_session,
             commands::import_audio_file,
-            commands::append_transcript_revision,
+            commands::import_audio_record,
+            commands::create_manual_revision,
+            commands::list_timeline_records,
             commands::search_transcripts,
             commands::resolve_evidence,
             // Task 13.5
@@ -88,6 +89,8 @@ pub fn run() {
             commands::set_asr_config,
             commands::get_recording_config,
             commands::set_recording_config,
+            commands::get_app_runtime_info,
+            commands::list_asr_models,
             // Phase 2.1 streaming
             commands::start_streaming_capture,
             commands::stop_streaming_capture,

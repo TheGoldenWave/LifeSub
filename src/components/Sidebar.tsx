@@ -1,15 +1,14 @@
-import { Mic, Archive, BookOpen, Settings, AudioLines, Upload } from 'lucide-react'
+import { Mic, Archive, BookOpen, Settings, AudioLines } from 'lucide-react'
 
 export type PageId = 'live' | 'timeline' | 'dictionary'
 
 interface SidebarProps {
   activePage: PageId
   onNavigate: (page: PageId) => void
-  onImportAudio: () => void
   onOpenSettings: () => void
 }
 
-export function Sidebar({ activePage, onNavigate, onImportAudio, onOpenSettings }: SidebarProps) {
+export function Sidebar({ activePage, onNavigate, onOpenSettings }: SidebarProps) {
   return (
     <nav className="sidebar" aria-label="主导航">
       <div className="brand">
@@ -28,9 +27,6 @@ export function Sidebar({ activePage, onNavigate, onImportAudio, onOpenSettings 
           onClick={() => onNavigate('timeline')}
         >
           <Archive size={18} />时间线
-        </button>
-        <button className="nav-item nav-item--action" onClick={onImportAudio}>
-          <Upload size={18} />导入音频
         </button>
         <button
           className={`nav-item ${activePage === 'dictionary' ? 'nav-item--active' : ''}`}

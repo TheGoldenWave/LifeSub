@@ -1,22 +1,29 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import App from './App'
 
 describe('LifeSub navigation', () => {
-  it('renders sidebar with all navigation items', () => {
+  it('keeps audio import on the timeline instead of the sidebar', async () => {
+    const user = userEvent.setup()
     render(<App />)
-    expect(screen.getByRole('button', { name: '录音' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '时间线' })).toBeInTheDocument()
+    const sidebar = within(screen.getByRole('navigation', { name: '主导航' }))
+
+    expect(sidebar.getByRole('button', { name: '录音' })).toBeInTheDocument()
+    expect(sidebar.getByRole('button', { name: '时间线' })).toBeInTheDocument()
+    expect(sidebar.getByRole('button', { name: '词典' })).toBeInTheDocument()
+    expect(sidebar.getByRole('button', { name: '设置' })).toBeInTheDocument()
+    expect(sidebar.queryByRole('button', { name: '导入音频' })).not.toBeInTheDocument()
+
+    await user.click(sidebar.getByRole('button', { name: '时间线' }))
     expect(screen.getByRole('button', { name: '导入音频' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '词典' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '设置' })).toBeInTheDocument()
   })
 
   it('defaults to live capture page', () => {
     render(<App />)
-    expect(screen.getByText('准备就绪')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '开始记录' })).toBeInTheDocument()
+    expect(screen.getAllByText('浏览器演示').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByRole('button', { name: '开始演示' })).toBeInTheDocument()
+    expect(screen.getByText('浏览器演示数据，不会录音或保存。')).toBeInTheDocument()
   })
 
   it('switches pages via sidebar', async () => {
@@ -30,7 +37,7 @@ describe('LifeSub navigation', () => {
     const user = userEvent.setup()
     render(<App />)
     await user.click(screen.getByRole('button', { name: '词典' }))
-    expect(screen.getByText('常用词库 · ASR 辅助修正')).toBeInTheDocument()
+    expect(screen.getByText('常用词库')).toBeInTheDocument()
   })
 
   it('opens settings modal', async () => {
@@ -55,15 +62,17 @@ describe('LifeSub navigation', () => {
     const user = userEvent.setup()
     render(<App />)
     await user.click(screen.getByRole('button', { name: '设置' }))
-    const overlay = screen.getByRole('dialog')
-    await user.click(overlay)
+    const overlay = document.querySelector('.modal-overlay')
+    expect(overlay).not.toBeNull()
+    await user.click(overlay!)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('shows import audio notice', async () => {
     const user = userEvent.setup()
     render(<App />)
+    await user.click(screen.getByRole('button', { name: '时间线' }))
     await user.click(screen.getByRole('button', { name: '导入音频' }))
-    expect(screen.getByText(/导入音频功能将在时间线页面中可用/)).toBeInTheDocument()
+    expect(screen.getByText(/浏览器演示模式仅支持示例数据/)).toBeInTheDocument()
   })
 })

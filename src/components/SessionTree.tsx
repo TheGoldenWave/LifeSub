@@ -22,6 +22,15 @@ function SegmentIcon({ source }: { source: TranscriptSegment['source'] }) {
 export function SessionTree({ records, selectedId, onSelect, query }: SessionTreeProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set(records.map((r) => r.id)))
 
+  const statusLabel = (record: EvidenceRecord) => {
+    if (record.latestJob?.state === 'blocked_model') return `模型阻塞${record.latestJob.errorCode ? ` · ${record.latestJob.errorCode}` : ''}`
+    if (record.latestJob?.state === 'failed') return `转写失败${record.latestJob.errorCode ? ` · ${record.latestJob.errorCode}` : ''}`
+    if (record.status === 'processing') return '等待转写'
+    if (record.chunks.some((chunk) => chunk.integrityState !== 'available')) return '音频缺失或损坏'
+    if (record.chunks.length === 0) return '仅演示'
+    return '可播放'
+  }
+
   const toggle = (id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
@@ -55,6 +64,7 @@ export function SessionTree({ records, selectedId, onSelect, query }: SessionTre
               <FileText size={14} />
               <span className="session-tree__title">{record.title}</span>
               <span className={`record-status record-status--${record.status}`} />
+              <span>{statusLabel(record)}</span>
             </button>
             {isOpen && segments.map((seg) => (
               <button

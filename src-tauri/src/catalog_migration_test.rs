@@ -83,6 +83,48 @@ fn user_version(connection: &Connection) -> i64 {
 }
 
 #[test]
+fn migrates_v5_to_v6_capture_timing_without_rewriting_existing_chunks() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::migrate(&mut connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO sessions(id,title,state,started_at) VALUES('s','existing','stopped','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO chunks(id,session_id,source,path,sha256,byte_length) VALUES('c','s','imported','audio/x.wav',?1,4)",
+            ["aa".repeat(32)],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 5).unwrap();
+    connection
+        .execute_batch("DROP TABLE capture_chunk_timing; DROP TABLE capture_sources;")
+        .ok();
+
+    migrations::migrate(&mut connection).unwrap();
+
+    assert_eq!(user_version(&connection), 6);
+    let existing: (String, String, i64) = connection
+        .query_row("SELECT path, sha256, byte_length FROM chunks WHERE id='c'", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(existing, ("audio/x.wav".into(), "aa".repeat(32), 4));
+    for table in ["capture_sources", "capture_chunk_timing"] {
+        let exists: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "missing {table}");
+    }
+}
+
+#[test]
 fn fresh_catalog_uses_v3_model_install_contract() {
     let mut connection = Connection::open_in_memory().unwrap();
 

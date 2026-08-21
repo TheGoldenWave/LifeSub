@@ -703,7 +703,7 @@ fn ready_model(readiness: &ModelReadiness) -> ReadyModel<'_> {
     }
 }
 
-fn canonical_time(time: DateTime<Utc>) -> String {
+pub(crate) fn canonical_time(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 

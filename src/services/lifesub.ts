@@ -23,6 +23,9 @@ export interface CoreTranscriptSegment {
   end_ms: number
   source: 'microphone' | 'system_audio' | 'imported'
   text: string
+  chunk_id?: string | null
+  chunk_start_ms?: number | null
+  chunk_end_ms?: number | null
 }
 
 export interface CoreTranscriptRevision {
@@ -87,6 +90,7 @@ export interface CoreStats {
 
 export interface CoreAsrConfig {
   provider: string
+  model_id: string
   language: string
   auto_transcribe: boolean
   threads: number
@@ -106,6 +110,75 @@ export interface CoreRecordingConfig {
   storage_path: string
 }
 
+export interface CoreTimelineRecord {
+  session: CoreCaptureSession
+  chunks: Array<{
+    id: string
+    source: 'microphone' | 'system_audio' | 'imported'
+    audio_path: string
+    integrity_state: 'available' | 'corrupted' | 'missing'
+    error_code: string | null
+  }>
+  latest_job: CoreTimelineJobSummary | null
+  revisions: CoreTranscriptRevision[]
+  notes: CoreNote[]
+}
+
+export interface CoreTimelineJobSummary {
+  id: string
+  state: string
+  error_code: string | null
+  error_summary: string | null
+  chunk_id: string
+}
+
+export interface CoreImportAudioRecordResult {
+  session: CoreCaptureSession
+  chunk: {
+    id: string
+    session_id: string
+    source: 'microphone' | 'system_audio' | 'imported'
+    path: string
+    sha256: string
+    byte_length: number
+  }
+  job: CoreTimelineJobSummary | null
+  asr_warning: string | null
+}
+
+export interface AppRuntimeInfo {
+  app_version: string
+  tauri_version: string
+  frontend_stack: string
+  asr_runtime: string
+}
+
+export interface CoreModelDownload {
+  state: string
+}
+
+export interface CoreAsrModel {
+  model_id: string
+  display_name: string
+  provider: string
+  manifest_version: string
+  bundle_identity: string
+  supported_languages: string[]
+  qualification_policy: string
+  runtime_family: string
+  runtime_version: string
+  artifact_count: number
+  total_bytes: number
+  license_spdx: string
+  installation_state: string
+  selectable: boolean
+  installable: boolean
+  executable: boolean
+  reason_code: string | null
+  last_error_code: string | null
+  download: CoreModelDownload | null
+}
+
 export function createCapture(title: string) {
   return invoke<CoreCaptureSession>('create_capture_session', { title })
 }
@@ -118,8 +191,12 @@ export function importAudio(session: CoreCaptureSession, path: string) {
   return invoke('import_audio_file', { session, path })
 }
 
-export function appendTranscriptRevision(sessionId: string, provider: string, segments: CoreTranscriptSegment[]) {
-  return invoke<CoreTranscriptRevision>('append_transcript_revision', { sessionId, provider, segments })
+export function importAudioRecord(path: string, title: string) {
+  return invoke<CoreImportAudioRecordResult>('import_audio_record', { path, title })
+}
+
+export function createManualRevision(sessionId: string, segments: CoreTranscriptSegment[]) {
+  return invoke<CoreTranscriptRevision>('create_manual_revision', { sessionId, segments })
 }
 
 export function resolveEvidence(uri: string) {
@@ -210,6 +287,10 @@ export function getStatsSnapshot(date?: string) {
   return invoke<CoreStats>('get_stats_snapshot', { date: date ?? null })
 }
 
+export function listTimelineRecords() {
+  return invoke<CoreTimelineRecord[]>('list_timeline_records')
+}
+
 export function getAsrConfig() {
   return invoke<CoreAsrConfig>('get_asr_config')
 }
@@ -224,6 +305,14 @@ export function getRecordingConfig() {
 
 export function setRecordingConfig(config: CoreRecordingConfig) {
   return invoke('set_recording_config', { config })
+}
+
+export function getAppRuntimeInfo() {
+  return invoke<AppRuntimeInfo>('get_app_runtime_info')
+}
+
+export function listAsrModels() {
+  return invoke<CoreAsrModel[]>('list_asr_models')
 }
 
 // ── Phase 2.1: Streaming capture ─────────────────────────────────────────
@@ -256,6 +345,10 @@ export interface PolishRequest {
 export interface PolishResponse {
   original: string
   polished: string
+  provider?: string
+  model?: string
+  fallback?: string | null
+  error?: string | null
 }
 
 export function llmPolish(request: PolishRequest) {

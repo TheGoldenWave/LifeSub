@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { CaptureNote, NoteTag, LiveSegment } from '../domain'
 
 interface NoteEditorProps {
-  onSave: (note: CaptureNote) => void
+  onSave: (note: CaptureNote) => Promise<boolean>
   onCancel: () => void
   segments: LiveSegment[]
 }
@@ -12,17 +12,23 @@ const TAGS: NoteTag[] = ['待办', '备忘', '问题', '决定']
 export function NoteEditor({ onSave, onCancel, segments: _segments }: NoteEditorProps) {
   const [content, setContent] = useState('')
   const [tag, setTag] = useState<NoteTag>('备忘')
+  const [saving, setSaving] = useState(false)
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!content.trim()) return
-    onSave({
-      id: `note-${Date.now()}`,
-      content: content.trim(),
-      timestampMs: Date.now() % 3600000,
-      tag,
-      segmentId: null,
-      createdAt: new Date().toISOString(),
-    })
+    setSaving(true)
+    try {
+      await onSave({
+        id: `note-${Date.now()}`,
+        content: content.trim(),
+        timestampMs: 0,
+        tag,
+        segmentId: null,
+        createdAt: new Date().toISOString(),
+      })
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -44,8 +50,10 @@ export function NoteEditor({ onSave, onCancel, segments: _segments }: NoteEditor
         </select>
       </div>
       <div className="note-editor__actions">
-        <button className="text-button" onClick={onCancel}>取消</button>
-        <button className="button button--primary" onClick={handleSave}>保存</button>
+        <button className="text-button" onClick={onCancel} disabled={saving}>取消</button>
+        <button className="button button--primary" onClick={handleSave} disabled={saving || !content.trim()}>
+          {saving ? '保存中...' : '保存'}
+        </button>
       </div>
     </div>
   )

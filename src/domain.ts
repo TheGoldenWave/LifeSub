@@ -6,12 +6,16 @@ export interface TranscriptSegment {
   endMs: number
   source: '麦克风' | '系统音频' | '导入音频'
   text: string
+  chunkId?: string | null
+  chunkStartMs?: number | null
+  chunkEndMs?: number | null
 }
 
 export interface TranscriptRevision {
   number: number
   provider: string
   label: string
+  createdAt?: string
   segments: TranscriptSegment[]
 }
 
@@ -21,8 +25,23 @@ export interface EvidenceRecord {
   startedAt: string
   duration: string
   status: 'available' | 'processing'
+  chunks: Array<{
+    id: string
+    source: '麦克风' | '系统音频' | '导入音频'
+    audioPath: string
+    integrityState: 'available' | 'corrupted' | 'missing'
+    errorCode?: string | null
+  }>
+  latestJob?: {
+    id: string
+    state: string
+    errorCode?: string | null
+    errorSummary?: string | null
+    chunkId: string
+  } | null
   revision: TranscriptRevision
   originalRevision: TranscriptRevision
+  revisions: TranscriptRevision[]
   /** 录音过程中添加的笔记 */
   notes: CaptureNote[]
 }

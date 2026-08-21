@@ -8,40 +8,56 @@ LifeSub 由 goldenwave 与 Malow 产品协同打造，可作为 Malow 生态插�
 
 ## 当前版本：V0.2
 
-项目已进入工程实现阶段，前端 UI 重构完成，后端完成核心数据模型。
+> 开发源护栏（2026-08-21）：唯一集成/发布工作树为 `/Users/goldenwave/.config/superpowers/worktrees/LifeSub/lifesub-real-asr-v0.2`，分支 `codex/lifesub-real-asr-v0.2`，暂停 HEAD `c68dc0d`。`main`、历史 DMG 和 `/Applications/LifeSub.app` 都不是继续开发源。接管详见 `docs/handoffs/2026-08-21-lifesub-v0.2.1-native-capture-handoff.md`。
+
+当前已完成 V0.2 UI/Catalog 安全闭环，以及 V0.2.1 原生采集计划 Task 1--6：Rust/Swift 采集协议、ScreenCaptureKit 系统音频、AVAudioEngine 麦克风、arm64 sidecar 构建签名、继承 FD nonce 和 UID/PID/可执行文件身份认证。这些能力尚未经 Task 7/8 接入 Catalog 原子 chunk sealing 和 production coordinator，因此桌面生产路径仍 fail closed，不回退 Mock 或伪报保存成功。
 
 ### 已完成
 
 | 模块 | 状态 |
 |------|------|
 | 前端 4 页面架构（录音 / 时间线 / 词典 / 设置弹窗） | ✅ |
-| 实时 ASR 流式转写展示（说话人声纹标注） | ✅ 前端 Demo |
-| 时间戳笔记（待办/备忘/问题/决定） | ✅ 前端 Demo |
-| 会话树形目录 + 24h 录音统计条 | ✅ 前端 Demo |
-| 词典管理（分类/词条/别名/启用停用） | ✅ 前端 Demo |
-| 声纹库（FunASR CAM++ embedding） | ✅ UI 就绪 |
+| 浏览器 Demo 预览 | ✅ 显式标识，不录音、不保存、不调用本地 ASR |
+| 桌面 Catalog 时间线、搜索、统计与错误重试 | ✅ 真实数据 |
+| 音频导入、hash、不可变 Chunk 与 durable Job outcome | ✅ |
+| 时间戳笔记（待办/备忘/问题/决定） | ✅ Catalog 持久化 |
+| 词典管理（分类/词条/别名/启用停用） | ✅ Catalog 持久化 |
+| ASR Provider + 精确 model_id 设置 | ✅ Catalog 持久化，禁止静默换模型 |
+| revision 历史、人工修订与按 Segment/Chunk 回放 | ✅ |
+| 设置弹窗焦点锁定、多 Modal 栈与响应式布局 | ✅ |
+| 声纹库（FunASR CAM++ embedding） | UI/CRUD 就绪，embedding 提取未接通 |
 | 后端 Catalog V5 迁移（notes / dictionary / voiceprints / settings） | ✅ |
 | 后端 22 个 Tauri 命令（CRUD + 统计 + 配置） | ✅ |
 | 后端 idempotency + mutation flow | ✅ |
-| ASR 引擎（SenseVoice / Whisper / Qwen3-ASR） | ✅ |
+| ASR Provider/模型/Receipt/Job 基础设施（SenseVoice / Whisper / Qwen3-ASR） | ✅；production executor 待接通 |
 | 模型管理（下载/安装/卸载） | ✅ |
-| 智能路由录音（IM 通话检测：微信/钉钉/飞书/Teams/Zoom/QQ） | ✅ |
+| 本地 LLM 润色与快速输入基础设施 | ✅ 失败显式；禁止静默 Mock |
+| V0.2 arm64 安装包与 `/Applications/LifeSub.app` | ✅ 已重新打包、签名验证并替换 |
 
 ### 进行中
 
 | 模块 | 状态 |
 |------|------|
-| 前端接入真实后端 API（替换 Demo 数据） | 待开发 |
-| 流式 ASR 实时通道 | 待开发 |
-| 说话人分离（Diarization） | 待开发 |
+| ScreenCaptureKit + AVAudioEngine helper | 已实现、测试和复审；待 Task 7/8 接入 Catalog/production coordinator |
+| Catalog v6 capture timing + atomic chunk sealing | Task 7 RED，暂停中 |
+| production NativeCaptureCoordinator | 未实现；当前桌面路径 fail closed |
+| native ASR production executor | 待接通；Job worker 生命周期已完成，执行器当前 fail closed |
+| 模型安装/下载交互 | 后端基础设施已完成，UI 暂禁用并标注计划中 |
+| 说话人分离（Diarization）与 CAM++ embedding | 待开发 |
 
 ### 规划中
 
 | 模块 | 设计文档 |
 |------|---------|
-| LLM 后处理管道 + Fn 键快速输入 | [设计文档](docs/superpowers/plans/2026-08-18-lifesub-llm-quick-input.md) |
 | Agent 插件生态（MCP Server） | Phase 2 |
 | 隐私同步（GitHub 加密记忆库） | Phase 3 |
+
+### 当前质量门禁
+
+- Rust Tier 2：`484 passed / 0 failed / 6 ignored`，`cargo fmt`、Clippy `-D warnings`、`git diff --check` 通过。
+- 前端：Vitest `69/69`、Playwright `12/12`、TypeScript/Vite 生产构建通过。
+- 安装版：`/Applications/LifeSub.app` 已启动验证；DMG 位于 `src-tauri/target/release/bundle/dmg/LifeSub_0.1.0_aarch64.dmg`。
+- 当前 bundle 版本仍为 `0.1.0`；“V0.2”是功能阶段名称，正式版本号升级应在真实采集与 native executor 验收后执行。
 
 ## 生态关系
 
@@ -77,7 +93,7 @@ Malow 可以作为 LifeSub ASR 结果的主要处理层，但不是必经层：�
 | 数据库 | SQLite（Catalog V5） |
 | ASR 引擎 | sherpa-onnx（SenseVoice / Whisper / Qwen3-ASR） |
 | 声纹识别 | FunASR CAM++（规划中） |
-| 本地 LLM | llama.cpp / Qwen2.5（规划中） |
+| 本地 LLM | Ollama CLI / Qwen2.5（基础管道已接入，严格失败反馈） |
 | 测试 | Vitest + Testing Library（前端）/ Rust 内置测试（后端） |
 
 ## 文档

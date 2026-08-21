@@ -7,3 +7,8 @@ afterEach(cleanup)
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn().mockResolvedValue(vi.fn()),
 }))
+
+Object.defineProperty(HTMLMediaElement.prototype, 'pause', {
+  configurable: true,
+  value: vi.fn(),
+})

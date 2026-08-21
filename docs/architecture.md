@@ -1,5 +1,16 @@
 # 系统架构草案
 
+## 实现快照（2026-08-19）
+
+- 当前代码仍由 Tauri 主进程托管 `CoreRuntime`，尚未迁移到 `lifesubd`。
+- Core 已独占 Catalog、模型状态和 ASR Job coordinator；worker 具备 recover、claim、lease renew、cancel、fencing 和 shutdown 生命周期。
+- 音频导入已使用 fd-anchored 存储、hash 和 Chunk integrity；时间线只读取 Catalog，桌面失败不得回退 Demo。
+- ASR 设置持久化精确 `provider + model_id`，Provider 切换后必须显式选择模型，不允许按 registry 顺序自动替换。
+- 人工 revision 从最新 revision 派生，保留 Chunk/time binding 与 `manual` provenance；混合或不可用 Chunk binding fail closed。
+- 当前桌面 worker 的 production executor 仍为 fail-closed：不可用时写稳定 failed outcome，不生成 Mock transcript 或伪 revision。真实 provider 解码/VAD/推理执行是下一阶段。
+- 实时采集源尚未接通；浏览器 Demo 只用于界面预览，桌面采集失败进入显式错误态。
+- 2026-08-19 安装包仍标记 `0.1.0`，但包含 V0.2 UI/Catalog 整改代码；正式 V0.2 版本号等待真实采集与 native executor Gate。
+
 ## 已选方案
 
 采用“契约先独立、进程后独立”的本地核心服务 + 薄客户端架构。LifeSub Core 是唯一的业务与数据真相来源；macOS App 和各 Agent 插件只负责交互、宿主适配与调用。
@@ -81,7 +92,7 @@ ASR 与摘要使用独立接口。每次处理任务记录：Provider、模型�
 
 默认策略：
 
-- ASR：本地优先，允许用户显式选择云端。
+- ASR：本地优先；当前版本仅实现本地 Provider 合同与模型基础设施，云端通路尚未交付。
 - 摘要：可配置本地或云端模型。
 - Provider 故障不应损坏原始音频或已有转写。
 
@@ -116,6 +127,7 @@ ASR 与摘要使用独立接口。每次处理任务记录：Provider、模型�
 
 - 独立 `lifesubd` 是否继续复用当前 Tauri/Rust Core crate 的打包结构。
 - launchd 安装/升级、应用签名分发与 Gateway 外部认证的具体实现（socket envelope、local caller trust 和两个 V1 contract 已冻结）。
-- 本地 ASR 的首选模型与硬件要求。
+- ScreenCaptureKit + AVAudioEngine Swift helper、权限预检、有界重连、独立 `.partial` 封存、sidecar 签名和认证已实现并复审；待定部分是 Task 7 Catalog v6/atomic sealing 和 Task 8 production coordinator 的 Core 接线。
+- native ASR worker 如何将 fd-anchored Chunk、VAD 与 Provider 执行器接入现有 coordinator，同时持续续租和响应取消。
 - 本地搜索使用 SQLite FTS、向量扩展或组合方案。
 - 音频格式、分段策略与长期压缩方案。

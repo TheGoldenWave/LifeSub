@@ -1,32 +1,71 @@
-import { useState, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Search, Upload } from 'lucide-react'
 import { SessionTree } from './SessionTree'
 import { TranscriptView } from './TranscriptView'
 import { StatsBar } from './StatsBar'
-import { demoStats } from '../data/demo'
-import type { EvidenceRecord, TranscriptRevision } from '../domain'
+import { appendManualRevision, loadTimelineRecords } from '../data/adapter'
+import type { EvidenceRecord } from '../domain'
 
 interface TimelineViewProps {
   records: EvidenceRecord[]
   onRecordsChange: (records: EvidenceRecord[]) => void
   onNotice: (msg: string) => void
+  onImportAudio: () => void | Promise<void>
+  loading?: boolean
+  error?: string
+  onRetry?: () => void | Promise<void>
 }
 
-export function TimelineView({ records, onRecordsChange, onNotice }: TimelineViewProps) {
+export function TimelineView({ records, onRecordsChange, onNotice, onImportAudio, loading = false, error = '', onRetry }: TimelineViewProps) {
   const [selectedId, setSelectedId] = useState(records[0]?.id ?? '')
   const [query, setQuery] = useState('')
+
+  useEffect(() => {
+    if (!records.length) {
+      setSelectedId('')
+      return
+    }
+    if (!records.some((record) => record.id === selectedId)) {
+      setSelectedId(records[0]?.id ?? '')
+    }
+  }, [records, selectedId])
 
   const selectedRecord = useMemo(
     () => records.find((r) => r.id === selectedId) ?? records[0],
     [records, selectedId]
   )
 
-  const handleRevisionChange = (revision: TranscriptRevision) => {
-    onRecordsChange(
-      records.map((r) =>
-        r.id === selectedId ? { ...r, revision } : r
-      )
-    )
+  const handleRevisionChange = async (draft: string) => {
+    const record = records.find((candidate) => candidate.id === selectedId)
+    if (!record) return
+    if (!record.revisions.length) {
+      onNotice('当前记录还没有真实转写，暂时无法创建修订。')
+      return
+    }
+
+    if (record.chunks.length > 0) {
+      const latestRevision = record.revisions.at(-1) ?? record.revision
+      await appendManualRevision(record.id, latestRevision.segments, draft)
+      const nextRecords = await loadTimelineRecords()
+      onRecordsChange(nextRecords)
+      return
+    }
+
+    const latestRevision = record.revisions.at(-1) ?? record.revision
+    const nextRevision = {
+      number: latestRevision.number + 1,
+      provider: '人工修订',
+      label: `人工修订 · r${latestRevision.number + 1}`,
+      segments: [
+        { ...latestRevision.segments[0], text: draft },
+        ...latestRevision.segments.slice(1),
+      ],
+    }
+    onRecordsChange(records.map((candidate) => candidate.id === selectedId ? {
+      ...candidate,
+      revision: nextRevision,
+      revisions: [...candidate.revisions, nextRevision],
+    } : candidate))
   }
 
   return (
@@ -42,12 +81,20 @@ export function TimelineView({ records, onRecordsChange, onNotice }: TimelineVie
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        <button className="button" onClick={() => onNotice('导入音频功能：选择本地音频文件。')}>
+        <button className="button" onClick={() => void onImportAudio()}>
           <Upload size={16} />导入音频
         </button>
       </header>
 
-      <div className="timeline-view__content">
+      {loading && <div role="status">正在从 Catalog 加载记录…</div>}
+      {!loading && error && (
+        <div role="alert">
+          时间线加载失败：{error}
+          {onRetry && <button className="text-button" onClick={() => void onRetry()}>重试时间线加载</button>}
+        </div>
+      )}
+
+      {!loading && !error && <div className="timeline-view__content">
         <SessionTree
           records={records}
           selectedId={selectedId}
@@ -62,9 +109,9 @@ export function TimelineView({ records, onRecordsChange, onNotice }: TimelineVie
             onNotice={onNotice}
           />
         )}
-      </div>
+      </div>}
 
-      <StatsBar stats={demoStats} />
+      <StatsBar />
     </main>
   )
 }

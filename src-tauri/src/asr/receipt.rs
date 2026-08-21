@@ -168,7 +168,7 @@ fn validate_draft(draft: &ProviderReceiptDraft) -> Result<(), ProviderReceiptErr
     }
     validate_sha256("archive_sha256", &draft.archive_sha256)?;
     validate_sha256("input_sha256", &draft.input_sha256)?;
-    validate_json_object(
+    validate_json(
         "required_file_hashes_json",
         &draft.required_file_hashes_json,
     )?;
@@ -193,7 +193,7 @@ fn validate_vad_identity(draft: &ProviderReceiptDraft) -> Result<(), ProviderRec
             validate_non_empty("vad_model_id", model)?;
             validate_non_empty("vad_manifest_version", manifest)?;
             validate_sha256("vad_archive_sha256", hash)?;
-            validate_json_object("vad_required_file_hashes_json", file_hashes)
+            validate_json("vad_required_file_hashes_json", file_hashes).map(|_| ())
         }
         _ => Err(ProviderReceiptError::PartialVadIdentity),
     }

@@ -176,7 +176,7 @@ impl Catalog {
     }
 }
 
-fn chunk_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioChunk> {
+pub(crate) fn chunk_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioChunk> {
     let source: String = row.get(2)?;
     Ok(AudioChunk {
         id: row.get(0)?,
@@ -196,7 +196,7 @@ fn integrity_name(state: ChunkIntegrityState) -> &'static str {
     }
 }
 
-fn parse_integrity(value: &str) -> rusqlite::Result<ChunkIntegrityState> {
+pub(crate) fn parse_integrity(value: &str) -> rusqlite::Result<ChunkIntegrityState> {
     match value {
         "available" => Ok(ChunkIntegrityState::Available),
         "corrupted" => Ok(ChunkIntegrityState::Corrupted),

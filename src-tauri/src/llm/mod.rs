@@ -1,3 +1,3 @@
 pub mod polish;
 
-pub use polish::{PolishContext, polish, mock_polish};
+pub use polish::{PolishContext, mock_polish, polish};

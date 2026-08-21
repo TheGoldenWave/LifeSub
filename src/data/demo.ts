@@ -40,8 +40,11 @@ export const demoRecords: EvidenceRecord[] = [
     startedAt: '今天 16:18',
     duration: '38 分钟',
     status: 'available',
+    chunks: [],
+    latestJob: null,
     originalRevision: { number: 1, provider: '本地演示 ASR', label: '原始转写 · r1', segments: originalSegments },
     revision: { number: 1, provider: '本地演示 ASR', label: '原始转写 · r1', segments: originalSegments },
+    revisions: [{ number: 1, provider: '本地演示 ASR', label: '原始转写 · r1', segments: originalSegments }],
     notes: demoNotes,
   },
   {
@@ -50,6 +53,8 @@ export const demoRecords: EvidenceRecord[] = [
     startedAt: '昨天 10:05',
     duration: '22 分钟',
     status: 'available',
+    chunks: [],
+    latestJob: null,
     originalRevision: {
       number: 1,
       provider: '本地演示 ASR',
@@ -62,6 +67,12 @@ export const demoRecords: EvidenceRecord[] = [
       label: '原始转写 · r1',
       segments: [{ id: 'seg-004', startMs: 7_500, endMs: 16_200, source: '麦克风', text: 'LifeSub 只保存发生过什么，上层系统负责解释。' }],
     },
+    revisions: [{
+      number: 1,
+      provider: '本地演示 ASR',
+      label: '原始转写 · r1',
+      segments: [{ id: 'seg-004', startMs: 7_500, endMs: 16_200, source: '麦克风', text: 'LifeSub 只保存发生过什么，上层系统负责解释。' }],
+    }],
     notes: [],
   },
 ]

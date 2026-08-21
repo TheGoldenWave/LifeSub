@@ -450,14 +450,9 @@ fn provider_receipt_rejects_invalid_fields_and_partial_vad_identity() {
         Err(ProviderReceiptError::InvalidJson("model_source_json"))
     );
 
-    let mut non_object = valid_receipt_draft();
-    non_object.required_file_hashes_json = "[]".to_owned();
-    assert_eq!(
-        ProviderReceipt::try_from(non_object),
-        Err(ProviderReceiptError::ExpectedJsonObject(
-            "required_file_hashes_json"
-        ))
-    );
+    let mut file_array = valid_receipt_draft();
+    file_array.required_file_hashes_json = "[]".to_owned();
+    assert!(ProviderReceipt::try_from(file_array).is_ok());
 
     let mut partial_vad = valid_receipt_draft();
     partial_vad.vad_archive_sha256 = None;
@@ -473,14 +468,9 @@ fn provider_receipt_rejects_invalid_fields_and_partial_vad_identity() {
         Err(ProviderReceiptError::InvalidSha256("vad_archive_sha256"))
     );
 
-    let mut invalid_vad_json = valid_receipt_draft();
-    invalid_vad_json.vad_required_file_hashes_json = Some("[]".to_owned());
-    assert_eq!(
-        ProviderReceipt::try_from(invalid_vad_json),
-        Err(ProviderReceiptError::ExpectedJsonObject(
-            "vad_required_file_hashes_json"
-        ))
-    );
+    let mut vad_file_array = valid_receipt_draft();
+    vad_file_array.vad_required_file_hashes_json = Some("[]".to_owned());
+    assert!(ProviderReceipt::try_from(vad_file_array).is_ok());
 
     let mut no_vad = valid_receipt_draft();
     no_vad.vad_model_id = None;

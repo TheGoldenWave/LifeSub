@@ -38,3 +38,7 @@ docs/design/lifesub-logo-concepts/
 
 # Logs
 *.log
+
+# Test artifacts
+output/
+test-results/

@@ -25,31 +25,33 @@ test.describe('LifeSub V0.2 — 4-page navigation', () => {
 test.describe('LifeSub V0.2 — Live Capture', () => {
   test('starts recording and shows transcript', async ({ page }) => {
     await page.goto('/')
-    await page.getByRole('button', { name: '开始记录' }).click()
-    await expect(page.getByText('正在记录')).toBeVisible()
-    // Demo segments appear after 1 second
-    await expect(page.locator('.live-segment').first()).toBeVisible({ timeout: 5000 })
+    await expect(page.getByText('浏览器演示数据，不会录音或保存。')).toBeVisible({ timeout: 5000 })
+    await page.getByRole('button', { name: '开始演示' }).click()
+    await expect(page.getByText('浏览器演示').first()).toBeVisible({ timeout: 5000 })
+    await expect(page.locator('.live-segment').first()).toBeVisible({ timeout: 8000 })
   })
 
   test('pauses and continues recording', async ({ page }) => {
     await page.goto('/')
-    await page.getByRole('button', { name: '开始记录' }).click()
+    await page.getByRole('button', { name: '开始演示' }).click()
+    await expect(page.getByRole('button', { name: '停止' })).toBeVisible({ timeout: 5000 })
     await page.getByRole('button', { name: '暂停' }).click()
-    await expect(page.getByText('已暂停')).toBeVisible()
+    await expect(page.getByRole('button', { name: '继续' })).toBeVisible({ timeout: 5000 })
   })
 
   test('stops recording and shows saved notice', async ({ page }) => {
     await page.goto('/')
-    await page.getByRole('button', { name: '开始记录' }).click()
+    await page.getByRole('button', { name: '开始演示' }).click()
     await page.getByRole('button', { name: '停止' }).click()
-    await expect(page.getByText('录音已保存')).toBeVisible()
+    await expect(page.getByRole('status').filter({ hasText: '浏览器演示数据，不会录音或保存。' }).last()).toBeVisible({ timeout: 5000 })
   })
 
   test('adds and deletes a note', async ({ page }) => {
     await page.goto('/')
-    await page.getByRole('button', { name: '开始记录' }).click()
-    await page.getByRole('button', { name: '笔记' }).click()
-    await expect(page.locator('.note-card')).toBeVisible()
+    await page.getByRole('button', { name: '开始演示' }).click()
+    await expect(page.getByRole('button', { name: '停止' })).toBeVisible({ timeout: 5000 })
+    await page.getByRole('button', { name: '新笔记' }).last().click()
+    await expect(page.locator('.note-editor')).toBeVisible({ timeout: 5000 })
   })
 })
 
@@ -58,7 +60,7 @@ test.describe('LifeSub V0.2 — Timeline', () => {
     await page.goto('/')
     await page.getByRole('button', { name: '时间线' }).click()
     await expect(page.locator('.timeline-view')).toBeVisible()
-    await expect(page.getByPlaceholder('搜索转写、笔记或标签...')).toBeVisible()
+    await expect(page.getByPlaceholder('搜索原话、来源或时间…')).toBeVisible({ timeout: 5000 })
   })
 })
 
@@ -75,41 +77,41 @@ test.describe('LifeSub V0.2 — Settings Modal', () => {
   test('opens and closes settings modal', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: '设置' }).click()
-    await expect(page.locator('.modal')).toBeVisible()
+    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 })
     await expect(page.getByRole('heading', { name: '录音设置' })).toBeVisible()
 
     // Close via button
-    await page.getByRole('button', { name: '关闭' }).click()
-    await expect(page.locator('.modal')).toBeHidden()
+    await page.getByRole('button', { name: '关闭设置' }).click()
+    await expect(page.getByRole('dialog')).toBeHidden({ timeout: 5000 })
   })
 
   test('settings tabs navigate', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: '设置' }).click()
 
-    await page.getByRole('button', { name: 'ASR 设置' }).click()
-    await expect(page.getByText('当前 Provider')).toBeVisible()
+    await page.getByRole('tab', { name: 'ASR 设置' }).click()
+    await expect(page.getByText('当前 Provider')).toBeVisible({ timeout: 5000 })
 
-    await page.getByRole('button', { name: '模型' }).click()
-    await expect(page.getByText('已安装模型')).toBeVisible()
+    await page.getByRole('tab', { name: '模型' }).click()
+    await expect(page.getByText('当前清单')).toBeVisible({ timeout: 5000 })
 
-    await page.getByRole('button', { name: '关于' }).click()
-    await expect(page.getByText('LifeSub')).toBeVisible()
+    await page.getByRole('tab', { name: '关于' }).click()
+    await expect(page.getByRole('heading', { name: '关于 LifeSub' })).toBeVisible({ timeout: 5000 })
   })
 
   test('settings closes on Escape', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: '设置' }).click()
-    await expect(page.locator('.modal')).toBeVisible()
+    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 })
     await page.keyboard.press('Escape')
-    await expect(page.locator('.modal')).toBeHidden()
+    await expect(page.getByRole('dialog')).toBeHidden({ timeout: 5000 })
   })
 })
 
 test.describe('LifeSub V0.2 — Import notice', () => {
-  test('shows import notice when clicking import audio', async ({ page }) => {
+  test('explains that browser preview cannot import real audio', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: '导入音频' }).click()
-    await expect(page.getByText('导入音频功能将在时间线页面中可用')).toBeVisible()
+    await expect(page.getByText('浏览器演示模式仅支持示例数据，请在桌面版中导入真实音频。')).toBeVisible()
   })
 })

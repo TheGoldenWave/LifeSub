@@ -4,11 +4,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8};
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
-    AudioSource, CaptureNote, CaptureSession, CaptureState, DictionaryCategory, DictionaryEntry,
-    HourlySlot, StatsSnapshot, TranscriptRevision, TranscriptSegment, Voiceprint,
+    AudioChunk, AudioSource, CaptureNote, CaptureSession, CaptureState, ChunkIntegrityState,
+    DictionaryCategory, DictionaryEntry, HourlySlot, StatsSnapshot, TranscriptRevision,
+    TranscriptSegment, Voiceprint,
 };
 
 mod anchored_vfs;
@@ -21,6 +22,7 @@ mod publication;
 
 pub use chunks::ChunkDiagnostics;
 pub(crate) use chunks::ImportedChunkInsertError;
+use chunks::parse_integrity;
 pub(crate) use models::ModelInstallationRecord;
 pub use publication::PublicationError;
 #[cfg(test)]
@@ -34,6 +36,22 @@ pub struct Catalog {
     fail_next_chunk_insert: AtomicBool,
     #[cfg(test)]
     fail_publication_at: AtomicU8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelineJobSummary {
+    pub id: String,
+    pub chunk_id: String,
+    pub state: String,
+    pub error_code: Option<String>,
+    pub error_summary: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelineChunk {
+    pub chunk: AudioChunk,
+    pub integrity_state: ChunkIntegrityState,
+    pub error_code: Option<String>,
 }
 
 pub(crate) struct AnchoredCatalogOpen {
@@ -151,6 +169,29 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn list_sessions(&self) -> rusqlite::Result<Vec<CaptureSession>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT id, title, state, started_at, ended_at
+             FROM sessions
+             ORDER BY started_at DESC, id DESC",
+        )?;
+        statement
+            .query_map([], |row| {
+                let state: String = row.get(2)?;
+                let started_at: String = row.get(3)?;
+                let ended_at: Option<String> = row.get(4)?;
+                Ok(CaptureSession {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    state: parse_state(&state)?,
+                    started_at: parse_time(&started_at)?,
+                    ended_at: ended_at.as_deref().map(parse_time).transpose()?,
+                })
+            })?
+            .collect()
+    }
+
     pub fn append_revision(
         &self,
         session_id: &str,
@@ -178,8 +219,19 @@ impl Catalog {
         )?;
         for segment in &revision.segments {
             transaction.execute(
-                "INSERT INTO segments(id, revision_id, start_ms, end_ms, source, text) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                params![segment.id, revision.id, segment.start_ms, segment.end_ms, source_name(segment.source), segment.text],
+                "INSERT INTO segments(id, revision_id, start_ms, end_ms, source, text, chunk_id, chunk_start_ms, chunk_end_ms, session_start_ms, session_end_ms)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?3, ?4)",
+                params![
+                    segment.id,
+                    revision.id,
+                    segment.start_ms,
+                    segment.end_ms,
+                    source_name(segment.source),
+                    segment.text,
+                    segment.chunk_id,
+                    segment.chunk_start_ms,
+                    segment.chunk_end_ms,
+                ],
             )?;
             transaction.execute(
                 "INSERT INTO segment_search(segment_id, revision_id, text) VALUES(?1, ?2, ?3)",
@@ -211,6 +263,319 @@ impl Catalog {
         Ok(revisions)
     }
 
+    pub fn list_revisions_with_segments(
+        &self,
+        session_id: &str,
+    ) -> rusqlite::Result<Vec<TranscriptRevision>> {
+        let mut revisions = self.list_revisions(session_id)?;
+        for revision in &mut revisions {
+            revision.segments = self.list_segments(&revision.id)?;
+        }
+        Ok(revisions)
+    }
+
+    pub fn list_segments(&self, revision_id: &str) -> rusqlite::Result<Vec<TranscriptSegment>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT id, start_ms, end_ms, source, text, chunk_id, chunk_start_ms, chunk_end_ms
+             FROM segments
+             WHERE revision_id = ?1
+             ORDER BY start_ms, end_ms, id",
+        )?;
+        statement
+            .query_map([revision_id], |row| {
+                let source: String = row.get(3)?;
+                Ok(TranscriptSegment {
+                    id: row.get(0)?,
+                    start_ms: row.get(1)?,
+                    end_ms: row.get(2)?,
+                    source: parse_source(&source),
+                    text: row.get(4)?,
+                    chunk_id: row.get(5)?,
+                    chunk_start_ms: row.get(6)?,
+                    chunk_end_ms: row.get(7)?,
+                })
+            })?
+            .collect()
+    }
+
+    pub fn latest_chunk_for_session(
+        &self,
+        session_id: &str,
+    ) -> rusqlite::Result<Option<AudioChunk>> {
+        self.connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id, session_id, source, path, sha256, byte_length
+                 FROM chunks
+                 WHERE session_id = ?1
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                [session_id],
+                chunks::chunk_from_row,
+            )
+            .optional()
+    }
+
+    pub fn list_chunks_for_session(
+        &self,
+        session_id: &str,
+    ) -> rusqlite::Result<Vec<TimelineChunk>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT id, session_id, source, path, sha256, byte_length, integrity_state, last_error_code
+             FROM chunks
+             WHERE session_id = ?1
+             ORDER BY rowid",
+        )?;
+        statement
+            .query_map([session_id], |row| {
+                let source: String = row.get(2)?;
+                let integrity_state: String = row.get(6)?;
+                Ok(TimelineChunk {
+                    chunk: AudioChunk {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        source: parse_source(&source),
+                        path: row.get(3)?,
+                        sha256: row.get(4)?,
+                        byte_length: row.get(5)?,
+                    },
+                    integrity_state: parse_integrity(&integrity_state)?,
+                    error_code: row.get(7)?,
+                })
+            })?
+            .collect()
+    }
+
+    pub fn latest_job_for_session(
+        &self,
+        session_id: &str,
+    ) -> rusqlite::Result<Option<TimelineJobSummary>> {
+        self.connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id, chunk_id, state, error_code, error_summary
+                 FROM asr_jobs
+                 WHERE session_id = ?1
+                 ORDER BY updated_at DESC, created_at DESC, id DESC
+                 LIMIT 1",
+                [session_id],
+                |row| {
+                    Ok(TimelineJobSummary {
+                        id: row.get(0)?,
+                        chunk_id: row.get(1)?,
+                        state: row.get(2)?,
+                        error_code: row.get(3)?,
+                        error_summary: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn append_manual_revision_from_latest(
+        &self,
+        session_id: &str,
+        segments: Vec<TranscriptSegment>,
+    ) -> Result<TranscriptRevision, String> {
+        if segments.is_empty() {
+            return Err("manual revision requires at least one segment".into());
+        }
+
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let latest_revision = transaction
+            .query_row(
+                "SELECT id, number FROM revisions
+                 WHERE session_id = ?1
+                 ORDER BY number DESC
+                 LIMIT 1",
+                [session_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "manual revision requires an existing revision".to_owned())?;
+
+        let latest_segments = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT id, start_ms, end_ms, source, text, chunk_id, chunk_start_ms, chunk_end_ms
+                     FROM segments
+                     WHERE revision_id = ?1
+                     ORDER BY start_ms, end_ms, id",
+                )
+                .map_err(|error| error.to_string())?;
+            statement
+                .query_map([&latest_revision.0], |row| {
+                    let source: String = row.get(3)?;
+                    Ok(TranscriptSegment {
+                        id: row.get(0)?,
+                        start_ms: row.get(1)?,
+                        end_ms: row.get(2)?,
+                        source: parse_source(&source),
+                        text: row.get(4)?,
+                        chunk_id: row.get(5)?,
+                        chunk_start_ms: row.get(6)?,
+                        chunk_end_ms: row.get(7)?,
+                    })
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| error.to_string())?
+        };
+
+        if latest_segments.len() != segments.len() {
+            return Err("manual revision must cover every latest segment".into());
+        }
+
+        let all_unbound = latest_segments.iter().all(|segment| {
+            segment.chunk_id.is_none()
+                && segment.chunk_start_ms.is_none()
+                && segment.chunk_end_ms.is_none()
+        });
+        let all_bound = latest_segments.iter().all(|segment| {
+            segment.chunk_id.is_some()
+                && segment.chunk_start_ms.is_some()
+                && segment.chunk_end_ms.is_some()
+        });
+        if !all_unbound && !all_bound {
+            return Err("manual revision rejects partial or mixed chunk bindings".into());
+        }
+
+        if all_bound {
+            for segment in &latest_segments {
+                let chunk_id = segment.chunk_id.as_deref().expect("all bindings checked");
+                let chunk_start = segment.chunk_start_ms.expect("all bindings checked");
+                let chunk_end = segment.chunk_end_ms.expect("all bindings checked");
+                if chunk_start < 0 || chunk_start >= chunk_end {
+                    return Err("manual revision contains an invalid chunk time range".into());
+                }
+                let available = transaction
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM chunks WHERE id = ?1 AND session_id = ?2 AND integrity_state = 'available')",
+                        params![chunk_id, session_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                if !available {
+                    return Err("manual revision references an unavailable or unknown chunk".into());
+                }
+            }
+        }
+
+        let legacy_chunk = if all_unbound {
+            let available_chunks: Vec<(String, i64)> = transaction
+                .prepare(
+                    "SELECT id, COALESCE(session_offset_ms, 0)
+                     FROM chunks WHERE session_id = ?1 AND integrity_state = 'available'
+                     ORDER BY rowid",
+                )
+                .map_err(|error| error.to_string())?
+                .query_map([session_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|error| error.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| error.to_string())?;
+            match available_chunks.as_slice() {
+                [(id, offset)] => Some((id.clone(), *offset)),
+                [] => return Err("manual revision requires an available chunk before applying legacy chunk fallback".into()),
+                _ => return Err("manual revision requires explicit chunk bindings when legacy segments span multiple chunks".into()),
+            }
+        } else {
+            None
+        };
+
+        let mut derived_segments = Vec::with_capacity(segments.len());
+        for (latest, edited) in latest_segments.iter().zip(segments.iter()) {
+            if latest.id != edited.id
+                || latest.start_ms != edited.start_ms
+                || latest.end_ms != edited.end_ms
+                || latest.source != edited.source
+            {
+                return Err(
+                    "manual revision segments must match the latest revision boundaries".into(),
+                );
+            }
+            if edited.text.trim().is_empty() {
+                return Err("manual revision segments must be non-empty".into());
+            }
+            derived_segments.push(TranscriptSegment {
+                id: edited.id.clone(),
+                start_ms: latest.start_ms,
+                end_ms: latest.end_ms,
+                source: latest.source,
+                text: edited.text.trim().to_owned(),
+                chunk_id: latest
+                    .chunk_id
+                    .clone()
+                    .or_else(|| legacy_chunk.as_ref().map(|value| value.0.clone())),
+                chunk_start_ms: latest.chunk_start_ms.or_else(|| {
+                    legacy_chunk
+                        .as_ref()
+                        .map(|(_, offset)| latest.start_ms.saturating_sub(*offset))
+                }),
+                chunk_end_ms: latest.chunk_end_ms.or_else(|| {
+                    legacy_chunk
+                        .as_ref()
+                        .map(|(_, offset)| latest.end_ms.saturating_sub(*offset))
+                }),
+            });
+        }
+
+        let revision_id = format!("tr_{}", uuid::Uuid::new_v4().simple());
+        let number = latest_revision.1 + 1;
+        let created_at = Utc::now();
+        transaction
+            .execute(
+                "INSERT INTO revisions(id, session_id, number, provider, created_at, provenance_status)
+                 VALUES(?1, ?2, ?3, 'manual', ?4, 'manual')",
+                params![revision_id, session_id, number, created_at.to_rfc3339()],
+            )
+            .map_err(|error| error.to_string())?;
+
+        for segment in &derived_segments {
+            transaction
+                .execute(
+                    "INSERT INTO segments(id, revision_id, start_ms, end_ms, source, text, chunk_id, chunk_start_ms, chunk_end_ms, session_start_ms, session_end_ms)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?3, ?4)",
+                    params![
+                        segment.id,
+                        revision_id,
+                        segment.start_ms,
+                        segment.end_ms,
+                        source_name(segment.source),
+                        segment.text,
+                        segment.chunk_id,
+                        segment.chunk_start_ms,
+                        segment.chunk_end_ms,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "INSERT INTO segment_search(segment_id, revision_id, text) VALUES(?1, ?2, ?3)",
+                    params![segment.id, revision_id, segment.text],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        transaction.commit().map_err(|error| error.to_string())?;
+
+        Ok(TranscriptRevision {
+            id: revision_id,
+            session_id: session_id.to_owned(),
+            number,
+            provider: "manual".into(),
+            created_at,
+            segments: derived_segments,
+        })
+    }
+
     pub fn search_segments(&self, query: &str) -> rusqlite::Result<Vec<TranscriptSegment>> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
@@ -227,6 +592,9 @@ impl Catalog {
                     end_ms: row.get(2)?,
                     source: parse_source(&source),
                     text: row.get(4)?,
+                    chunk_id: None,
+                    chunk_start_ms: None,
+                    chunk_end_ms: None,
                 })
             })?
             .collect()
@@ -271,10 +639,10 @@ impl Catalog {
     }
 
     pub fn delete_note(&self, note_id: &str) -> rusqlite::Result<()> {
-        self.connection.lock().unwrap().execute(
-            "DELETE FROM notes WHERE id = ?1",
-            params![note_id],
-        )?;
+        self.connection
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM notes WHERE id = ?1", params![note_id])?;
         Ok(())
     }
 
@@ -288,7 +656,10 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn list_categories(&self, scope: Option<&str>) -> rusqlite::Result<Vec<DictionaryCategory>> {
+    pub fn list_categories(
+        &self,
+        scope: Option<&str>,
+    ) -> rusqlite::Result<Vec<DictionaryCategory>> {
         let connection = self.connection.lock().unwrap();
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(s) = scope {
             (
@@ -297,12 +668,14 @@ impl Catalog {
             )
         } else {
             (
-                "SELECT id, name, scope, entry_count FROM dictionary_categories ORDER BY name".into(),
+                "SELECT id, name, scope, entry_count FROM dictionary_categories ORDER BY name"
+                    .into(),
                 vec![],
             )
         };
         let mut statement = connection.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         statement
             .query_map(param_refs.as_slice(), |row| {
                 Ok(DictionaryCategory {
@@ -352,7 +725,8 @@ impl Catalog {
             )
         };
         let mut statement = connection.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         statement
             .query_map(param_refs.as_slice(), |row| {
                 let enabled: i32 = row.get(6)?;
@@ -438,10 +812,10 @@ impl Catalog {
     }
 
     pub fn delete_voiceprint(&self, vp_id: &str) -> rusqlite::Result<()> {
-        self.connection.lock().unwrap().execute(
-            "DELETE FROM voiceprints WHERE id = ?1",
-            params![vp_id],
-        )?;
+        self.connection
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM voiceprints WHERE id = ?1", params![vp_id])?;
         Ok(())
     }
 
@@ -457,9 +831,7 @@ impl Catalog {
 
     pub fn get_setting(&self, key: &str) -> rusqlite::Result<Option<String>> {
         let connection = self.connection.lock().unwrap();
-        let mut statement = connection.prepare(
-            "SELECT value_json FROM settings WHERE key = ?1",
-        )?;
+        let mut statement = connection.prepare("SELECT value_json FROM settings WHERE key = ?1")?;
         let mut rows = statement.query([key])?;
         rows.next()?.map(|row| row.get(0)).transpose()
     }
@@ -493,12 +865,14 @@ impl Catalog {
              GROUP BY hour, id
              ORDER BY hour",
         )?;
-        let mut hourly_slots: Vec<HourlySlot> = (0..24).map(|h| HourlySlot {
-            hour: h,
-            minutes: 0,
-            session_id: None,
-            title: None,
-        }).collect();
+        let mut hourly_slots: Vec<HourlySlot> = (0..24)
+            .map(|h| HourlySlot {
+                hour: h,
+                minutes: 0,
+                session_id: None,
+                title: None,
+            })
+            .collect();
         let rows = statement.query_map([date_filter], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -562,6 +936,23 @@ fn state_name(state: CaptureState) -> &'static str {
         CaptureState::Recording => "recording",
         CaptureState::Paused => "paused",
         CaptureState::Stopped => "stopped",
+    }
+}
+
+fn parse_state(value: &str) -> rusqlite::Result<CaptureState> {
+    match value {
+        "idle" => Ok(CaptureState::Idle),
+        "recording" => Ok(CaptureState::Recording),
+        "paused" => Ok(CaptureState::Paused),
+        "stopped" => Ok(CaptureState::Stopped),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unknown capture state",
+            )),
+        )),
     }
 }
 

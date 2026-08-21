@@ -1,8 +1,10 @@
 # LifeSub V0.2 后续开发计划
 
+> **状态更新（2026-08-21）**：本文仅保留为历史路线，不得用它选择分支或下一任务。当前唯一发布源是 `/Users/goldenwave/.config/superpowers/worktrees/LifeSub/lifesub-real-asr-v0.2` / `codex/lifesub-real-asr-v0.2`，暂停 HEAD `c68dc0d`。V0.2.1 原生采集计划 Task 1--6 已完成并复审；唯一接续点是 Task 7 Catalog v6 + atomic chunk sealing RED。以 Handoff、`docs/workspace-status.md` 和 feature `process.md` 为准。
+
 > **分支**: `codex/lifesub-real-asr-v0.2`
-> **当前阶段**: Task 13.5 完成，前端 UI 重构完成，后端 22 个新命令就绪
-> **下次会话恢复**: 读取 `docs/prd/lifesub-real-asr-v0.2/.artifacts/process.md`
+> **当前阶段**: Task 1--6 完成；Task 7 migration RED 暂停
+> **下次会话恢复**: 先读取 `docs/handoffs/2026-08-21-lifesub-v0.2.1-native-capture-handoff.md`
 
 ---
 
@@ -13,23 +15,26 @@
 ├── Tasks 1-13: 真实本地 ASR 引擎 + 模型管理 + Job 调度 + 原子发布 + Tool API
 ├── Task 13.5: 笔记/词典/声纹/统计/设置后端模块（22 个 Tauri 命令）
 ├── UI 重构: 4 页面架构（录音/时间线/词典/设置弹窗）+ 设计 Token 体系
+├── LLM 后处理基础管道 + Fn 键快速输入
 └── 构建: npm build ✅ / cargo build ✅ / tauri build ✅（.app + .dmg）
 
+已完成（仍待 production 接线）✅
+└── Rust/Swift 协议 + ScreenCaptureKit/AVAudioEngine helper + sidecar 签名/认证
+
 待完成 ⬜
-├── Task 14: 真实 Provider Gate 验证（运行中）
-├── Task 15: Playwright E2E + 响应式 + 打包 Gate
-├── 前端 API 接入: 替换 Demo 数据为真实后端调用
-├── 流式 ASR: 实时转写通道
-├── 说话人分离: Diarization + CAM++ 声纹
-├── LLM 后处理: 本地 LLM 润色管道
-└── Fn 键快速输入: 全局快捷键 + 光标写入
+├── Task 7 Catalog v6 + atomic chunk sealing
+├── Task 8 production NativeCaptureCoordinator
+├── native ASR production executor
+├── 真实 Provider/模型安装包 Gate
+├── 正式 V0.2 版本号与发布签名
+└── 说话人分离: Diarization + CAM++ 声纹
 ```
 
 ---
 
 ## Phase 1: V0.2 收尾 — 完成原有计划
 
-### Phase 1.1: 前端 API 接入（当前阻塞）
+### Phase 1.1: 前端 API 接入（历史计划，已完成）
 
 > 优先级: **P0** — 前端所有页面仍用 demo 数据，无法验证后端
 
@@ -67,7 +72,7 @@
 
 ## Phase 2: 核心能力补全
 
-### Phase 2.1: 流式 ASR 实时通道
+### Phase 2.1: 流式 ASR 实时通道（历史计划，安全事件合同已完成；真实采集待接通）
 
 > 优先级: **P0** — 录音页目前只能展示 Demo 模拟数据
 
@@ -155,13 +160,13 @@ Phase 3.1 (LLM 润色) ───────────┤
 
 ## 里程碑
 
-| 里程碑 | 退出条件 |
-|--------|---------|
-| M1: V0.2 前端闭环 | 所有页面使用真实 API，不再依赖 demo 数据 |
-| M2: V0.2 QA 完成 | Task 14 + 15 全部通过，证据文档生成 |
-| M3: 实时 ASR 可用 | 录音页展示真实流式转写，支持说话人标注 |
-| M4: LLM 润色可用 | ASR 输出自动经过本地 LLM 后处理 |
-| M5: 快速输入可用 | 按住 Fn 说话 → 松开上屏，零跳转 |
+| 里程碑 | 状态 | 退出条件 |
+|--------|------|---------|
+| M1: V0.2 前端闭环 | 已完成 | 桌面页面使用真实 Catalog/API；浏览器仅保留显式 Demo |
+| M2: V0.2 UI/Catalog QA | 已完成 | 35 项走查整改、Tier 2、前端与 Playwright Gate 通过 |
+| M3: 实时 ASR 可用 | 未完成 | 录音页展示真实流式转写，支持说话人标注 |
+| M4: LLM 润色基础 | 已完成 | Ollama 调用、provenance 与失败反馈；不静默 Mock |
+| M5: 快速输入基础 | 已完成 | 全局快捷键、前台应用识别与光标写入基础设施 |
 
 ---
 
@@ -169,8 +174,9 @@ Phase 3.1 (LLM 润色) ───────────┤
 
 | 项目 | 说明 |
 |------|------|
-| 前端 demo 数据替换 | `LiveCapture` / `DictionaryView` / `StatsBar` / `SettingsModal` 仍用 demo 数据 |
-| 流式 ASR 事件通道 | 后端有 ASR 引擎但无实时推送 |
+| 原生采集 helper | ScreenCaptureKit + AVAudioEngine、采集协议、sidecar 签名和 helper 认证已完成 |
+| production 实时采集 | Task 7 Catalog sealing 和 Task 8 coordinator 未完成，仍 fail closed |
+| native ASR production executor | Worker 生命周期完成，真实解码/VAD/Provider 执行器尚未接通 |
 | CAM++ 集成 | 声纹表已建但无 embedding 提取 |
 | V4→V5 迁移 fixture | `lifesub-v0.4.sqlite3` 需要升级到 V5 fixture |
-| `asr_provider_test` 已知失败 | `verified_sherpa_provider_consumes_held_fds_and_releases_them_on_drop` 持续失败 |
+| 正式版本与发布签名 | 当前 bundle 仍为 `0.1.0` 且为 ad-hoc 签名；真实音频 Gate 后升级 V0.2 |

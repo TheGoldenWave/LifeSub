@@ -1,4 +1,4 @@
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::{fs, path::Path};
@@ -599,9 +599,23 @@ fn verified_sherpa_provider_consumes_held_fds_and_releases_them_on_drop() {
                 .all(|path| path.starts_with("/dev/fd"))
         );
         assert!(native.required_files.iter().all(|path| path.exists()));
+        let held_identities = native
+            .required_files
+            .iter()
+            .map(|path| fs::metadata(path).map(|metadata| (metadata.dev(), metadata.ino())))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
         drop(provider);
-        assert!(native.required_files.iter().all(|path| !path.exists()));
+        assert!(
+            native
+                .required_files
+                .iter()
+                .zip(held_identities)
+                .all(|(path, original)| fs::metadata(path)
+                    .map(|metadata| (metadata.dev(), metadata.ino()) != original)
+                    .unwrap_or(true))
+        );
     }
 }
 

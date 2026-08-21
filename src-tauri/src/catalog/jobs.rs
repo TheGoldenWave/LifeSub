@@ -20,6 +20,7 @@ pub(crate) enum JobCatalogError {
     Catalog(rusqlite::Error),
 }
 
+#[derive(Debug)]
 pub(crate) enum EnqueueCommitError {
     Job(JobCatalogError),
     Input(InputValidation),
@@ -351,6 +352,34 @@ impl Catalog {
     }
 
     fn enqueue_asr_job(&self, job: &EnqueueJob) -> Result<EnqueueOutcome, EnqueueCommitError> {
+        self.insert_asr_job(job, "queued", None, None)
+    }
+
+    pub(crate) fn insert_blocked_asr_job(
+        &self,
+        job: &EnqueueJob,
+        error_code: &str,
+        error_summary: &str,
+    ) -> Result<EnqueueOutcome, EnqueueCommitError> {
+        self.insert_asr_job(job, "blocked_model", Some(error_code), Some(error_summary))
+    }
+
+    pub(crate) fn insert_failed_asr_job(
+        &self,
+        job: &EnqueueJob,
+        error_code: &str,
+        error_summary: &str,
+    ) -> Result<EnqueueOutcome, EnqueueCommitError> {
+        self.insert_asr_job(job, "failed", Some(error_code), Some(error_summary))
+    }
+
+    fn insert_asr_job(
+        &self,
+        job: &EnqueueJob,
+        state: &str,
+        error_code: Option<&str>,
+        error_summary: Option<&str>,
+    ) -> Result<EnqueueOutcome, EnqueueCommitError> {
         let mut connection = self.connection.lock().unwrap();
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -410,10 +439,10 @@ impl Catalog {
                required_file_hashes_json, model_source_json, vad_model_id, vad_manifest_version,
                vad_archive_sha256, vad_required_file_hashes_json, parameters_json, input_sha256,
                fingerprint, state, attempt_count, claim_generation, max_attempts, available_at,
-               created_at, updated_at
+               error_code, error_summary, created_at, updated_at
              ) VALUES(
                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-               'queued', 0, 0, 3, ?17, ?18, ?18
+               ?17, 0, 0, 3, ?18, ?19, ?20, ?21, ?21
              )",
                 params![
                     job.id,
@@ -432,7 +461,10 @@ impl Catalog {
                     job.parameters_json,
                     job.input_sha256,
                     job.fingerprint,
+                    state,
                     job.available_at,
+                    error_code,
+                    error_summary,
                     job.created_at,
                 ],
             )

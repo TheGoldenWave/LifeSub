@@ -12,6 +12,7 @@ pub mod service;
 pub mod settings;
 pub mod vad;
 pub mod whisper;
+pub mod worker;
 
 const PINNED_RUNTIME_VERSION: &str = "1.13.5";
 #[cfg(feature = "asr-runtime")]

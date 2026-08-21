@@ -252,6 +252,9 @@ impl Catalog {
                 end_ms: session_end_ms,
                 source: segment.source,
                 text: segment.text.clone(),
+                chunk_id: Some(context.chunk_id.clone()),
+                chunk_start_ms: Some(segment.chunk_start_ms),
+                chunk_end_ms: Some(segment.chunk_end_ms),
             });
         }
 

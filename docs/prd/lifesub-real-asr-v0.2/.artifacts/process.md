@@ -1,17 +1,26 @@
 ---
-stage: v0.2.1-native-capture-protocol
+stage: v0.2.1-paused-task7-handoff
 last_updated: 2026-08-21
 source: codex-workspace-audit
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
 
+## 2026-08-21 暂停与 Handoff
+
+- 应用户要求已暂停开发，当前发布源 HEAD 为 `c68dc0d`。
+- Task 1--6 已完成并通过最终复审；Task 7 仅刚进入 migration RED，尚未编写 v6 生产 DDL 或 chunk sealing 实现。
+- 当前唯一 Task 7 新增未提交改动为 `src-tauri/src/catalog_migration_test.rs` 中的 `migrates_v5_to_v6_capture_timing_without_rewriting_existing_chunks`；已观察到正确 RED：当前 `user_version` 仍为 5。
+- 完整接管文档：`docs/handoffs/2026-08-21-lifesub-v0.2.1-native-capture-handoff.md`。
+- 暂停时未打包、未安装、未覆盖 `/Applications/LifeSub.app`；production runtime 仍保持 fail-closed。
+
 ## 2026-08-21 V0.2.1 集成任务进度
 
 - Task 1 已完成并通过复审：Sidebar 移除「导入音频」，Timeline 保留导入工作流；提交 `e516845`。
 - Task 2 已完成并通过最终质量复审：发布根、分支、版本、dirty count 与 `--locked` 均受门禁约束；production runtime 证明改为 crate 内 sealed native capture/native ASR 类型能力，自报 bool 无法伪造。主要提交 `e538ba7` / `ec7d33b` / `a022fb5` / `371faea` / `f69fe7d`。
 - Task 2 验证：release-source shell fixture PASS，`npm run test:release-source` PASS，`cargo fmt --check` PASS，`git diff --check` PASS；当前 production alias 仍为 fail-closed，正式 gate 按预期拒绝，planned audit 明示 `not release-ready`。
-- 当前进入 Task 3：以 RED/GREEN 定义 Rust/Swift 共享的版本化采集协议，完成后再进入 ScreenCaptureKit/AVAudioEngine 真实采集状态机。
+- Task 3--6 已完成并通过最终复审：版本化 Rust/Swift 协议、ScreenCaptureKit/AVAudioEngine 双路 helper、arm64 sidecar 构建签名、继承 FD nonce + UID/PID/可执行文件身份认证均已完成。
+- 当前唯一正确接续点是 Task 7 RED：Catalog v6 capture timing + atomic chunk sealing。不得跳到 Task 8/9，也不得从 `main` 或已安装 App 反向继续。
 
 ## 2026-08-21 工作区审计与安装源确认
 
@@ -33,13 +42,13 @@ source: codex-workspace-audit
 - 安装版宽窗口实测：录音页显示“待检测”与四项诊断清单；时间线空查询显示“暂无转写”，有查询无匹配时显示“没有匹配的原话”；词典工具栏/禁用的新建词条/右侧说明符合预期；设置模型页按 Provider 分组、动作列稳定且使用“暂不可安装”；设置对话框未占满窗口。
 - 实测限制：当前设备没有接通真实实时采集或已安装模型，点击“开始记录”未进入可录制状态，因此仅验证了 fail-closed 的待检测状态与诊断，不把真实采集成功列为通过。
 
-## 当前状态摘要
+## 当前状态摘要（以 2026-08-21 Handoff 为准）
 
-- 当前阶段：`v0.2-ui-catalog-packaged`。
-- 已完成：V0.2 UI/Catalog 安全闭环、35 项走查整改、Tier 2 质量门禁、arm64 DMG 生成与 `/Applications/LifeSub.app` 替换。
-- 当前安装版本：bundle `0.1.0`，功能阶段为 V0.2 预交付；应用已从 `/Applications/LifeSub.app` 启动验证。
-- 当前阻塞：无代码质量门禁阻塞；产品发布仍受真实实时采集、native ASR production executor、真实模型安装交互和安装包级真实音频 Gate 阻塞。
-- 下一步：接入 ScreenCaptureKit + AVAudioEngine 双路采集，将已完成的 Job worker lifecycle 接到真实解码/VAD/Provider executor；随后执行独有口令、重启恢复、搜索、回放、导出验收。
+- 当前阶段：`v0.2.1-paused-task7-handoff`。
+- 已完成：V0.2 UI/Catalog 安全闭环；原生采集计划 Task 1--6（Sidebar 入口、发布源门禁、协议、Swift 双路 helper、sidecar 签名、helper 认证监督）。
+- 当前安装 App 是历史 fail-closed 构建，不包含已接通的 production coordinator/native ASR，不是继续开发或发布证据。
+- 当前阻塞：Task 7 Catalog v6 + atomic chunk sealing、Task 8 production coordinator、Task 9 NativeAsrEngine、Task 10 persisted UI events、Task 11/12 验收与打包。
+- 下一步：仅从 `src-tauri/src/catalog_migration_test.rs` 中已观察 RED 的 `migrates_v5_to_v6_capture_timing_without_rewriting_existing_chunks` 继续 Task 7 TDD。
 - 放行原则：在上述真实链路完成前，保持 fail closed，不将 Demo、规则清理或 provider 不可用结果表述为真实录音/ASR 成功。
 
 ## 2026-08-19 UI 走查问题修复完成

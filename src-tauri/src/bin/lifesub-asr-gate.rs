@@ -10,6 +10,8 @@
 //! the CER/WER/RTF metrics protocol but the real ASR provider integration is deferred
 //! to the production verification run on the M4/24GB device. See `scripts/verify-asr-gate.sh`.
 
+#![allow(dead_code, unused_imports)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -104,10 +106,7 @@ fn normalize_for_cer(text: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     let lower: String = text.chars().flat_map(|c| c.to_lowercase()).collect();
     let normalized: String = lower.nfkc().collect();
-    normalized
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect()
+    normalized.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
 /// WER normalization: punctuation → spaces, collapse whitespace.
@@ -115,7 +114,13 @@ fn normalize_for_wer(text: &str) -> String {
     let normalized: String = text
         .chars()
         .flat_map(|c| c.to_lowercase())
-        .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect();
     let words: Vec<&str> = normalized.split_whitespace().collect();
     words.join(" ")
@@ -161,17 +166,11 @@ fn levenshtein_distance<T: Eq>(a: &[T], b: &[T]) -> usize {
 
 /// Key-phrase recall: fraction of expected phrases found (normalized, contiguous).
 fn calculate_key_phrase_recall(expected: &[String], hypothesis: &str) -> f64 {
-    let hyp_lower: String = hypothesis
-        .chars()
-        .flat_map(|c| c.to_lowercase())
-        .collect();
+    let hyp_lower: String = hypothesis.chars().flat_map(|c| c.to_lowercase()).collect();
     let matched = expected
         .iter()
         .filter(|phrase| {
-            let p: String = phrase
-                .chars()
-                .flat_map(|c| c.to_lowercase())
-                .collect();
+            let p: String = phrase.chars().flat_map(|c| c.to_lowercase()).collect();
             hyp_lower.contains(&p)
         })
         .count();
@@ -202,30 +201,24 @@ fn parse_args() -> Result<Args, String> {
         match args[i].as_str() {
             "--fixtures" => {
                 i += 1;
-                fixtures_path = PathBuf::from(
-                    args.get(i)
-                        .ok_or("missing value for --fixtures")?,
-                );
+                fixtures_path = PathBuf::from(args.get(i).ok_or("missing value for --fixtures")?);
             }
             "--model-dir" => {
                 i += 1;
                 model_dir = Some(PathBuf::from(
-                    args.get(i)
-                        .ok_or("missing value for --model-dir")?,
+                    args.get(i).ok_or("missing value for --model-dir")?,
                 ));
             }
             "--qwen17-model-dir" => {
                 i += 1;
                 qwen17_model_dir = Some(PathBuf::from(
-                    args.get(i)
-                        .ok_or("missing value for --qwen17-model-dir")?,
+                    args.get(i).ok_or("missing value for --qwen17-model-dir")?,
                 ));
             }
             "--output" => {
                 i += 1;
                 output_path = Some(PathBuf::from(
-                    args.get(i)
-                        .ok_or("missing value for --output")?,
+                    args.get(i).ok_or("missing value for --output")?,
                 ));
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -248,7 +241,9 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("Error: {e}");
-            eprintln!("Usage: lifesub-asr-gate [--fixtures <path>] --model-dir <path> [--qwen17-model-dir <path>] [--output <path>]");
+            eprintln!(
+                "Usage: lifesub-asr-gate [--fixtures <path>] --model-dir <path> [--qwen17-model-dir <path>] [--output <path>]"
+            );
             process::exit(1);
         }
     };
@@ -259,17 +254,15 @@ fn main() {
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
-    let manifest_json =
-        fs::read_to_string(&args.fixtures_path).unwrap_or_else(|e| {
-            eprintln!("Failed to read fixture manifest: {e}");
-            process::exit(1);
-        });
+    let manifest_json = fs::read_to_string(&args.fixtures_path).unwrap_or_else(|e| {
+        eprintln!("Failed to read fixture manifest: {e}");
+        process::exit(1);
+    });
 
-    let manifest: FixtureManifest =
-        serde_json::from_str(&manifest_json).unwrap_or_else(|e| {
-            eprintln!("Invalid fixture manifest: {e}");
-            process::exit(1);
-        });
+    let manifest: FixtureManifest = serde_json::from_str(&manifest_json).unwrap_or_else(|e| {
+        eprintln!("Invalid fixture manifest: {e}");
+        process::exit(1);
+    });
 
     if manifest.schema_version != 1 {
         eprintln!(
@@ -340,11 +333,7 @@ fn main() {
                 continue; // Not a speech fixture
             }
 
-            let scenario_id = format!(
-                "{}-{}",
-                provider_id,
-                entry.file.trim_end_matches(".wav")
-            );
+            let scenario_id = format!("{}-{}", provider_id, entry.file.trim_end_matches(".wav"));
 
             let result = run_scenario(
                 provider_id,
@@ -383,7 +372,8 @@ fn main() {
         runtime: Some(RuntimeIdentity {
             sherpa_version: "1.13.5".to_string(),
             sherpa_git_sha1: "3dc7c569".to_string(),
-            sherpa_native_archive_sha256: "339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44".to_string(),
+            sherpa_native_archive_sha256:
+                "339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44".to_string(),
             qwen3_asr_crate_version: Some("0.2.2".to_string()),
             qwen3_asr_git_commit: Some("c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc".to_string()),
             candle_backend: Some("metal".to_string()),
@@ -438,11 +428,7 @@ fn run_scenario(
     let _audio_path = fixtures_dir.join(&entry.file);
 
     Ok(ScenarioResult {
-        scenario_id: format!(
-            "{}-{}",
-            provider_id,
-            entry.file.trim_end_matches(".wav")
-        ),
+        scenario_id: format!("{}-{}", provider_id, entry.file.trim_end_matches(".wav")),
         provider: provider_id.to_string(),
         language: "unknown".to_string(),
         fixture: entry.file.clone(),

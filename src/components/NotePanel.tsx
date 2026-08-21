@@ -5,8 +5,8 @@ import type { CaptureNote, LiveSegment } from '../domain'
 
 interface NotePanelProps {
   notes: CaptureNote[]
-  onAdd: (note: CaptureNote) => void
-  onDelete: (id: string) => void
+  onAdd: (note: CaptureNote) => Promise<boolean>
+  onDelete: (id: string) => Promise<boolean>
   segments: LiveSegment[]
 }
 
@@ -17,6 +17,7 @@ function formatTimestamp(ms: number) {
 
 export function NotePanel({ notes, onAdd, onDelete, segments }: NotePanelProps) {
   const [editing, setEditing] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   return (
     <aside className="note-panel">
@@ -29,7 +30,11 @@ export function NotePanel({ notes, onAdd, onDelete, segments }: NotePanelProps) 
 
       {editing && (
         <NoteEditor
-          onSave={(note) => { onAdd(note); setEditing(false) }}
+          onSave={async (note) => {
+            const saved = await onAdd(note)
+            if (saved) setEditing(false)
+            return saved
+          }}
           onCancel={() => setEditing(false)}
           segments={segments}
         />
@@ -41,7 +46,16 @@ export function NotePanel({ notes, onAdd, onDelete, segments }: NotePanelProps) 
             <div className="note-card__header">
               <span className="note-card__time">{formatTimestamp(note.timestampMs)}</span>
               <span className="note-card__tag">{note.tag}</span>
-              <button className="text-button" onClick={() => onDelete(note.id)} aria-label="删除笔记">
+              <button
+                className="text-button"
+                onClick={async () => {
+                  setDeletingId(note.id)
+                  await onDelete(note.id)
+                  setDeletingId(null)
+                }}
+                aria-label="删除笔记"
+                disabled={deletingId === note.id}
+              >
                 <X size={12} />
               </button>
             </div>

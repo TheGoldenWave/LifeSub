@@ -81,6 +81,21 @@ pub enum AsrErrorCode {
     ReceiptInvalid,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ImportModelReadiness {
+    Ready,
+    #[cfg(test)]
+    Blocked(AsrErrorCode),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ImportAsrDisposition {
+    NoJob,
+    Queued,
+    BlockedModel(AsrErrorCode),
+    Failed(AsrErrorCode),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct TranscriptTimeRange {
     start_ms: i64,
@@ -111,6 +126,9 @@ pub struct TranscriptSegment {
     pub end_ms: i64,
     pub source: AudioSource,
     pub text: String,
+    pub chunk_id: Option<String>,
+    pub chunk_start_ms: Option<i64>,
+    pub chunk_end_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -196,6 +214,9 @@ impl TranscriptSegment {
             end_ms,
             source,
             text: text.into(),
+            chunk_id: None,
+            chunk_start_ms: None,
+            chunk_end_ms: None,
         }
     }
 
@@ -281,6 +302,32 @@ impl<'de> Deserialize<'de> for TranscriptTimeRange {
     }
 }
 
+impl<'de> Deserialize<'de> for AsrConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = AsrConfigWire::deserialize(deserializer)?;
+        let model_id = match wire.model_id {
+            Some(model_id) if !model_id.trim().is_empty() => model_id,
+            _ => default_model_id_for_provider(&wire.provider)
+                .ok_or_else(|| D::Error::custom("unknown ASR provider"))?
+                .to_owned(),
+        };
+        Ok(Self {
+            provider: wire.provider,
+            model_id,
+            language: wire.language,
+            auto_transcribe: wire.auto_transcribe,
+            threads: wire.threads,
+            vad_enabled: wire.vad_enabled,
+            vad_min_speech_ms: wire.vad_min_speech_ms,
+            vad_silence_ms: wire.vad_silence_ms,
+            itn_enabled: wire.itn_enabled,
+        })
+    }
+}
+
 // ── New types for Task 13.5 ──────────────────────────────────────────────
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -342,9 +389,10 @@ pub struct HourlySlot {
     pub title: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AsrConfig {
     pub provider: String,
+    pub model_id: String,
     pub language: String,
     pub auto_transcribe: bool,
     pub threads: i64,
@@ -352,6 +400,19 @@ pub struct AsrConfig {
     pub vad_min_speech_ms: i64,
     pub vad_silence_ms: i64,
     pub itn_enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct AsrConfigWire {
+    provider: String,
+    model_id: Option<String>,
+    language: String,
+    auto_transcribe: bool,
+    threads: i64,
+    vad_enabled: bool,
+    vad_min_speech_ms: i64,
+    vad_silence_ms: i64,
+    itn_enabled: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -363,6 +424,76 @@ pub struct RecordingConfig {
     pub recovery_delay_secs: i64,
     pub sample_rate: i64,
     pub storage_path: String,
+}
+
+impl AsrConfig {
+    pub fn default_for_provider(provider: &str) -> Option<Self> {
+        Some(Self {
+            provider: provider.to_owned(),
+            model_id: default_model_id_for_provider(provider)?.to_owned(),
+            language: "zh".to_owned(),
+            auto_transcribe: true,
+            threads: 4,
+            vad_enabled: true,
+            vad_min_speech_ms: 300,
+            vad_silence_ms: 800,
+            itn_enabled: provider == "sense_voice",
+        })
+    }
+
+    pub fn validate_for_persistence(&self) -> Result<(), String> {
+        let provider = match self.provider.as_str() {
+            "sense_voice" => AsrProviderKind::SenseVoice,
+            "whisper" => AsrProviderKind::Whisper,
+            "qwen3_asr" => AsrProviderKind::Qwen3Asr,
+            _ => return Err(format!("unknown ASR provider {}", self.provider)),
+        };
+        let model = crate::asr::manifest::model_registry()
+            .model(&self.model_id)
+            .ok_or_else(|| format!("unknown ASR model {}", self.model_id))?;
+        if model.provider != provider {
+            return Err(format!(
+                "model {} does not belong to provider {}",
+                self.model_id, self.provider
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ImportAsrDisposition {
+    pub(crate) fn classify(
+        auto_transcribe: bool,
+        readiness: ImportModelReadiness,
+        enqueue_result: Result<(), AsrErrorCode>,
+    ) -> Self {
+        if !auto_transcribe {
+            return Self::NoJob;
+        }
+        match readiness {
+            #[cfg(test)]
+            ImportModelReadiness::Blocked(error) => Self::BlockedModel(error),
+            ImportModelReadiness::Ready => match enqueue_result {
+                Ok(()) => Self::Queued,
+                Err(AsrErrorCode::ModelNotInstalled) => {
+                    Self::BlockedModel(AsrErrorCode::ModelNotInstalled)
+                }
+                Err(AsrErrorCode::ModelCapabilityUnavailable) => {
+                    Self::BlockedModel(AsrErrorCode::ModelCapabilityUnavailable)
+                }
+                Err(error) => Self::Failed(error),
+            },
+        }
+    }
+}
+
+fn default_model_id_for_provider(provider: &str) -> Option<&'static str> {
+    match provider {
+        "sense_voice" => Some("sense-voice-small-int8-2024-07-17"),
+        "whisper" => Some("whisper-base"),
+        "qwen3_asr" => Some("qwen3-asr-0.6b-int8-2026-03-25"),
+        _ => None,
+    }
 }
 
 impl CaptureNote {

@@ -8,11 +8,31 @@ interface StatsBarProps {
 
 export function StatsBar({ stats: externalStats }: StatsBarProps) {
   const [stats, setStats] = useState<StatsSnapshot | null>(externalStats ?? null)
+  const [error, setError] = useState('')
+
+  const refresh = async () => {
+    if (externalStats) return
+    setError('')
+    try {
+      setStats(await loadStats())
+    } catch (loadError) {
+      setStats(null)
+      setError(loadError instanceof Error ? loadError.message : '统计加载失败')
+    }
+  }
 
   useEffect(() => {
-    if (externalStats) return
-    loadStats().then(setStats)
+    void refresh()
   }, [externalStats])
+
+  if (error) {
+    return (
+      <footer className="stats-bar">
+        <div role="alert">统计加载失败：{error}</div>
+        <button className="text-button" onClick={() => void refresh()}>重试统计加载</button>
+      </footer>
+    )
+  }
 
   if (!stats) return <footer className="stats-bar">加载中...</footer>
 

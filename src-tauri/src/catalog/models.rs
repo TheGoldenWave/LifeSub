@@ -20,6 +20,7 @@ pub(crate) struct ModelDownloadRecord {
     pub manifest_version: String,
     pub bundle_identity: String,
     pub state: String,
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -467,8 +468,8 @@ impl Catalog {
     pub(crate) fn model_download_records(&self) -> rusqlite::Result<Vec<ModelDownloadRecord>> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
-            "SELECT id, model_id, manifest_version, archive_sha256, state
-             FROM model_downloads ORDER BY id",
+            "SELECT id, model_id, manifest_version, archive_sha256, state, updated_at
+             FROM model_downloads ORDER BY updated_at DESC, id DESC",
         )?;
         statement
             .query_map([], |row| {
@@ -478,6 +479,7 @@ impl Catalog {
                     manifest_version: row.get(2)?,
                     bundle_identity: row.get(3)?,
                     state: row.get(4)?,
+                    updated_at: row.get(5)?,
                 })
             })?
             .collect()

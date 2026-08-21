@@ -35,13 +35,13 @@ cargo_cmd() {
 # ---- individual checks ----
 check_fmt() {
   info "Running cargo fmt --check..."
-  cargo fmt --check || fail "cargo fmt --check"
+  cargo fmt --manifest-path src-tauri/Cargo.toml --check || fail "cargo fmt --check"
   pass "fmt"
 }
 
 check_clippy() {
   info "Running cargo clippy -- -D warnings..."
-  cargo_cmd clippy --all-targets --all-features -- -D warnings || fail "clippy"
+  cargo_cmd clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings || fail "clippy"
   pass "clippy"
 }
 
@@ -55,7 +55,7 @@ check_diff() {
 run_tier1() {
   local test_name="$1"
   info "Tier 1: running focused test '${test_name}'..."
-  cargo_cmd test "${test_name}" --features "asr-runtime,asr-qwen17-runtime" -- --nocapture || fail "tier1 test '${test_name}'"
+  cargo_cmd test --manifest-path src-tauri/Cargo.toml "${test_name}" --features "asr-runtime,asr-qwen17-runtime" -- --nocapture || fail "tier1 test '${test_name}'"
   pass "tier1: ${test_name}"
 }
 
@@ -65,13 +65,13 @@ run_tier2() {
   check_clippy
   check_diff
   info "Tier 2: running focused + related tests..."
-  cargo_cmd test --features "asr-runtime,asr-qwen17-runtime" -- --nocapture || fail "tier2 tests"
+  cargo_cmd test --manifest-path src-tauri/Cargo.toml --features "asr-runtime,asr-qwen17-runtime" -- --nocapture || fail "tier2 tests"
   pass "tier2: all checks passed"
 }
 
 run_tier3() {
   info "Tier 3: full suite (Task completion)..."
-  cargo_cmd test --all-features -- --nocapture || fail "tier3 full suite"
+  cargo_cmd test --manifest-path src-tauri/Cargo.toml --all-features -- --nocapture || fail "tier3 full suite"
   pass "tier3: full suite passed"
 }
 

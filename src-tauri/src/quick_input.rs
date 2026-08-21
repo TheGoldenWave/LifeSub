@@ -79,7 +79,10 @@ pub fn register_hotkey(app: &AppHandle, hotkey: &str) -> Result<(), String> {
                     state.quick_input.mark_started(now_ms);
                     let _ = app_handle.emit(
                         QUICK_INPUT_STARTED,
-                        QuickInputState { active: true, started_at_ms: now_ms },
+                        QuickInputState {
+                            active: true,
+                            started_at_ms: now_ms,
+                        },
                     );
                 }
                 ShortcutState::Released => {
@@ -88,16 +91,17 @@ pub fn register_hotkey(app: &AppHandle, hotkey: &str) -> Result<(), String> {
                     state.quick_input.mark_stopped();
                     let _ = app_handle.emit(
                         QUICK_INPUT_STOPPED,
-                        QuickInputState { active: false, started_at_ms: start },
+                        QuickInputState {
+                            active: false,
+                            started_at_ms: start,
+                        },
                     );
                     // Trigger polish+paste asynchronously
                     let app_clone = app_handle.clone();
                     std::thread::spawn(move || {
                         if let Err(e) = polish_and_paste(&app_clone, start, end) {
-                            let _ = app_clone.emit(
-                                QUICK_INPUT_POLISHED,
-                                serde_json::json!({ "error": e }),
-                            );
+                            let _ = app_clone
+                                .emit(QUICK_INPUT_POLISHED, serde_json::json!({ "error": e }));
                         }
                     });
                 }
@@ -151,11 +155,7 @@ pub fn get_frontmost_app() -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 /// Pastes text at the current cursor via System Events keystroke.
@@ -165,9 +165,7 @@ pub fn paste_text_at_cursor(text: &str) -> Result<(), String> {
     }
     // Escape for AppleScript string literal.
     let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        "tell application \"System Events\" to keystroke \"{escaped}\""
-    );
+    let script = format!("tell application \"System Events\" to keystroke \"{escaped}\"");
     let output = Command::new("osascript")
         .args(["-e", &script])
         .output()

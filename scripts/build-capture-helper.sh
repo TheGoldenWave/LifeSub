@@ -31,18 +31,20 @@ SOURCE="$BIN_PATH/$NAME"
 ARCHS=$(lipo -archs "$SOURCE" 2>/dev/null) || fail "cannot inspect helper architecture"
 [ "$ARCHS" = "arm64" ] || fail "helper must be arm64 only, got: $ARCHS"
 
-TMP="$BINARIES/.$NAME.$$.tmp"
+TMP=$(mktemp "$BINARIES/.$NAME.XXXXXX")
 trap 'rm -f "$TMP"' EXIT HUP INT TERM
 cp "$SOURCE" "$TMP"
 chmod 0755 "$TMP"
+printf 'capture helper signing identity: %s\n' "$IDENTITY"
 if [ "$IDENTITY" = "-" ]; then
-  codesign --force --sign - --options runtime --timestamp=none "$TMP"
+  codesign --force --sign - --identifier "$NAME" --options runtime --timestamp=none "$TMP"
 else
-  codesign --force --sign "$IDENTITY" --options runtime --timestamp "$TMP"
+  codesign --force --sign "$IDENTITY" --identifier "$NAME" --options runtime --timestamp "$TMP"
 fi
 codesign --verify --strict --verbose=2 "$TMP"
 mv -f "$TMP" "$OUTPUT"
 trap - EXIT HUP INT TERM
+codesign --verify --strict --verbose=2 "$OUTPUT"
 
 HASH=$(shasum -a 256 "$OUTPUT" | awk '{print $1}')
 printf 'capture helper: %s\n' "$OUTPUT"

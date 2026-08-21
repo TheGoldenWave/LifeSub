@@ -6,6 +6,7 @@ SCRIPT="$ROOT/scripts/build-capture-helper.sh"
 [ -x "$SCRIPT" ] || { printf 'FAIL: missing executable build script\n' >&2; exit 1; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/lifesub-helper-build.XXXXXX")
+TMP=$(CDPATH= cd -- "$TMP" && pwd -P)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 mkdir -p "$TMP/project/scripts" "$TMP/project/src-tauri/native/capture-helper" "$TMP/bin"
 cp "$SCRIPT" "$TMP/project/scripts/build-capture-helper.sh"
@@ -35,6 +36,7 @@ if [ "${FIXTURE_ARCH:-arm64}" = arm64 ]; then printf 'arm64\n'; else printf 'x86
 EOF
 cat >"$TMP/bin/codesign" <<'EOF'
 #!/bin/sh
+printf '%s\n' "$*" >>"$CODESIGN_LOG"
 exit 0
 EOF
 cat >"$TMP/bin/shasum" <<'EOF'
@@ -43,10 +45,19 @@ printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  %s\n' 
 EOF
 chmod +x "$TMP/bin/"*
 
-PATH="$TMP/bin:$PATH" LIFESUB_CODESIGN_IDENTITY=- \
-  sh "$TMP/project/scripts/build-capture-helper.sh" >/dev/null
+CODESIGN_LOG="$TMP/codesign.log"
+export CODESIGN_LOG
+output=$(PATH="$TMP/bin:$PATH" LIFESUB_CODESIGN_IDENTITY=- \
+  sh "$TMP/project/scripts/build-capture-helper.sh")
 OUTPUT="$TMP/project/src-tauri/binaries/lifesub-capture-helper-aarch64-apple-darwin"
 [ -x "$OUTPUT" ] || { printf 'FAIL: missing target-suffixed helper\n' >&2; exit 1; }
+case "$output" in *'capture helper signing identity: -'*) ;; *) printf 'FAIL: identity not reported\n' >&2; exit 1;; esac
+grep -F -- '--sign - --identifier lifesub-capture-helper' "$CODESIGN_LOG" >/dev/null || {
+  printf 'FAIL: explicit helper identifier not signed\n' >&2; exit 1;
+}
+grep -F -- "--verify --strict --verbose=2 $OUTPUT" "$CODESIGN_LOG" >/dev/null || {
+  printf 'FAIL: final helper path not verified\n' >&2; exit 1;
+}
 
 if PATH="$TMP/bin:$PATH" FIXTURE_ARCH=x86_64 LIFESUB_CODESIGN_IDENTITY=- \
   sh "$TMP/project/scripts/build-capture-helper.sh" >/dev/null 2>&1; then

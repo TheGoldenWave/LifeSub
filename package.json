@@ -1,7 +1,7 @@
 {
   "name": "lifesub",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "tokens": "node scripts/generate-design-tokens.mjs",
@@ -13,6 +13,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:release-source": "bash tests/scripts/verify-release-source.test.sh",
+    "verify:release-source": "bash scripts/verify-release-source.sh",
     "tauri": "tauri"
   },
   "dependencies": {

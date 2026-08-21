@@ -3,9 +3,9 @@ pub mod asr;
 #[cfg(feature = "desktop")]
 pub mod capture;
 pub mod catalog;
-pub mod domain;
 #[cfg(feature = "desktop")]
 pub mod desktop_runtime;
+pub mod domain;
 pub mod llm;
 #[cfg(feature = "desktop")]
 pub mod quick_input;

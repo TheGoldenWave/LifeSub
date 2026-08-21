@@ -5,20 +5,36 @@ use std::thread::JoinHandle;
 use crate::capture::StreamingCapture;
 use crate::service::CoreRuntime;
 
-pub trait DesktopRuntimeFactory {
-    const USES_NATIVE_CAPTURE: bool;
-    const USES_NATIVE_ASR: bool;
+mod sealed {
+    pub trait DesktopRuntimeFactory {}
+    pub trait NativeCapture {}
+    pub trait NativeAsr {}
+}
 
+pub trait DesktopRuntimeFactory: sealed::DesktopRuntimeFactory {
     fn create_capture() -> StreamingCapture;
     fn spawn_worker(runtime: Arc<CoreRuntime>) -> (Arc<AtomicBool>, Option<JoinHandle<()>>);
 }
 
+pub trait NativeCaptureDesktopRuntimeFactory:
+    DesktopRuntimeFactory + sealed::NativeCapture
+{
+}
+
+impl<T> NativeCaptureDesktopRuntimeFactory for T where
+    T: DesktopRuntimeFactory + sealed::NativeCapture
+{
+}
+
+pub trait NativeAsrDesktopRuntimeFactory: DesktopRuntimeFactory + sealed::NativeAsr {}
+
+impl<T> NativeAsrDesktopRuntimeFactory for T where T: DesktopRuntimeFactory + sealed::NativeAsr {}
+
 pub struct FailClosedDesktopRuntimeFactory;
 
-impl DesktopRuntimeFactory for FailClosedDesktopRuntimeFactory {
-    const USES_NATIVE_CAPTURE: bool = false;
-    const USES_NATIVE_ASR: bool = false;
+impl sealed::DesktopRuntimeFactory for FailClosedDesktopRuntimeFactory {}
 
+impl DesktopRuntimeFactory for FailClosedDesktopRuntimeFactory {
     fn create_capture() -> StreamingCapture {
         StreamingCapture::default()
     }

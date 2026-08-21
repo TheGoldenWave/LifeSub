@@ -18,12 +18,12 @@ use crate::asr::service::{AsrEnqueueRequest, DEFAULT_VAD_MODEL_ID, EnqueueProvid
 use crate::asr::settings::{AsrProviderOptions, AsrSettings, WhisperTask};
 use crate::capture::StreamingCapture;
 use crate::catalog::{Catalog, TimelineChunk, TimelineJobSummary};
+use crate::desktop_runtime::{DesktopRuntimeFactory, ProductionDesktopRuntimeFactory};
 use crate::domain::{
     AsrErrorCode, AsrLanguage, AsrProviderKind, AudioChunk, CaptureNote, CaptureSession,
     CaptureState, ChunkIntegrityState, DictionaryCategory, DictionaryEntry, ImportAsrDisposition,
     ImportModelReadiness, StatsSnapshot, TranscriptRevision, TranscriptSegment, Voiceprint,
 };
-use crate::desktop_runtime::{DesktopRuntimeFactory, ProductionDesktopRuntimeFactory};
 use crate::quick_input::QuickInput;
 use crate::service::{CoreRuntime, EvidenceService, parse_evidence_uri};
 

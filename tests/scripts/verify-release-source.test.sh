@@ -98,36 +98,61 @@ write_runtime_factory() {
     capture_only) production_factory=CaptureOnlyDesktopRuntimeFactory ;;
     asr_only) production_factory=AsrOnlyDesktopRuntimeFactory ;;
     fail_closed) production_factory=FailClosedDesktopRuntimeFactory ;;
+    lying_flags) production_factory=LyingDesktopRuntimeFactory ;;
     *) fail "unknown runtime factory fixture mode: $mode" ;;
   esac
 
   printf '%s\n' \
     '#[cfg(feature = "desktop")]' \
     'pub mod desktop_runtime {' \
-    '    pub trait DesktopRuntimeFactory {' \
-    '        const USES_NATIVE_CAPTURE: bool;' \
-    '        const USES_NATIVE_ASR: bool;' \
+    '    mod sealed {' \
+    '        pub trait DesktopRuntimeFactory {}' \
+    '        pub trait NativeCapture {}' \
+    '        pub trait NativeAsr {}' \
+    '    }' \
+    '    pub trait DesktopRuntimeFactory: sealed::DesktopRuntimeFactory {' \
     '        fn create_capture() -> &'\''static str;' \
     '        fn spawn_worker() -> &'\''static str;' \
     '    }' \
+    '    pub trait NativeCaptureDesktopRuntimeFactory:' \
+    '        DesktopRuntimeFactory + sealed::NativeCapture {}' \
+    '    impl<T> NativeCaptureDesktopRuntimeFactory for T where' \
+    '        T: DesktopRuntimeFactory + sealed::NativeCapture {}' \
+    '    pub trait NativeAsrDesktopRuntimeFactory:' \
+    '        DesktopRuntimeFactory + sealed::NativeAsr {}' \
+    '    impl<T> NativeAsrDesktopRuntimeFactory for T where' \
+    '        T: DesktopRuntimeFactory + sealed::NativeAsr {}' \
     '    pub struct NativeDesktopRuntimeFactory;' \
     '    pub struct CaptureOnlyDesktopRuntimeFactory;' \
     '    pub struct AsrOnlyDesktopRuntimeFactory;' \
     '    pub struct FailClosedDesktopRuntimeFactory;' \
+    '    pub struct LyingDesktopRuntimeFactory;' \
     '    macro_rules! factory {' \
-    '        ($name:ty, $capture:expr, $asr:expr) => {' \
+    '        ($name:ty) => {' \
+    '            impl sealed::DesktopRuntimeFactory for $name {}' \
     '            impl DesktopRuntimeFactory for $name {' \
-    '                const USES_NATIVE_CAPTURE: bool = $capture;' \
-    '                const USES_NATIVE_ASR: bool = $asr;' \
     '                fn create_capture() -> &'\''static str { "capture" }' \
     '                fn spawn_worker() -> &'\''static str { "worker" }' \
     '            }' \
     '        };' \
     '    }' \
-    '    factory!(NativeDesktopRuntimeFactory, true, true);' \
-    '    factory!(CaptureOnlyDesktopRuntimeFactory, true, false);' \
-    '    factory!(AsrOnlyDesktopRuntimeFactory, false, true);' \
-    '    factory!(FailClosedDesktopRuntimeFactory, false, false);' \
+    '    factory!(NativeDesktopRuntimeFactory);' \
+    '    factory!(CaptureOnlyDesktopRuntimeFactory);' \
+    '    factory!(AsrOnlyDesktopRuntimeFactory);' \
+    '    factory!(FailClosedDesktopRuntimeFactory);' \
+    '    impl sealed::NativeCapture for NativeDesktopRuntimeFactory {}' \
+    '    impl sealed::NativeAsr for NativeDesktopRuntimeFactory {}' \
+    '    impl sealed::NativeCapture for CaptureOnlyDesktopRuntimeFactory {}' \
+    '    impl sealed::NativeAsr for AsrOnlyDesktopRuntimeFactory {}' \
+    '    impl sealed::DesktopRuntimeFactory for LyingDesktopRuntimeFactory {}' \
+    '    impl DesktopRuntimeFactory for LyingDesktopRuntimeFactory {' \
+    '        fn create_capture() -> &'\''static str { "StreamingCapture::default" }' \
+    '        fn spawn_worker() -> &'\''static str { "spawn_fail_closed_worker" }' \
+    '    }' \
+    '    impl LyingDesktopRuntimeFactory {' \
+    '        pub const USES_NATIVE_CAPTURE: bool = true;' \
+    '        pub const USES_NATIVE_ASR: bool = true;' \
+    '    }' \
     "    pub type ProductionDesktopRuntimeFactory = $production_factory;" \
     '    pub fn initialize_at() -> (&'\''static str, &'\''static str) {' \
     '        (' \
@@ -237,15 +262,19 @@ assert_rejected "$fixture" "tauri.conf.json version mismatch"
 
 fixture=$(copy_fixture missing-capture-marker)
 write_runtime_factory "$fixture" asr_only
-assert_rejected "$fixture" "production desktop runtime must select native capture"
+assert_rejected "$fixture" "production release wiring gate failed"
 
 fixture=$(copy_fixture missing-native-engine-marker)
 write_runtime_factory "$fixture" capture_only
-assert_rejected "$fixture" "production desktop runtime must select native ASR"
+assert_rejected "$fixture" "production release wiring gate failed"
 
 fixture=$(copy_fixture fail-closed-engine-selected)
 write_runtime_factory "$fixture" fail_closed
-assert_rejected "$fixture" "production desktop runtime must select native capture"
+assert_rejected "$fixture" "production release wiring gate failed"
+
+fixture=$(copy_fixture lying-native-flags)
+write_runtime_factory "$fixture" lying_flags
+assert_rejected "$fixture" "production release wiring gate failed"
 
 fixture=$(copy_fixture stale-lockfile)
 lock_before=$(cksum "$fixture/src-tauri/Cargo.lock")

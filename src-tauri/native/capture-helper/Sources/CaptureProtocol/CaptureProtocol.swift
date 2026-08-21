@@ -184,6 +184,7 @@ public enum CaptureProtocolError: Error, Equatable {
     case truncatedFrame
     case invalidHeader
     case unexpectedPayload
+    case invalidAudioPayload
     case helloRequired
     case helloReplay
     case unsupportedVersion
@@ -274,6 +275,11 @@ public enum CanonicalJSON {
 }
 
 public enum FrameCodec {
+    public struct PrefixDecodeResult: Sendable {
+        public let frame: CaptureFrame
+        public let consumedBytes: Int
+    }
+
     public static func encode(header: CaptureHeader, payload: Data) throws -> Data {
         let headerData = try CanonicalJSON.encode(header)
         guard headerData.count <= ProtocolLimits.maxHeaderBytes else {
@@ -286,10 +292,19 @@ public enum FrameCodec {
             if !payload.isEmpty { throw CaptureProtocolError.unexpectedPayload }
             return framed(header: headerData, payload: payload)
         }
+        try validateAudioPayload(header: header, payload: payload)
         return framed(header: headerData, payload: payload)
     }
 
     public static func decode(_ data: Data) throws -> CaptureFrame {
+        let decoded = try decodePrefix(data)
+        guard decoded.consumedBytes == data.count else {
+            throw CaptureProtocolError.invalidHeader
+        }
+        return decoded.frame
+    }
+
+    public static func decodePrefix(_ data: Data) throws -> PrefixDecodeResult {
         var offset = 0
         let headerLength = try readLength(data, offset: &offset)
         guard headerLength <= ProtocolLimits.maxHeaderBytes else {
@@ -307,8 +322,11 @@ public enum FrameCodec {
             throw CaptureProtocolError.unexpectedPayload
         }
         let payload = try read(data, count: payloadLength, offset: &offset)
-        guard offset == data.count else { throw CaptureProtocolError.invalidHeader }
-        return CaptureFrame(header: header, payload: payload)
+        try validateAudioPayload(header: header, payload: payload)
+        return PrefixDecodeResult(
+            frame: CaptureFrame(header: header, payload: payload),
+            consumedBytes: offset
+        )
     }
 
     private static func framed(header: Data, payload: Data) -> Data {
@@ -332,6 +350,18 @@ public enum FrameCodec {
         let result = data.subdata(in: offset ..< offset + count)
         offset += count
         return result
+    }
+
+    private static func validateAudioPayload(header: CaptureHeader, payload: Data) throws {
+        guard case let .audioFrame(frame) = header else { return }
+        let bytesPerSample: Int
+        switch frame.format {
+        case .s16Le: bytesPerSample = 2
+        }
+        let (stride, overflow) = bytesPerSample.multipliedReportingOverflow(by: Int(frame.channelCount))
+        guard !overflow, stride > 0, !payload.isEmpty, payload.count.isMultiple(of: stride) else {
+            throw CaptureProtocolError.invalidAudioPayload
+        }
     }
 }
 

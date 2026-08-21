@@ -17,10 +17,10 @@ fn hello() -> CaptureHeader {
 #[test]
 fn capture_protocol_test_round_trips_a_canonical_frame() {
     let bytes = encode_frame(&hello(), &[]).expect("encode hello");
-    let json = br#"{"helper_pid":4242,"launch_nonce":"0123456789abcdef","protocol_version":1,"supported_sources":["microphone","system_audio"],"type":"hello"}"#;
-    let mut expected = (json.len() as u32).to_be_bytes().to_vec();
-    expected.extend_from_slice(json);
-    expected.extend_from_slice(&0_u32.to_be_bytes());
+    let fixture = include_str!(
+        "../native/capture-helper/Tests/CaptureProtocolTests/Fixtures/canonical-hello-frame.hex"
+    );
+    let expected = hex::decode(fixture.trim()).expect("shared hello fixture is valid hex");
     assert_eq!(bytes, expected);
 
     let frame = FrameDecoder::default()
@@ -111,6 +111,26 @@ fn capture_protocol_test_rejects_invalid_source_and_pcm_format() {
     }
 
     assert_eq!(PcmFormat::S16Le.bytes_per_sample(), 2);
+}
+
+#[test]
+fn capture_protocol_test_rejects_empty_and_sample_misaligned_pcm() {
+    let header = CaptureHeader::audio_frame(Source::Microphone, 1, 0, 1, PcmFormat::S16Le, 2);
+    for payload in [&[][..], &[0, 1, 2][..]] {
+        assert_eq!(
+            encode_frame(&header, payload),
+            Err(CaptureProtocolError::InvalidAudioPayload)
+        );
+        let header_bytes = serde_json_canonicalizer::to_vec(&header).expect("audio header");
+        let mut bytes = (header_bytes.len() as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        assert!(matches!(
+            FrameDecoder::default().decode(&mut Cursor::new(bytes)),
+            Err(CaptureProtocolError::InvalidAudioPayload)
+        ));
+    }
 }
 
 #[test]

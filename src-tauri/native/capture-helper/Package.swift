@@ -10,6 +10,10 @@ let package = Package(
     ],
     targets: [
         .target(name: "CaptureProtocol"),
-        .testTarget(name: "CaptureProtocolTests", dependencies: ["CaptureProtocol"]),
+        .testTarget(
+            name: "CaptureProtocolTests",
+            dependencies: ["CaptureProtocol"],
+            resources: [.process("Fixtures")]
+        ),
     ]
 )

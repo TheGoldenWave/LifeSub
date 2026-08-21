@@ -13,11 +13,10 @@ private let hello = CaptureHeader.hello(
 
 @Test func canonicalHelloFrameMatchesRustBytes() throws {
     let encoded = try FrameCodec.encode(header: hello, payload: Data())
-    let json = #"{"helper_pid":4242,"launch_nonce":"0123456789abcdef","protocol_version":1,"supported_sources":["microphone","system_audio"],"type":"hello"}"#.data(using: .utf8)!
-    var expected = Data()
-    expected.appendUInt32BE(UInt32(json.count))
-    expected.append(json)
-    expected.appendUInt32BE(0)
+    let fixtureURL = try #require(
+        Bundle.module.url(forResource: "canonical-hello-frame", withExtension: "hex")
+    )
+    let expected = try Data(hex: String(contentsOf: fixtureURL, encoding: .utf8))
 
     #expect(encoded == expected)
     #expect(try FrameCodec.decode(encoded).header == hello)
@@ -103,7 +102,52 @@ private let hello = CaptureHeader.hello(
     }
 }
 
+@Test func rejectsEmptyAndSampleMisalignedPcm() throws {
+    let header = CaptureHeader.audioFrame(
+        AudioFrame(source: .microphone, sequence: 1, samplePosition: 0, hostTime: 1, format: .s16Le, channelCount: 2)
+    )
+    for payload in [Data(), Data([0, 1, 2])] {
+        #expect(throws: CaptureProtocolError.invalidAudioPayload) {
+            try FrameCodec.encode(header: header, payload: payload)
+        }
+        let headerData = try CanonicalJSON.encode(header)
+        var bytes = Data()
+        bytes.appendUInt32BE(UInt32(headerData.count))
+        bytes.append(headerData)
+        bytes.appendUInt32BE(UInt32(payload.count))
+        bytes.append(payload)
+        #expect(throws: CaptureProtocolError.invalidAudioPayload) {
+            try FrameCodec.decode(bytes)
+        }
+    }
+}
+
+@Test func prefixDecoderConsumesOneCoalescedSocketFrame() throws {
+    let first = try FrameCodec.encode(header: hello, payload: Data())
+    let second = try FrameCodec.encode(header: .shutdownAck, payload: Data())
+    let decoded = try FrameCodec.decodePrefix(first + second)
+
+    #expect(decoded.frame.header == hello)
+    #expect(decoded.consumedBytes == first.count)
+    #expect((first + second).dropFirst(decoded.consumedBytes) == second)
+}
+
 private extension Data {
+    init(hex: String) throws {
+        let characters = Array(hex.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard characters.count.isMultiple(of: 2) else {
+            throw CaptureProtocolError.invalidHeader
+        }
+        self.init()
+        reserveCapacity(characters.count / 2)
+        for index in stride(from: 0, to: characters.count, by: 2) {
+            guard let byte = UInt8(String(characters[index ... index + 1]), radix: 16) else {
+                throw CaptureProtocolError.invalidHeader
+            }
+            append(byte)
+        }
+    }
+
     mutating func appendUInt32BE(_ value: UInt32) {
         append(UInt8((value >> 24) & 0xff))
         append(UInt8((value >> 16) & 0xff))

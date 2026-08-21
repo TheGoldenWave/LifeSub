@@ -180,6 +180,7 @@ pub enum CaptureProtocolError {
     TruncatedFrame,
     InvalidHeader,
     UnexpectedPayload,
+    InvalidAudioPayload,
     HelloRequired,
     HelloReplay,
     UnsupportedVersion,
@@ -209,6 +210,7 @@ pub fn encode_frame(
     if !matches!(header, CaptureHeader::AudioFrame(_)) && !payload.is_empty() {
         return Err(CaptureProtocolError::UnexpectedPayload);
     }
+    validate_audio_payload(header, payload)?;
 
     let capacity = 8_usize
         .checked_add(header_bytes.len())
@@ -257,8 +259,28 @@ impl FrameDecoder {
         }
         let mut payload = vec![0_u8; payload_length];
         read_exact(reader, &mut payload)?;
+        validate_audio_payload(&header, &payload)?;
         Ok(CaptureFrame { header, payload })
     }
+}
+
+fn validate_audio_payload(
+    header: &CaptureHeader,
+    payload: &[u8],
+) -> Result<(), CaptureProtocolError> {
+    let CaptureHeader::AudioFrame(frame) = header else {
+        return Ok(());
+    };
+    let frame_bytes = frame
+        .format
+        .bytes_per_sample()
+        .checked_mul(usize::from(frame.channel_count))
+        .filter(|stride| *stride != 0)
+        .ok_or(CaptureProtocolError::InvalidAudioPayload)?;
+    if payload.is_empty() || !payload.len().is_multiple_of(frame_bytes) {
+        return Err(CaptureProtocolError::InvalidAudioPayload);
+    }
+    Ok(())
 }
 
 fn read_length<R: Read>(reader: &mut R) -> Result<usize, CaptureProtocolError> {

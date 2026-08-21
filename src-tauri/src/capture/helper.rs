@@ -268,7 +268,6 @@ fn launch(
         }
     };
 
-    let remaining = deadline.saturating_duration_since(Instant::now());
     if stream.set_nonblocking(false).is_err() {
         terminate_child(&mut child);
         return Err(HelperLaunchError::Io);
@@ -299,7 +298,8 @@ fn launch(
         let result = FrameDecoder::default().decode(&mut &reader_stream);
         let _ = sender.send(result);
     });
-    let frame = match receiver.recv_timeout(timeout.min(remaining).max(Duration::from_millis(1))) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let frame = match receiver.recv_timeout(remaining.max(Duration::from_millis(1))) {
         Ok(Ok(frame)) => frame,
         Ok(Err(super::protocol::CaptureProtocolError::FrameReadTimeout))
         | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {

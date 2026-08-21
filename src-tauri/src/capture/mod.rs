@@ -1,3 +1,5 @@
+pub mod protocol;
+
 #[cfg(feature = "desktop")]
 pub mod streaming;
 

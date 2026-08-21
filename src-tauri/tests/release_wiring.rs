@@ -1,3 +1,5 @@
+#![cfg(feature = "desktop")]
+
 use lifesub_lib::desktop_runtime::{
     NativeAsrDesktopRuntimeFactory, NativeCaptureDesktopRuntimeFactory,
     ProductionDesktopRuntimeFactory,

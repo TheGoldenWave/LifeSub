@@ -1,6 +1,5 @@
 pub mod api;
 pub mod asr;
-#[cfg(feature = "desktop")]
 pub mod capture;
 pub mod catalog;
 #[cfg(feature = "desktop")]
@@ -39,6 +38,8 @@ mod asr_service_test;
 mod asr_settings_test;
 #[cfg(test)]
 mod asr_vad_test;
+#[cfg(test)]
+mod capture_protocol_test;
 #[cfg(test)]
 mod catalog_migration_test;
 #[cfg(test)]

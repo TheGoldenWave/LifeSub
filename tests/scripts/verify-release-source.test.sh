@@ -43,8 +43,9 @@ write_valid_fixture() {
   fixture=$1
   mkdir -p \
     "$fixture/docs" \
-    "$fixture/src-tauri/src/capture" \
-    "$fixture/src-tauri/src/asr"
+    "$fixture/scripts" \
+    "$fixture/src-tauri/src" \
+    "$fixture/src-tauri/tests"
 
   printf '%s\n' \
     '{' \
@@ -54,7 +55,8 @@ write_valid_fixture() {
   printf '%s\n' \
     '[package]' \
     'name = "lifesub-fixture"' \
-    'version = "0.2.1"' >"$fixture/src-tauri/Cargo.toml"
+    'version = "0.2.1"' \
+    'edition = "2021"' >"$fixture/src-tauri/Cargo.toml"
   printf '%s\n' \
     '{' \
     '  "productName": "LifeSub Fixture",' \
@@ -68,14 +70,11 @@ write_valid_fixture() {
     "- Release source worktree: \`$fixture\`" \
     "- Release source branch: \`$FIXTURE_BRANCH\`" \
     "- Release version: \`$FIXTURE_VERSION\`" >"$fixture/docs/workspace-status.md"
-  printf '%s\n' \
-    'pub struct NativeCaptureCoordinator;' \
-    'pub type ProductionCaptureCoordinator = NativeCaptureCoordinator;' \
-    >"$fixture/src-tauri/src/capture/mod.rs"
-  printf '%s\n' \
-    'pub struct NativeAsrEngine;' \
-    'pub type ProductionAsrEngine = NativeAsrEngine;' \
-    >"$fixture/src-tauri/src/asr/worker.rs"
+  printf '%s\n' >"$fixture/src-tauri/src/lib.rs"
+  write_commands "$fixture" valid
+  cp "$VERIFIER" "$fixture/scripts/verify-release-source.sh"
+  cp "$PROJECT_ROOT/src-tauri/tests/release_wiring.rs" \
+    "$fixture/src-tauri/tests/release_wiring.rs"
 
   git -C "$fixture" init -q
   git -C "$fixture" config user.email "release-source-test@example.invalid"
@@ -83,6 +82,113 @@ write_valid_fixture() {
   git -C "$fixture" checkout -q -b "$FIXTURE_BRANCH"
   git -C "$fixture" add .
   git -C "$fixture" commit -qm "fixture"
+}
+
+write_commands() {
+  fixture=$1
+  mode=$2
+  case "$mode" in
+    valid)
+      printf '%s\n' \
+        'fn dead_code() {' \
+        '    // spawn_fail_closed_worker(runtime);' \
+        '    let _message = "run_unavailable_loop and StreamingCapture::default";' \
+        '}' \
+        'pub struct AppState;' \
+        'impl AppState {' \
+        '    fn initialize_at() {' \
+        '        let _capture = NativeCaptureCoordinator::new();' \
+        '        let _worker = spawn_native_worker();' \
+        '    }' \
+        '}' >"$fixture/src-tauri/src/commands.rs"
+      ;;
+    missing_capture)
+      printf '%s\n' \
+        'pub struct AppState;' \
+        'impl AppState {' \
+        '    fn initialize_at() {' \
+        '        let _worker = spawn_native_worker();' \
+        '    }' \
+        '}' >"$fixture/src-tauri/src/commands.rs"
+      ;;
+    missing_worker)
+      printf '%s\n' \
+        'pub struct AppState;' \
+        'impl AppState {' \
+        '    fn initialize_at() {' \
+        '        let _capture = NativeCaptureCoordinator::new();' \
+        '    }' \
+        '}' >"$fixture/src-tauri/src/commands.rs"
+      ;;
+    comment_only)
+      printf '%s\n' \
+        'pub struct AppState;' \
+        'impl AppState {' \
+        '    fn initialize_at() {' \
+        '        /* NativeCaptureCoordinator::new();' \
+        '           spawn_native_worker(); */' \
+        '    }' \
+        '}' >"$fixture/src-tauri/src/commands.rs"
+      ;;
+    dead_module)
+      printf '%s\n' \
+        'mod unused {' \
+        '    fn initialize_at() {' \
+        '        let _capture = NativeCaptureCoordinator::new();' \
+        '        let _worker = spawn_native_worker();' \
+        '    }' \
+        '}' \
+        '#[cfg(test)]' \
+        'mod tests {' \
+        '    fn native_wiring_test() {' \
+        '        let _capture = NativeCaptureCoordinator::new();' \
+        '        let _worker = spawn_native_worker();' \
+        '    }' \
+        '}' \
+        'pub struct AppState;' \
+        'impl AppState {' \
+        '    fn initialize_at() {}' \
+        '}' >"$fixture/src-tauri/src/commands.rs"
+      ;;
+    multiline_fail_closed)
+      printf '%s\n' \
+        'pub struct AppState;' \
+        'impl AppState {' \
+        '    fn initialize_at() {' \
+        '        let _capture = NativeCaptureCoordinator::new();' \
+        '        let _worker = spawn_native_worker();' \
+        '        crate::asr::worker::spawn_fail_closed_worker' \
+        '            (runtime);' \
+        '    }' \
+        '}' >"$fixture/src-tauri/src/commands.rs"
+      ;;
+    multiline_default_capture)
+      printf '%s\n' \
+        'pub struct AppState;' \
+        'impl AppState {' \
+        '    fn initialize_at() {' \
+        '        let _capture = NativeCaptureCoordinator::new();' \
+        '        let _worker = spawn_native_worker();' \
+        '        let _legacy = StreamingCapture' \
+        '            :: default' \
+        '            ();' \
+        '    }' \
+        '}' >"$fixture/src-tauri/src/commands.rs"
+      ;;
+    multiline_unavailable)
+      printf '%s\n' \
+        'pub struct AppState;' \
+        'impl AppState {' \
+        '    fn initialize_at() {' \
+        '        let _capture = NativeCaptureCoordinator::new();' \
+        '        let _worker = spawn_native_worker();' \
+        '        run_unavailable_loop' \
+        '            (app, stop, pause);' \
+        '    }' \
+        '}' >"$fixture/src-tauri/src/commands.rs"
+      ;;
+    *) fail "unknown commands fixture mode: $mode" ;;
+  esac
 }
 
 copy_fixture() {
@@ -98,15 +204,12 @@ copy_fixture() {
 run_verifier() {
   fixture=$1
   shift
-  env \
-    LIFESUB_RELEASE_ROOT="$fixture" \
-    "$@" \
-    sh "$VERIFIER" 2>&1
+  env "$@" sh "$fixture/scripts/verify-release-source.sh" 2>&1
 }
 
 run_with_declared_contract() {
   fixture=$1
-  env LIFESUB_RELEASE_ROOT="$fixture" sh "$VERIFIER" 2>&1
+  sh "$fixture/scripts/verify-release-source.sh" 2>&1
 }
 
 assert_rejected() {
@@ -121,6 +224,19 @@ assert_rejected() {
 
 write_valid_fixture "$TMP_ROOT/valid"
 
+evil_fixture=$(copy_fixture root-override-evil)
+trusted_fixture=$(copy_fixture root-override-trusted)
+mkdir -p "$trusted_fixture/scripts"
+cp "$VERIFIER" "$trusted_fixture/scripts/verify-release-source.sh"
+sed -i.bak "s|Release source worktree: \`$trusted_fixture\`|Release source worktree: \`$TMP_ROOT/declared-trusted-release\`|" \
+  "$trusted_fixture/docs/workspace-status.md"
+rm "$trusted_fixture/docs/workspace-status.md.bak"
+if output=$(env LIFESUB_RELEASE_ROOT="$evil_fixture" \
+  sh "$trusted_fixture/scripts/verify-release-source.sh" 2>&1); then
+  fail "release root override attack was accepted: $output"
+fi
+assert_contains "$output" "unexpected release worktree" "release root override attack rejection"
+
 fixture=$(copy_fixture env-override-attack)
 git -C "$fixture" checkout -q -b "evil/release"
 sed -i.bak "s|Release source worktree: \`$fixture\`|Release source worktree: \`$TMP_ROOT/trusted-release\`|" \
@@ -133,11 +249,10 @@ rm "$fixture/src-tauri/Cargo.toml.bak"
 sed -i.bak 's/0.2.1/9.9.9/' "$fixture/src-tauri/tauri.conf.json"
 rm "$fixture/src-tauri/tauri.conf.json.bak"
 if output=$(env \
-  LIFESUB_RELEASE_ROOT="$fixture" \
   LIFESUB_RELEASE_EXPECTED_WORKTREE="$fixture" \
   LIFESUB_RELEASE_EXPECTED_BRANCH="evil/release" \
   LIFESUB_RELEASE_EXPECTED_VERSION="9.9.9" \
-  sh "$VERIFIER" 2>&1); then
+  sh "$fixture/scripts/verify-release-source.sh" 2>&1); then
   fail "release identity override attack was accepted: $output"
 fi
 assert_contains "$output" "unexpected release worktree" "identity override attack rejection"
@@ -172,45 +287,39 @@ rm "$fixture/src-tauri/tauri.conf.json.bak"
 assert_rejected "$fixture" "tauri.conf.json version mismatch"
 
 fixture=$(copy_fixture missing-capture-marker)
-printf '%s\n' \
-  'pub struct UnavailableStreamingSource;' \
-  'pub type ProductionCaptureCoordinator = UnavailableStreamingSource;' \
-  >"$fixture/src-tauri/src/capture/mod.rs"
-assert_rejected "$fixture" "production capture marker missing"
+write_commands "$fixture" missing_capture
+assert_rejected "$fixture" "production release wiring gate failed"
 
 fixture=$(copy_fixture missing-native-engine-marker)
-printf '%s\n' \
-  'pub struct FailClosedEngine;' \
-  'pub type ProductionAsrEngine = FailClosedEngine;' \
-  >"$fixture/src-tauri/src/asr/worker.rs"
-assert_rejected "$fixture" "production native ASR marker missing"
+write_commands "$fixture" missing_worker
+assert_rejected "$fixture" "production release wiring gate failed"
 
 fixture=$(copy_fixture unavailable-capture-selected)
-printf '%s\n' \
-  'pub struct NativeCaptureCoordinator;' \
-  'fn start(app: AppHandle, stop_clone: Stop, pause_clone: Pause) {' \
-  '    run_unavailable_loop(app, stop_clone, pause_clone);' \
-  '}' >"$fixture/src-tauri/src/capture/mod.rs"
-assert_rejected "$fixture" "unavailable capture remains production-selected"
+write_commands "$fixture" multiline_unavailable
+assert_rejected "$fixture" "run_unavailable_loop"
 
 fixture=$(copy_fixture fail-closed-engine-selected)
-printf '%s\n' \
-  'pub struct NativeAsrEngine;' \
-  'fn initialize(runtime: Runtime) {' \
-  '    crate::asr::worker::spawn_fail_closed_worker(runtime);' \
-  '}' >"$fixture/src-tauri/src/asr/worker.rs"
-assert_rejected "$fixture" "fail-closed ASR engine remains production-selected"
+write_commands "$fixture" multiline_fail_closed
+assert_rejected "$fixture" "spawn_fail_closed_worker"
+
+fixture=$(copy_fixture default-capture-selected)
+write_commands "$fixture" multiline_default_capture
+assert_rejected "$fixture" "StreamingCapture::default"
+
+fixture=$(copy_fixture comment-only-markers)
+write_commands "$fixture" comment_only
+assert_rejected "$fixture" "must directly select NativeCaptureCoordinator"
+
+fixture=$(copy_fixture dead-module-markers)
+write_commands "$fixture" dead_module
+assert_rejected "$fixture" "must directly select NativeCaptureCoordinator"
 
 fixture=$(copy_fixture planned-audit)
-printf '%s\n' 'pub struct UnavailableStreamingSource;' \
-  >"$fixture/src-tauri/src/capture/mod.rs"
-printf '%s\n' 'pub struct FailClosedEngine;' \
-  >"$fixture/src-tauri/src/asr/worker.rs"
+write_commands "$fixture" multiline_fail_closed
 output=$(run_verifier "$fixture" LIFESUB_RELEASE_ALLOW_PLANNED=1) || \
   fail "planned development audit was rejected: $output"
 assert_contains "$output" "PLANNED AUDIT ONLY" "planned audit warning"
-assert_contains "$output" "production capture marker missing" "planned capture gap"
-assert_contains "$output" "production native ASR marker missing" "planned ASR gap"
+assert_contains "$output" "production release wiring gate failed" "planned wiring gap"
 assert_not_contains "$output" "release source: verified" "planned audit verification claim"
 
 fixture=$(copy_fixture planned-audit-with-markers)
@@ -221,14 +330,16 @@ assert_contains "$output" "not release-ready" "planned marker-complete release w
 assert_not_contains "$output" "release source: verified" "planned marker-complete verification claim"
 
 fixture=$(copy_fixture valid-release-source)
-printf '%s\n' "dirty" >"$fixture/dirty-file"
+mkdir -p "$fixture/untracked/nested"
+printf '%s\n' "one" >"$fixture/untracked/one"
+printf '%s\n' "two" >"$fixture/untracked/two"
+printf '%s\n' "three" >"$fixture/untracked/nested/three"
 output=$(run_with_declared_contract "$fixture") || fail "valid fixture was rejected: $output"
 assert_contains "$output" "worktree: $fixture" "absolute worktree report"
 assert_contains "$output" "branch: $FIXTURE_BRANCH" "branch report"
 assert_contains "$output" "HEAD:" "HEAD report"
-assert_contains "$output" "dirty count: 2" "dirty count report"
+assert_contains "$output" "dirty count: 4" "dirty count report"
 assert_contains "$output" "version: $FIXTURE_VERSION" "version report"
-assert_contains "$output" "capture marker: NativeCaptureCoordinator" "capture marker report"
-assert_contains "$output" "ASR marker: NativeAsrEngine" "ASR marker report"
+assert_contains "$output" "release wiring gate: passed" "release wiring gate report"
 
 printf 'PASS: release-source verifier contract\n'

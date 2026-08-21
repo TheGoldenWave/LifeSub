@@ -43,10 +43,7 @@ read_cargo_version() {
 }
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-DEFAULT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
-ROOT_INPUT=${LIFESUB_RELEASE_ROOT:-$DEFAULT_ROOT}
-[ -d "$ROOT_INPUT" ] || fail "release root does not exist: $ROOT_INPUT"
-ROOT=$(CDPATH= cd -- "$ROOT_INPUT" && pwd -P)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
 ALLOW_PLANNED=${LIFESUB_RELEASE_ALLOW_PLANNED:-0}
 PLANNED_GAPS=0
 
@@ -87,7 +84,7 @@ BRANCH=$(git -C "$ROOT" branch --show-current)
 [ "$BRANCH" = "$EXPECTED_BRANCH" ] || \
   fail "unexpected release branch: expected $EXPECTED_BRANCH, got ${BRANCH:-detached HEAD}"
 HEAD=$(git -C "$ROOT" rev-parse HEAD)
-DIRTY_COUNT=$(git -C "$ROOT" status --porcelain | wc -l | tr -d '[:space:]')
+DIRTY_COUNT=$(git -C "$ROOT" status --porcelain=v1 -uall | wc -l | tr -d '[:space:]')
 
 [ -f "$ROOT/package.json" ] || fail "missing package.json"
 [ -f "$ROOT/src-tauri/Cargo.toml" ] || fail "missing src-tauri/Cargo.toml"
@@ -104,20 +101,18 @@ TAURI_VERSION=$(read_json_version "$ROOT/src-tauri/tauri.conf.json")
 [ "$TAURI_VERSION" = "$EXPECTED_VERSION" ] || \
   fail "tauri.conf.json version mismatch: expected $EXPECTED_VERSION, got ${TAURI_VERSION:-missing}"
 
-SOURCE_ROOT="$ROOT/src-tauri/src"
-[ -d "$SOURCE_ROOT" ] || fail "missing Rust source tree: $SOURCE_ROOT"
-
-if ! grep -R -q -F 'NativeCaptureCoordinator' "$SOURCE_ROOT/capture" 2>/dev/null; then
-  report_gap "production capture marker missing: NativeCaptureCoordinator"
-fi
-if ! grep -R -q -F 'NativeAsrEngine' "$SOURCE_ROOT" 2>/dev/null; then
-  report_gap "production native ASR marker missing: NativeAsrEngine"
-fi
-if grep -R -q -F 'run_unavailable_loop(app, stop_clone, pause_clone);' "$SOURCE_ROOT/capture" 2>/dev/null; then
-  report_gap "unavailable capture remains production-selected"
-fi
-if grep -R -q -F 'crate::asr::worker::spawn_fail_closed_worker' "$SOURCE_ROOT" 2>/dev/null; then
-  report_gap "fail-closed ASR engine remains production-selected"
+if RELEASE_WIRING_OUTPUT=$(cargo test \
+  --manifest-path "$ROOT/src-tauri/Cargo.toml" \
+  --test release_wiring \
+  release_wiring_contract \
+  -- \
+  --ignored \
+  --exact 2>&1); then
+  RELEASE_WIRING_PASSED=1
+else
+  RELEASE_WIRING_PASSED=0
+  printf '%s\n' "$RELEASE_WIRING_OUTPUT" >&2
+  report_gap "production release wiring gate failed"
 fi
 
 printf 'worktree: %s\n' "$ROOT"
@@ -129,7 +124,7 @@ printf 'version: %s\n' "$EXPECTED_VERSION"
 if [ "$ALLOW_PLANNED" = "1" ]; then
   printf 'mode: PLANNED AUDIT ONLY (%s production gap(s)); not release-ready\n' "$PLANNED_GAPS"
 else
-  printf 'capture marker: NativeCaptureCoordinator\n'
-  printf 'ASR marker: NativeAsrEngine\n'
+  [ "$RELEASE_WIRING_PASSED" = "1" ] || fail "production release wiring gate failed"
+  printf 'release wiring gate: passed\n'
   printf 'release source: verified\n'
 fi

@@ -1,15 +1,22 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "LifeSub",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "identifier": "com.goldenwave.lifesub",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1421",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run build:capture-helper",
     "frontendDist": "../dist"
   },
   "app": {
+    "security": {
+      "csp": "default-src 'self' asset: tauri: ipc:; media-src 'self' asset:; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/audio/*", "$APPLOCALDATA/audio/*"]
+      }
+    },
     "windows": [
       {
         "title": "LifeSub · 旁白",
@@ -19,8 +26,16 @@
         "minHeight": 560,
         "resizable": true
       }
-    ],
-    "security": { "csp": null }
+    ]
   },
-  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.png"] }
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": ["binaries/lifesub-capture-helper"],
+    "icon": ["icons/icon.png"],
+    "macOS": {
+      "signingIdentity": "-",
+      "infoPlist": "Info.plist"
+    }
+  }
 }

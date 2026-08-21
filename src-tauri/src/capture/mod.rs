@@ -1,3 +1,5 @@
+pub mod helper;
+pub mod helper_auth;
 pub mod protocol;
 
 #[cfg(feature = "desktop")]

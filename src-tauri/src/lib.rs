@@ -39,6 +39,8 @@ mod asr_settings_test;
 #[cfg(test)]
 mod asr_vad_test;
 #[cfg(test)]
+mod capture_helper_test;
+#[cfg(test)]
 mod capture_protocol_test;
 #[cfg(test)]
 mod catalog_migration_test;

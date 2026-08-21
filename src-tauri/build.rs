@@ -27,8 +27,18 @@ fn main() {
     }
 
     if std::env::var_os("CARGO_FEATURE_DESKTOP").is_some() {
+        attest_capture_helper();
         tauri_build::build();
     }
+}
+
+fn attest_capture_helper() {
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries/lifesub-capture-helper-aarch64-apple-darwin");
+    symlink_metadata_regular_file(&helper, "capture helper sidecar");
+    let hash = sha256_file(&helper);
+    println!("cargo:rerun-if-changed={}", helper.display());
+    println!("cargo:rustc-env=LIFESUB_CAPTURE_HELPER_SHA256={hash}");
 }
 
 fn verify_native_runtime_attestation() {

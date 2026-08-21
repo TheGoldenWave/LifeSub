@@ -2,6 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
@@ -10,10 +11,20 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::helper_auth::ExecutableFileIdentity;
 use super::helper_auth::{HandshakeError, HandshakeVerifier, PeerIdentity};
 use super::protocol::{FrameDecoder, ProtocolValidator};
+use sha2::{Digest, Sha256};
 
 const BOOTSTRAP_FD: RawFd = 3;
+
+struct SensitiveNonce([u8; 32]);
+
+impl Drop for SensitiveNonce {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
 
 #[derive(Debug)]
 pub struct PrivateCaptureEndpoint {
@@ -117,6 +128,11 @@ struct LaunchSpec {
     require_signature: bool,
 }
 
+struct ValidatedExecutable {
+    path: PathBuf,
+    identity: ExecutableFileIdentity,
+}
+
 pub fn launch_packaged_helper(
     runtime_parent: &Path,
     timeout: Duration,
@@ -137,7 +153,7 @@ pub fn launch_packaged_helper(
 pub fn discover_helper_path() -> Result<PathBuf, HelperLaunchError> {
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os("LIFESUB_CAPTURE_HELPER_DEV_PATH") {
-        return validate_executable(Path::new(&path), false);
+        return Ok(validate_executable(Path::new(&path), false)?.path);
     }
     packaged_helper_path()
 }
@@ -170,7 +186,8 @@ fn launch(
     spec: LaunchSpec,
     nonce_override: Option<[u8; 32]>,
 ) -> Result<AuthenticatedHelper, HelperLaunchError> {
-    let executable = validate_executable(&spec.executable, spec.require_signature)?;
+    let validated = validate_executable(&spec.executable, spec.require_signature)?;
+    let executable = validated.path;
     let endpoint =
         PrivateCaptureEndpoint::bind(runtime_parent).map_err(|_| HelperLaunchError::Io)?;
     endpoint
@@ -211,18 +228,17 @@ fn launch(
     };
     close_fd(read_fd);
 
-    let mut nonce = if let Some(value) = nonce_override {
+    let nonce = SensitiveNonce(if let Some(value) = nonce_override {
         value
     } else {
         let mut value = [0_u8; 32];
         unsafe { libc::arc4random_buf(value.as_mut_ptr().cast(), value.len()) };
         value
-    };
+    });
     if unsafe { fs::File::from_raw_fd(write_fd) }
-        .write_all(&nonce)
+        .write_all(&nonce.0)
         .is_err()
     {
-        nonce.fill(0);
         terminate_child(&mut child);
         return Err(HelperLaunchError::Io);
     }
@@ -237,18 +253,15 @@ fn launch(
                     .map_err(|_| HelperLaunchError::Io)?
                     .is_some()
                 {
-                    nonce.fill(0);
                     return Err(HelperLaunchError::HelperExitedEarly);
                 }
                 if Instant::now() >= deadline {
-                    nonce.fill(0);
                     terminate_child(&mut child);
                     return Err(HelperLaunchError::HandshakeTimeout);
                 }
                 thread::sleep(Duration::from_millis(5));
             }
             Err(_) => {
-                nonce.fill(0);
                 terminate_child(&mut child);
                 return Err(HelperLaunchError::Io);
             }
@@ -256,11 +269,7 @@ fn launch(
     };
 
     let remaining = deadline.saturating_duration_since(Instant::now());
-    if stream.set_nonblocking(false).is_err()
-        || stream
-            .set_read_timeout(Some(remaining.max(Duration::from_millis(1))))
-            .is_err()
-    {
+    if stream.set_nonblocking(false).is_err() {
         terminate_child(&mut child);
         return Err(HelperLaunchError::Io);
     }
@@ -271,16 +280,41 @@ fn launch(
             return Err(error);
         }
     };
+    if Instant::now() >= deadline {
+        terminate_child(&mut child);
+        return Err(HelperLaunchError::HandshakeTimeout);
+    }
     let mut verifier =
-        HandshakeVerifier::new(nonce, child.id(), unsafe { libc::getuid() }, &executable);
-    nonce.fill(0);
-    let frame = match FrameDecoder::default().decode(&mut &stream) {
-        Ok(frame) => frame,
+        HandshakeVerifier::new(nonce.0, child.id(), unsafe { libc::getuid() }, &executable)
+            .with_file_identity(validated.identity);
+    let reader_stream = match stream.try_clone() {
+        Ok(stream) => stream,
         Err(_) => {
             terminate_child(&mut child);
+            return Err(HelperLaunchError::Io);
+        }
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let result = FrameDecoder::default().decode(&mut &reader_stream);
+        let _ = sender.send(result);
+    });
+    let frame = match receiver.recv_timeout(timeout.min(remaining).max(Duration::from_millis(1))) {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(super::protocol::CaptureProtocolError::FrameReadTimeout))
+        | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            terminate_child(&mut child);
+            let _ = reader.join();
+            return Err(HelperLaunchError::HandshakeTimeout);
+        }
+        Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            terminate_child(&mut child);
+            let _ = reader.join();
             return Err(HelperLaunchError::MalformedHello);
         }
     };
+    let _ = reader.join();
     if let Err(error) = verifier.verify(&peer, &frame.header) {
         terminate_child(&mut child);
         return Err(HelperLaunchError::Handshake(error));
@@ -290,10 +324,6 @@ fn launch(
         terminate_child(&mut child);
         return Err(HelperLaunchError::MalformedHello);
     }
-    if stream.set_read_timeout(None).is_err() {
-        terminate_child(&mut child);
-        return Err(HelperLaunchError::Io);
-    }
     Ok(AuthenticatedHelper {
         child,
         stream,
@@ -302,7 +332,10 @@ fn launch(
     })
 }
 
-fn validate_executable(path: &Path, require_signature: bool) -> Result<PathBuf, HelperLaunchError> {
+fn validate_executable(
+    path: &Path,
+    require_signature: bool,
+) -> Result<ValidatedExecutable, HelperLaunchError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| HelperLaunchError::InvalidExecutable)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(HelperLaunchError::InvalidExecutable);
@@ -310,6 +343,7 @@ fn validate_executable(path: &Path, require_signature: bool) -> Result<PathBuf, 
     let canonical = path
         .canonicalize()
         .map_err(|_| HelperLaunchError::InvalidExecutable)?;
+    let identity = executable_file_identity(&canonical)?;
     if require_signature {
         let output = Command::new("/usr/bin/codesign")
             .args([OsStr::new("--verify"), OsStr::new("--strict")])
@@ -333,8 +367,16 @@ fn validate_executable(path: &Path, require_signature: bool) -> Result<PathBuf, 
         {
             return Err(HelperLaunchError::SignatureInvalid);
         }
+        let expected_hash = option_env!("LIFESUB_CAPTURE_HELPER_SHA256")
+            .ok_or(HelperLaunchError::SignatureInvalid)?;
+        if identity.sha256 != expected_hash {
+            return Err(HelperLaunchError::SignatureInvalid);
+        }
     }
-    Ok(canonical)
+    Ok(ValidatedExecutable {
+        path: canonical,
+        identity,
+    })
 }
 
 fn packaged_helper_path() -> Result<PathBuf, HelperLaunchError> {
@@ -342,7 +384,7 @@ fn packaged_helper_path() -> Result<PathBuf, HelperLaunchError> {
     let directory = executable
         .parent()
         .ok_or(HelperLaunchError::InvalidExecutable)?;
-    validate_executable(&directory.join("lifesub-capture-helper"), true)
+    Ok(validate_executable(&directory.join("lifesub-capture-helper"), true)?.path)
 }
 
 fn create_bootstrap_pipe() -> Result<(RawFd, RawFd), HelperLaunchError> {
@@ -381,10 +423,32 @@ fn peer_identity(stream: &UnixStream) -> Result<PeerIdentity, HelperLaunchError>
     {
         return Err(HelperLaunchError::PeerIdentityUnavailable);
     }
+    let executable = executable_for_pid(pid)?;
     Ok(PeerIdentity {
         uid,
         pid: pid as u32,
-        executable: executable_for_pid(pid)?,
+        file_identity: executable_file_identity(&executable)?,
+        executable,
+    })
+}
+
+fn executable_file_identity(path: &Path) -> Result<ExecutableFileIdentity, HelperLaunchError> {
+    let metadata = fs::metadata(path).map_err(|_| HelperLaunchError::PeerIdentityUnavailable)?;
+    let mut file = fs::File::open(path).map_err(|_| HelperLaunchError::PeerIdentityUnavailable)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = std::io::Read::read(&mut file, &mut buffer)
+            .map_err(|_| HelperLaunchError::PeerIdentityUnavailable)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(ExecutableFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        sha256: format!("{:x}", hasher.finalize()),
     })
 }
 

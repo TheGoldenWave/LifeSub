@@ -178,6 +178,7 @@ pub enum CaptureProtocolError {
     HeaderTooLarge,
     PayloadTooLarge,
     TruncatedFrame,
+    FrameReadTimeout,
     InvalidHeader,
     UnexpectedPayload,
     InvalidAudioPayload,
@@ -290,9 +291,19 @@ fn read_length<R: Read>(reader: &mut R) -> Result<usize, CaptureProtocolError> {
 }
 
 fn read_exact<R: Read>(reader: &mut R, bytes: &mut [u8]) -> Result<(), CaptureProtocolError> {
-    reader
-        .read_exact(bytes)
-        .map_err(|_| CaptureProtocolError::TruncatedFrame)
+    reader.read_exact(bytes).map_err(|error| {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) || error
+            .raw_os_error()
+            .is_some_and(|code| code == libc::EAGAIN || code == libc::ETIMEDOUT)
+        {
+            CaptureProtocolError::FrameReadTimeout
+        } else {
+            CaptureProtocolError::TruncatedFrame
+        }
+    })
 }
 
 #[derive(Debug, Default)]

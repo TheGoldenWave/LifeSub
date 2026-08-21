@@ -11,7 +11,9 @@ use std::time::Duration;
 use crate::capture::helper::{
     AuthenticatedHelper, HelperLaunchError, PrivateCaptureEndpoint, launch_test_helper,
 };
-use crate::capture::helper_auth::{HandshakeError, HandshakeVerifier, PeerIdentity};
+use crate::capture::helper_auth::{
+    ExecutableFileIdentity, HandshakeError, HandshakeVerifier, PeerIdentity,
+};
 use crate::capture::protocol::{CaptureHeader, Hello, Source};
 
 const NONCE: [u8; 32] = [0x5a; 32];
@@ -30,6 +32,11 @@ fn identity(pid: u32, executable: PathBuf) -> PeerIdentity {
         uid: unsafe { libc::getuid() },
         pid,
         executable,
+        file_identity: ExecutableFileIdentity {
+            device: 1,
+            inode: 2,
+            sha256: "11".repeat(32),
+        },
     }
 }
 
@@ -84,6 +91,7 @@ fn capture_helper_test_rejects_identity_and_nonce_mismatches() {
                 uid: unsafe { libc::getuid() } + 1,
                 pid,
                 executable: executable.clone(),
+                file_identity: identity(pid, executable.clone()).file_identity,
             },
             hello(pid),
             HandshakeError::UidMismatch,
@@ -115,6 +123,22 @@ fn capture_helper_test_rejects_identity_and_nonce_mismatches() {
             HandshakeVerifier::new(NONCE, pid, unsafe { libc::getuid() }, expected_executable);
         assert_eq!(verifier.verify(&peer, &header), Err(expected));
     }
+}
+
+#[test]
+fn capture_helper_test_rejects_same_path_executable_swap() {
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let pid = std::process::id();
+    let expected = identity(pid, executable.clone()).file_identity;
+    let mut peer = identity(pid, executable.clone());
+    peer.file_identity.inode += 1;
+    peer.file_identity.sha256 = "22".repeat(32);
+    let mut verifier = HandshakeVerifier::new(NONCE, pid, unsafe { libc::getuid() }, executable)
+        .with_file_identity(expected);
+    assert_eq!(
+        verifier.verify(&peer, &hello(pid)),
+        Err(HandshakeError::ExecutableMismatch)
+    );
 }
 
 #[test]
@@ -154,6 +178,12 @@ fn capture_helper_test_child_entrypoint() {
     }
     let socket = std::env::var_os("LIFESUB_CAPTURE_SOCKET").unwrap();
     let mut stream = UnixStream::connect(socket).unwrap();
+    if role == "connected_timeout" {
+        stream.write_all(&[0, 0, 0, 10, b'{']).unwrap();
+        nonce.fill(0);
+        std::thread::sleep(Duration::from_secs(2));
+        return;
+    }
     if role == "malformed" {
         stream
             .write_all(&[0, 0, 0, 2, b'{', b'}', 0, 0, 0, 0])
@@ -194,8 +224,8 @@ fn launch_child(role: &str, timeout: Duration) -> Result<AuthenticatedHelper, He
         &parent,
         executable,
         vec![
-            OsString::from("--exact"),
             OsString::from("capture_helper_test::capture_helper_test_child_entrypoint"),
+            OsString::from("--exact"),
             OsString::from("--nocapture"),
         ],
         vec![(
@@ -209,7 +239,7 @@ fn launch_child(role: &str, timeout: Duration) -> Result<AuthenticatedHelper, He
 
 #[test]
 fn capture_helper_test_real_child_authenticates_without_nonce_leaks() {
-    let helper = launch_child("success", Duration::from_secs(2)).unwrap();
+    let helper = launch_child("success", Duration::from_secs(10)).unwrap();
     assert_ne!(helper.child_id(), 0);
     let nonce = hex::encode(NONCE);
     let process = Command::new("/bin/ps")
@@ -240,21 +270,40 @@ fn capture_helper_test_real_child_authenticates_without_nonce_leaks() {
 
 #[test]
 fn capture_helper_test_real_child_rejects_bad_handshakes_and_lifecycle_failures() {
-    for (role, expected) in [
+    for (role, timeout, expected) in [
         (
             "pid_mismatch",
+            Duration::from_secs(10),
             HelperLaunchError::Handshake(HandshakeError::PidMismatch),
         ),
         (
             "nonce_mismatch",
+            Duration::from_secs(10),
             HelperLaunchError::Handshake(HandshakeError::NonceMismatch),
         ),
-        ("malformed", HelperLaunchError::MalformedHello),
-        ("early_exit", HelperLaunchError::HelperExitedEarly),
-        ("timeout", HelperLaunchError::HandshakeTimeout),
+        (
+            "malformed",
+            Duration::from_secs(10),
+            HelperLaunchError::MalformedHello,
+        ),
+        (
+            "early_exit",
+            Duration::from_secs(10),
+            HelperLaunchError::HelperExitedEarly,
+        ),
+        (
+            "timeout",
+            Duration::from_millis(150),
+            HelperLaunchError::HandshakeTimeout,
+        ),
+        (
+            "connected_timeout",
+            Duration::from_millis(150),
+            HelperLaunchError::HandshakeTimeout,
+        ),
     ] {
         assert_eq!(
-            launch_child(role, Duration::from_millis(150)).unwrap_err(),
+            launch_child(role, timeout).unwrap_err(),
             expected,
             "role={role}"
         );
@@ -263,7 +312,7 @@ fn capture_helper_test_real_child_rejects_bad_handshakes_and_lifecycle_failures(
 
 #[test]
 fn capture_helper_test_real_child_replay_is_rejected_after_handshake() {
-    let mut helper = launch_child("replay", Duration::from_secs(2)).unwrap();
+    let mut helper = launch_child("replay", Duration::from_secs(10)).unwrap();
     let stream = helper.stream().try_clone().unwrap();
     let frame = crate::capture::protocol::FrameDecoder::default()
         .decode(&mut &stream)

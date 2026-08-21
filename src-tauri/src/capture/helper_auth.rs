@@ -8,6 +8,14 @@ pub struct PeerIdentity {
     pub uid: u32,
     pub pid: u32,
     pub executable: PathBuf,
+    pub file_identity: ExecutableFileIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutableFileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub sha256: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +35,7 @@ pub struct HandshakeVerifier {
     expected_pid: u32,
     expected_uid: u32,
     expected_executable: PathBuf,
+    expected_file_identity: Option<ExecutableFileIdentity>,
     consumed: bool,
 }
 
@@ -42,8 +51,14 @@ impl HandshakeVerifier {
             expected_pid,
             expected_uid,
             expected_executable: canonical_or_original(expected_executable.as_ref()),
+            expected_file_identity: None,
             consumed: false,
         }
+    }
+
+    pub fn with_file_identity(mut self, identity: ExecutableFileIdentity) -> Self {
+        self.expected_file_identity = Some(identity);
+        self
     }
 
     pub fn verify(
@@ -61,6 +76,13 @@ impl HandshakeVerifier {
             return Err(HandshakeError::PidMismatch);
         }
         if canonical_or_original(&peer.executable) != self.expected_executable {
+            return Err(HandshakeError::ExecutableMismatch);
+        }
+        if self
+            .expected_file_identity
+            .as_ref()
+            .is_some_and(|expected| expected != &peer.file_identity)
+        {
             return Err(HandshakeError::ExecutableMismatch);
         }
         let CaptureHeader::Hello(hello) = header else {
@@ -103,6 +125,7 @@ impl fmt::Debug for HandshakeVerifier {
             .field("expected_pid", &self.expected_pid)
             .field("expected_uid", &self.expected_uid)
             .field("expected_executable", &self.expected_executable)
+            .field("expected_file_identity", &self.expected_file_identity)
             .field("consumed", &self.consumed)
             .finish()
     }

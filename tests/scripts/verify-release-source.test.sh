@@ -29,6 +29,16 @@ assert_contains() {
   esac
 }
 
+assert_not_contains() {
+  haystack=$1
+  needle=$2
+  description=$3
+  case "$haystack" in
+    *"$needle"*) fail "$description (unexpected: $needle)" ;;
+    *) ;;
+  esac
+}
+
 write_valid_fixture() {
   fixture=$1
   mkdir -p \
@@ -90,9 +100,6 @@ run_verifier() {
   shift
   env \
     LIFESUB_RELEASE_ROOT="$fixture" \
-    LIFESUB_RELEASE_EXPECTED_WORKTREE="$fixture" \
-    LIFESUB_RELEASE_EXPECTED_BRANCH="$FIXTURE_BRANCH" \
-    LIFESUB_RELEASE_EXPECTED_VERSION="$FIXTURE_VERSION" \
     "$@" \
     sh "$VERIFIER" 2>&1
 }
@@ -114,20 +121,36 @@ assert_rejected() {
 
 write_valid_fixture "$TMP_ROOT/valid"
 
-fixture=$(copy_fixture unexpected-worktree)
+fixture=$(copy_fixture env-override-attack)
+git -C "$fixture" checkout -q -b "evil/release"
+sed -i.bak "s|Release source worktree: \`$fixture\`|Release source worktree: \`$TMP_ROOT/trusted-release\`|" \
+  "$fixture/docs/workspace-status.md"
+rm "$fixture/docs/workspace-status.md.bak"
+sed -i.bak 's/0.2.1/9.9.9/' "$fixture/package.json"
+rm "$fixture/package.json.bak"
+sed -i.bak 's/0.2.1/9.9.9/' "$fixture/src-tauri/Cargo.toml"
+rm "$fixture/src-tauri/Cargo.toml.bak"
+sed -i.bak 's/0.2.1/9.9.9/' "$fixture/src-tauri/tauri.conf.json"
+rm "$fixture/src-tauri/tauri.conf.json.bak"
 if output=$(env \
   LIFESUB_RELEASE_ROOT="$fixture" \
-  LIFESUB_RELEASE_EXPECTED_WORKTREE="$TMP_ROOT/not-the-release-source" \
-  LIFESUB_RELEASE_EXPECTED_BRANCH="$FIXTURE_BRANCH" \
-  LIFESUB_RELEASE_EXPECTED_VERSION="$FIXTURE_VERSION" \
+  LIFESUB_RELEASE_EXPECTED_WORKTREE="$fixture" \
+  LIFESUB_RELEASE_EXPECTED_BRANCH="evil/release" \
+  LIFESUB_RELEASE_EXPECTED_VERSION="9.9.9" \
   sh "$VERIFIER" 2>&1); then
-  fail "unexpected worktree identity was accepted"
+  fail "release identity override attack was accepted: $output"
 fi
-assert_contains "$output" "unexpected release worktree" "worktree identity rejection"
+assert_contains "$output" "unexpected release worktree" "identity override attack rejection"
+
+fixture=$(copy_fixture unexpected-worktree)
+sed -i.bak "s|Release source worktree: \`$fixture\`|Release source worktree: \`$TMP_ROOT/not-the-release-source\`|" \
+  "$fixture/docs/workspace-status.md"
+rm "$fixture/docs/workspace-status.md.bak"
+assert_rejected "$fixture" "unexpected release worktree"
 
 fixture=$(copy_fixture unexpected-branch)
-assert_rejected "$fixture" "unexpected release branch" \
-  LIFESUB_RELEASE_EXPECTED_BRANCH="codex/not-the-release-branch"
+git -C "$fixture" checkout -q -b "codex/not-the-release-branch"
+assert_rejected "$fixture" "unexpected release branch"
 
 fixture=$(copy_fixture missing-workspace-status)
 rm "$fixture/docs/workspace-status.md"
@@ -188,6 +211,14 @@ output=$(run_verifier "$fixture" LIFESUB_RELEASE_ALLOW_PLANNED=1) || \
 assert_contains "$output" "PLANNED AUDIT ONLY" "planned audit warning"
 assert_contains "$output" "production capture marker missing" "planned capture gap"
 assert_contains "$output" "production native ASR marker missing" "planned ASR gap"
+assert_not_contains "$output" "release source: verified" "planned audit verification claim"
+
+fixture=$(copy_fixture planned-audit-with-markers)
+output=$(run_verifier "$fixture" LIFESUB_RELEASE_ALLOW_PLANNED=1) || \
+  fail "planned marker-complete audit was rejected: $output"
+assert_contains "$output" "PLANNED AUDIT ONLY" "planned marker-complete warning"
+assert_contains "$output" "not release-ready" "planned marker-complete release warning"
+assert_not_contains "$output" "release source: verified" "planned marker-complete verification claim"
 
 fixture=$(copy_fixture valid-release-source)
 printf '%s\n' "dirty" >"$fixture/dirty-file"

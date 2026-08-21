@@ -63,9 +63,9 @@ declared_value() {
   sed -n "s/^- $label: \`\([^\`]*\)\`.*/\1/p" "$WORKSPACE_STATUS" | head -n 1
 }
 
-EXPECTED_WORKTREE=${LIFESUB_RELEASE_EXPECTED_WORKTREE:-$(declared_value "Release source worktree")}
-EXPECTED_BRANCH=${LIFESUB_RELEASE_EXPECTED_BRANCH:-$(declared_value "Release source branch")}
-EXPECTED_VERSION=${LIFESUB_RELEASE_EXPECTED_VERSION:-$(declared_value "Release version")}
+EXPECTED_WORKTREE=$(declared_value "Release source worktree")
+EXPECTED_BRANCH=$(declared_value "Release source branch")
+EXPECTED_VERSION=$(declared_value "Release version")
 
 [ -n "$EXPECTED_WORKTREE" ] || fail "workspace status does not declare Release source worktree"
 [ -n "$EXPECTED_BRANCH" ] || fail "workspace status does not declare Release source branch"
@@ -126,7 +126,7 @@ printf 'HEAD: %s\n' "$HEAD"
 printf 'dirty count: %s\n' "$DIRTY_COUNT"
 printf 'version: %s\n' "$EXPECTED_VERSION"
 
-if [ "$PLANNED_GAPS" -gt 0 ]; then
+if [ "$ALLOW_PLANNED" = "1" ]; then
   printf 'mode: PLANNED AUDIT ONLY (%s production gap(s)); not release-ready\n' "$PLANNED_GAPS"
 else
   printf 'capture marker: NativeCaptureCoordinator\n'

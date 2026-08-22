@@ -54,10 +54,10 @@ LifeSub 由 goldenwave 与 Malow 产品协同打造，可作为 Malow 生态插�
 
 ### 当前质量门禁
 
-- Rust Tier 2：`484 passed / 0 failed / 6 ignored`，`cargo fmt`、Clippy `-D warnings`、`git diff --check` 通过。
-- 前端：Vitest `69/69`、Playwright `12/12`、TypeScript/Vite 生产构建通过。
-- 安装版：`/Applications/LifeSub.app` 已启动验证；DMG 位于 `src-tauri/target/release/bundle/dmg/LifeSub_0.1.0_aarch64.dmg`。
-- 当前 bundle 版本仍为 `0.1.0`；“V0.2”是功能阶段名称，正式版本号升级应在真实采集与 native executor 验收后执行。
+- Rust Tier 2：`504 passed / 0 failed / 7 ignored`，`cargo fmt`、Clippy `-D warnings`、`git diff --check` 通过。
+- 前端：Vitest `69/69`、Playwright `32/32`、TypeScript/Vite 生产构建通过。
+- 源码版本：`package.json`、Cargo 与 Tauri bundle 统一为 `0.2.1`。
+- 当前 `/Applications/LifeSub.app` 和历史 `0.1.0` DMG 早于本轮主工作树合并，只作为历史运行记录，不是当前源码的发布证据；Tasks 7--12 与硬件验收通过前不生成或安装新的发布候选。
 
 ## 生态关系
 

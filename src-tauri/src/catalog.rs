@@ -2,7 +2,7 @@ pub mod migrations;
 
 use std::sync::Mutex;
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params, TransactionBehavior};
 
 use crate::asr::settings::AsrProviderKind;
@@ -147,6 +147,5 @@ fn parse_time_opt(value: &str) -> Option<DateTime<Utc>> { DateTime::parse_from_r
 fn integrity_name(state: ChunkIntegrityState) -> &'static str { match state { ChunkIntegrityState::Available => "available", ChunkIntegrityState::Corrupted => "corrupted", ChunkIntegrityState::Missing => "missing" } }
 fn parse_integrity(value: &str) -> ChunkIntegrityState { match value { "corrupted" => ChunkIntegrityState::Corrupted, "missing" => ChunkIntegrityState::Missing, _ => ChunkIntegrityState::Available } }
 fn provider_name(provider: AsrProviderKind) -> &'static str { match provider { AsrProviderKind::SenseVoice => "sense_voice", AsrProviderKind::Whisper => "whisper" } }
-fn parse_provider(value: &str) -> AsrProviderKind { match value { "whisper" => AsrProviderKind::Whisper, _ => AsrProviderKind::SenseVoice } }
 fn job_state_name(state: AsrJobState) -> &'static str { match state { AsrJobState::Queued => "queued", AsrJobState::BlockedModel => "blocked_model", AsrJobState::Preparing => "preparing", AsrJobState::Transcribing => "transcribing", AsrJobState::Succeeded => "succeeded", AsrJobState::Failed => "failed", AsrJobState::Cancelled => "cancelled" } }
 fn parse_job_state(value: &str) -> AsrJobState { match value { "blocked_model" => AsrJobState::BlockedModel, "preparing" => AsrJobState::Preparing, "transcribing" => AsrJobState::Transcribing, "succeeded" => AsrJobState::Succeeded, "failed" => AsrJobState::Failed, "cancelled" => AsrJobState::Cancelled, _ => AsrJobState::Queued } }

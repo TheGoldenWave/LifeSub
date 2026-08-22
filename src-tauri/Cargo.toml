@@ -1,6 +1,6 @@
 [package]
 name = "lifesub"
-version = "0.1.0"
+version = "0.2.1"
 description = "Local-first audio and transcript evidence manager"
 edition = "2024"
 build = "build.rs"

@@ -397,6 +397,52 @@ fn already_migrated_v2_database_is_accepted() {
 // ── Unknown schema is rejected ─────────────────────────────────────────
 
 #[test]
+fn compatible_newer_database_is_accepted_without_downgrade() {
+    let conn = create_v0_1_db_with_data();
+    crate::catalog::migrations::migrate(&conn).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE future_feature_data (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO future_feature_data(id, value) VALUES('future_1', 'preserve me');
+         PRAGMA user_version = 5;",
+    )
+    .unwrap();
+
+    assert_eq!(
+        classify_schema(&conn).unwrap(),
+        SchemaKind::CompatibleNewer
+    );
+
+    crate::catalog::migrations::migrate(&conn).unwrap();
+
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 5);
+
+    let value: String = conn
+        .query_row(
+            "SELECT value FROM future_feature_data WHERE id = 'future_1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(value, "preserve me");
+}
+
+#[test]
+fn newer_database_missing_required_v2_schema_is_rejected() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE future_feature_data (id TEXT PRIMARY KEY);
+         PRAGMA user_version = 5;",
+    )
+    .unwrap();
+
+    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::Unknown);
+    assert!(crate::catalog::migrations::migrate(&conn).is_err());
+}
+
+#[test]
 fn unknown_schema_migration_is_rejected() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(

@@ -9,6 +9,8 @@
 > 在执行任何任务前，你**必须**首先在 `docs/prd/` 目录下搜索所有 `.artifacts/process.md` 文件，并兼容读取遗留的 `process.txt`，以恢复上次会话的上下文状态。
 > （Claude Code 用户：此操作已由 SessionStart Hook 自动完成。Codex 用户：请手动执行。）
 
+> **构建与安装附加检查：** 在判断“最新版本”或构建/覆盖 `/Applications/LifeSub.app` 前，必须读取 `docs/workspace-status.md`，核对所有 worktree 的分支、commit、dirty 状态和生产接线。禁止仅凭 `main`、版本号或现有 bundle 判断发布源。
+
 ---
 
 ## 📍 全局寻址地图 (Context Routing)

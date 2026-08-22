@@ -34,6 +34,17 @@ yellow() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 
 die() { red "FATAL: $*"; exit 1; }
 
+require_passing_report() {
+  local report="$1"
+  local scenario="$2"
+  if [ ! -f "$report" ]; then
+    die "$scenario did not create its acceptance report"
+  fi
+  if ! python3 -c "import json; r=json.load(open('$report')); raise SystemExit(0 if r.get('passed') else 1)"; then
+    die "$scenario report did not pass"
+  fi
+}
+
 # Compute a deterministic hash of the scoped source paths.
 # Only the exact paths listed in desktop-asr-scope.txt are included.
 hash_scoped_paths() {
@@ -83,9 +94,7 @@ verify_existing() {
 
   local report="$REPORT_DIR/acceptance-real-asr-heartbeat.json"
   if [ ! -f "$report" ]; then
-    yellow "  no existing acceptance report at $report"
-    yellow "  --verify-existing is informational only; run the harness first"
-    exit 0
+    die "no existing acceptance report at $report; run the harness first"
   fi
 
   green "  found: $report"
@@ -109,7 +118,7 @@ print(1 if r.get('passed') else 0)
 " 2>/dev/null || echo "0")"
 
   if [ "$scenario_count" -eq 0 ]; then
-    yellow "  report exists but scenario did not pass"
+    die "report exists but scenario did not pass"
   else
     green "  report verified: scenario passed"
   fi
@@ -147,7 +156,7 @@ run_target_scenarios() {
   # 4. Build the app
   green "4. building LifeSub desktop app..."
   cd "$PROJECT_DIR"
-  npm run tauri -- build --features desktop 2>&1 | tail -5
+  npm run tauri -- build --features desktop --bundles app 2>&1 | tail -5
   green "   build complete"
 
   # 5. Create isolated HOME for acceptance scenarios
@@ -179,51 +188,48 @@ run_target_scenarios() {
   HOME="$isolated_home" \
   LIFESUB_ACCEPTANCE_DIR="$acceptance_dir" \
   LIFESUB_ACCEPTANCE_DATA_DIR="$isolated_home/Library/Application Support/com.goldenwave.lifesub" \
-  "$app_binary" --acceptance-scenario real-asr-heartbeat 2>&1 || {
-    yellow "   real-asr-heartbeat: FAILED (may need real model)"
-  }
-  if [ -f "$acceptance_dir/acceptance-real-asr-heartbeat.json" ]; then
-    cp "$acceptance_dir/acceptance-real-asr-heartbeat.json" "$REPORT_DIR/"
-    green "   report saved to $REPORT_DIR/acceptance-real-asr-heartbeat.json"
-  fi
+  "$app_binary" --acceptance-scenario real-asr-heartbeat 2>&1 || \
+    die "real-asr-heartbeat failed"
+  local heartbeat_report="$acceptance_dir/acceptance-real-asr-heartbeat.json"
+  require_passing_report "$heartbeat_report" "real-asr-heartbeat"
+  cp "$heartbeat_report" "$REPORT_DIR/"
+  green "   report saved to $REPORT_DIR/acceptance-real-asr-heartbeat.json"
 
   # 6b. claim-and-abort
   green "   6b. claim-and-abort..."
   HOME="$isolated_home" \
   LIFESUB_ACCEPTANCE_DIR="$acceptance_dir" \
   LIFESUB_ACCEPTANCE_DATA_DIR="$isolated_home/Library/Application Support/com.goldenwave.lifesub" \
-  "$app_binary" --acceptance-scenario claim-and-abort 2>&1 || true
-
-  if [ -f "$acceptance_dir/acceptance-claim-and-abort.json" ]; then
-    cp "$acceptance_dir/acceptance-claim-and-abort.json" "$REPORT_DIR/"
-    green "   report saved"
-  fi
+  "$app_binary" --acceptance-scenario claim-and-abort 2>&1 || \
+    die "claim-and-abort failed"
+  local claim_report="$acceptance_dir/acceptance-claim-and-abort.json"
+  require_passing_report "$claim_report" "claim-and-abort"
+  cp "$claim_report" "$REPORT_DIR/"
+  green "   report saved"
 
   # 6c. verify-recovery
   green "   6c. verify-recovery..."
   HOME="$isolated_home" \
   LIFESUB_ACCEPTANCE_DIR="$acceptance_dir" \
   LIFESUB_ACCEPTANCE_DATA_DIR="$isolated_home/Library/Application Support/com.goldenwave.lifesub" \
-  "$app_binary" --acceptance-scenario verify-recovery 2>&1 || true
-
-  if [ -f "$acceptance_dir/acceptance-verify-recovery.json" ]; then
-    cp "$acceptance_dir/acceptance-verify-recovery.json" "$REPORT_DIR/"
-    green "   report saved"
-  fi
+  "$app_binary" --acceptance-scenario verify-recovery 2>&1 || \
+    die "verify-recovery failed"
+  local recovery_report="$acceptance_dir/acceptance-verify-recovery.json"
+  require_passing_report "$recovery_report" "verify-recovery"
+  cp "$recovery_report" "$REPORT_DIR/"
+  green "   report saved"
 
   # 6d. packaged-smoke
   green "   6d. packaged-smoke..."
   HOME="$isolated_home" \
   LIFESUB_ACCEPTANCE_DIR="$acceptance_dir" \
   LIFESUB_ACCEPTANCE_DATA_DIR="$isolated_home/Library/Application Support/com.goldenwave.lifesub" \
-  "$app_binary" --acceptance-scenario packaged-smoke 2>&1 || {
-    yellow "   packaged-smoke: FAILED (may need real model)"
-  }
-
-  if [ -f "$acceptance_dir/acceptance-packaged-smoke.json" ]; then
-    cp "$acceptance_dir/acceptance-packaged-smoke.json" "$REPORT_DIR/"
-    green "   report saved"
-  fi
+  "$app_binary" --acceptance-scenario packaged-smoke 2>&1 || \
+    die "packaged-smoke failed"
+  local packaged_report="$acceptance_dir/acceptance-packaged-smoke.json"
+  require_passing_report "$packaged_report" "packaged-smoke"
+  cp "$packaged_report" "$REPORT_DIR/"
+  green "   report saved"
 
   green "=== target scenarios complete ==="
   green "   reports in: $REPORT_DIR"
@@ -237,7 +243,7 @@ run_dmg_verification() {
   green "=== verify-desktop-asr.sh dmg ==="
 
   local dmg_path
-  dmg_path="$(find "$PROJECT_DIR/src-tauri/target/release/bundle/dmg" -name '*.dmg' 2>/dev/null | head -1)"
+  dmg_path="$(find "$PROJECT_DIR/src-tauri/target/release/bundle/dmg" -name '*.dmg' 2>/dev/null | sort | tail -1)"
 
   if [ -z "$dmg_path" ]; then
     die "no DMG found in target/release/bundle/dmg/"
@@ -266,11 +272,9 @@ run_dmg_verification() {
 
   # Verify the .app signature
   green "4. verifying code signature..."
-  if codesign --verify --deep --strict --verbose=2 "$app_bundle" 2>&1; then
-    green "   signature: VALID"
-  else
-    yellow "   signature: verification completed with warnings"
-  fi
+  codesign --verify --deep --strict --verbose=2 "$app_bundle" 2>&1 || \
+    die "app bundle signature is invalid"
+  green "   signature: VALID"
 
   # Run packaged-smoke from the mounted DMG
   green "5. running packaged-smoke from DMG..."
@@ -289,14 +293,16 @@ run_dmg_verification() {
   HOME="$isolated_home" \
   LIFESUB_ACCEPTANCE_DIR="$acceptance_dir" \
   LIFESUB_ACCEPTANCE_DATA_DIR="$isolated_home/Library/Application Support/com.goldenwave.lifesub" \
-  "$app_executable" --acceptance-scenario packaged-smoke 2>&1 || {
-    yellow "   packaged-smoke from DMG: FAILED (may need real model)"
-  }
+  "$app_executable" --acceptance-scenario packaged-smoke 2>&1 || \
+    die "packaged-smoke from DMG failed"
 
-  if [ -f "$acceptance_dir/acceptance-packaged-smoke.json" ]; then
-    cp "$acceptance_dir/acceptance-packaged-smoke.json" "$REPORT_DIR/acceptance-dmg-packaged-smoke.json"
-    green "   report saved"
+  local smoke_report="$acceptance_dir/acceptance-packaged-smoke.json"
+  if [ ! -f "$smoke_report" ]; then
+    die "packaged-smoke did not create its acceptance report"
   fi
+  require_passing_report "$smoke_report" "packaged-smoke"
+  cp "$smoke_report" "$REPORT_DIR/acceptance-dmg-packaged-smoke.json"
+  green "   report saved"
 
   # Detach DMG
   green "6. detaching DMG..."

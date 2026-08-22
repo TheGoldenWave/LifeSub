@@ -1,10 +1,19 @@
 ---
-stage: v0.2-real-asr-complete
-last_updated: 2026-08-20
-source: codex-goal
+stage: workspace-diverged-integration-required
+last_updated: 2026-08-21
+source: codex-workspace-audit
 ---
 
 # LifeSub 真实本地 ASR V0.2 进度
+
+## 2026-08-21 工作区审计
+
+- `main` 不是当前唯一最新发布源；它与 `codex/lifesub-real-asr-v0.2` 已分叉。
+- Agent 报告的“15 个 Task 已完成”与 `main` 生产接线不一致：导入仍返回 `job: None`，模型管理/重试/重转写仍有 stub，关键 Rust 测试模块被注释。
+- 当前功能最完整工作区为 `/Users/goldenwave/.config/superpowers/worktrees/LifeSub/lifesub-real-asr-v0.2`，但存在大量未提交集成改动，不得清理或 reset。
+- 桌面实时麦克风/系统音频采集属于 V0.2.2，当前没有 ScreenCaptureKit/AVAudioEngine production adapter；界面 fail closed 提示是真实状态。
+- native ASR production executor 仍未接通；当前桌面 worker 使用 `FailClosedEngine`，不会生成伪转写。
+- 详细工作区地图、安装产物哈希与打包护栏见 `docs/workspace-status.md`。
 
 ## 2026-08-20 遗留能力拆期
 
@@ -107,3 +116,27 @@ source: codex-goal
 ## 阻塞项
 
 无技术阻塞。真实模型验收需要下载 SenseVoiceSmall 和 Whisper 模型后运行 Gate 脚本。
+
+## 2026-08-20 V0.2.1 打包验证复核
+
+- 验证对象：`src-tauri/target/release/bundle/dmg/LifeSub_0.1.0_aarch64.dmg` 与 `src-tauri/target/release/bundle/macos/LifeSub.app`。
+- 版本标识：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`Info.plist` 均仍为 `0.1.0`；若对外发布口径为 V0.2/V0.2.1，需要补版本号与包名策略。
+- 前端验证：`npm test` 通过，4 个文件 45/45；`npm run build` 通过。
+- Rust 验证：`cargo test --manifest-path src-tauri/Cargo.toml --no-default-features` 通过，146/146；`cargo check --manifest-path src-tauri/Cargo.toml --features desktop` 通过，保留 9 个 unused warnings。
+- 产物结构：二进制 `Contents/MacOS/lifesub` 为 arm64 Mach-O，大小约 13 MB；DMG 约 3.9 MB，SHA-256 为 `b0a6c7dd1d5a7aa5bfeb089cc9dd3802e11c6feddb4e9d33924bf3c711842fad`。
+- 静态链接：`otool -L` 仅显示系统 Framework 与 `/usr/lib` 依赖，未发现 `sherpa-onnx` 或 `onnxruntime` 动态库残留。
+- App 烟测：直接运行 `.app/Contents/MacOS/lifesub --acceptance-scenario packaged-smoke` 通过，报告 runtime `1.13.5`。
+- 签名：`codesign --verify --deep --strict` 失败，错误为 `code has no resources but signature indicates they must be present`；`spctl --assess` 失败，错误为 `internal error in Code Signing subsystem`。该项不能作为发布签名通过。
+- DMG 镜像校验：`hdiutil verify` 通过，checksum VALID；但 `hdiutil attach` 与 `scripts/verify-desktop-asr.sh dmg` 均失败，错误为 `设备未配置`，因此本机未完成 DMG 挂载后的 `.app` 验证。
+- 真实模型 Gate：`scripts/verify-asr-gate.sh --verify-existing` 失败，`output/asr-v0.2/fixture-results.json` 仍为 placeholder，`all_pass=false`。未证明 SenseVoice/Whisper 真实模型 fixture 阈值通过。
+- 桌面真实 ASR 验收：`scripts/verify-desktop-asr.sh --verify-existing` 未找到 `acceptance-real-asr-heartbeat.json`，真实模型心跳/取消/恢复验收仍未执行。
+- 结论：基础构建、单测、静态链接和 App 运行时烟测通过；发布放行仍受真实模型 Gate、桌面真实 ASR 验收、DMG 挂载验证和签名配置阻塞。
+
+## 2026-08-21 V0.2.1 启动崩溃修复
+
+- 症状：通过 Finder 或 Launch Services 启动时，macOS 提示应用在重新打开窗口时意外退出；崩溃报告定位到 `tao 0.35.3` 的 `applicationDidFinishLaunching`。
+- 真实根因：绕过 macOS 恢复对话框后捕获到 setup panic：`unknown or corrupt database schema: cannot migrate`。V0.2.1 迁移器只接受 `user_version` 0/2，但本机数据库是完整且可兼容的 v5 超集 schema，被误判为损坏后导致 Tauri setup panic。`LSRequiresCarbon` 不是本次崩溃根因。
+- 修复：迁移器对高于 v2 且仍完整包含 v2 指纹的 schema 分类为 `CompatibleNewer`，允许打开但不执行降级或改写；缺少必需结构的较新 schema 仍拒绝启动。
+- RED/GREEN：新增“兼容 v5 保留版本与新增数据”和“缺核心表的伪 v5 拒绝”两条回归用例；focused 测试 2/2 通过，迁移模块 17/17 通过。
+- 真实数据验证：修复后的 `.app` 指向现有 v5 用户数据库运行 10 秒，未新增崩溃报告；数据库 SHA-256 修复前后一致，`user_version=5`，`PRAGMA integrity_check=ok`。
+- 产物：重新构建并覆盖安装 `/Applications/LifeSub.app`，源产物与安装二进制 SHA-256 一致，`codesign --verify --deep --strict` 通过。

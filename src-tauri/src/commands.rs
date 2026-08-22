@@ -6,15 +6,13 @@ use tauri::{AppHandle, Manager, State};
 use crate::asr::settings::AsrSettings;
 use crate::catalog::Catalog;
 use crate::desktop_api::{self, AsrJobInfo, ImportResult, ModelInfo};
-use crate::domain::{
-    AudioChunk, CaptureSession, CaptureState, TranscriptRevision, TranscriptSegment,
-};
+use crate::domain::{CaptureSession, CaptureState, TranscriptRevision, TranscriptSegment};
 use crate::service::{EvidenceService, parse_evidence_uri};
 
 pub struct AppState {
     pub catalog: Arc<Catalog>,
     pub data_dir: PathBuf,
-    pub worker_ctx: Option<desktop_api::WorkerContext>,
+    _worker_ctx: Option<desktop_api::WorkerContext>,
 }
 
 #[derive(serde::Serialize)]
@@ -33,7 +31,7 @@ impl AppState {
         let catalog = Catalog::open(data_dir.join("lifesub.sqlite3")).map_err(|error| error.to_string())?;
         let catalog = Arc::new(catalog);
         let worker_ctx = desktop_api::WorkerContext::initialize(&data_dir).ok();
-        Ok(Self { catalog, data_dir, worker_ctx })
+        Ok(Self { catalog, data_dir, _worker_ctx: worker_ctx })
     }
 }
 

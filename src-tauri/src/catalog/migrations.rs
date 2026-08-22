@@ -7,6 +7,8 @@ pub enum SchemaKind {
     Fresh,
     /// V0.1 database with exact expected fingerprint — migrate to v2.
     LegacyV1,
+    /// A newer schema that still contains the complete v2 contract.
+    CompatibleNewer,
     /// Unknown or corrupt schema — refuse to operate.
     Unknown,
 }
@@ -220,7 +222,7 @@ ALTER TABLE segments ADD COLUMN session_end_ms INTEGER;
 /// Classify a database schema without modifying it.
 ///
 /// Reads `PRAGMA user_version` and the schema fingerprint to determine
-/// whether the database is Fresh (empty), a known LegacyV1, or Unknown.
+/// whether the database is Fresh, LegacyV1, CompatibleNewer, or Unknown.
 pub fn classify_schema(conn: &Connection) -> rusqlite::Result<SchemaKind> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -229,6 +231,13 @@ pub fn classify_schema(conn: &Connection) -> rusqlite::Result<SchemaKind> {
     match version {
         0 => classify_v0(conn),
         2 => classify_v2(conn),
+        newer if newer > 2 => {
+            if fingerprint_v2(conn)? {
+                Ok(SchemaKind::CompatibleNewer)
+            } else {
+                Ok(SchemaKind::Unknown)
+            }
+        }
         _ => Ok(SchemaKind::Unknown),
     }
 }
@@ -238,6 +247,7 @@ pub fn classify_schema(conn: &Connection) -> rusqlite::Result<SchemaKind> {
 /// - Fresh: create the full v2 schema and set `user_version = 2`.
 /// - LegacyV1: migrate v1 tables to v2 in a `BEGIN IMMEDIATE` transaction
 ///   and set `user_version = 2`.
+/// - CompatibleNewer: preserve the newer schema and data without downgrade.
 /// - Unknown: return an error.
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -273,6 +283,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 }
             }
         }
+        SchemaKind::CompatibleNewer => Ok(()),
         SchemaKind::Unknown => Err(rusqlite::Error::InvalidParameterName(
             "unknown or corrupt database schema: cannot migrate".into(),
         )),

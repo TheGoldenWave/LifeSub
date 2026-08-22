@@ -41,6 +41,7 @@ pub struct ModelInfo {
     pub recommended: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelProgressEvent {
     pub model_id: String,
@@ -51,6 +52,7 @@ pub struct ModelProgressEvent {
     pub error_code: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 pub struct JobStateEvent {
     pub job_id: String,
@@ -144,22 +146,19 @@ pub fn retranscribe_record(
 // ---------------------------------------------------------------------------
 
 pub struct WorkerContext {
-    pub boot_id: String,
-    pub data_dir: std::path::PathBuf,
+    _boot_id: String,
+    _data_dir: std::path::PathBuf,
 }
 
 impl WorkerContext {
     pub fn initialize(_data_dir: &Path) -> Result<Self, String> {
         // Stub: acquires asr-worker.lock and initializes services.
         let boot_id = format!("boot_{}", uuid::Uuid::new_v4().simple());
-        Ok(Self { boot_id, data_dir: _data_dir.to_path_buf() })
+        Ok(Self { _boot_id: boot_id, _data_dir: _data_dir.to_path_buf() })
     }
 }
 
-// ---------------------------------------------------------------------------
-// Event emitter helpers
-// ---------------------------------------------------------------------------
-
+#[allow(dead_code)]
 pub fn build_model_progress_event(
     model_id: &str, download_id: &str, state: &str,
     downloaded_bytes: u64, expected_bytes: u64, error_code: Option<&str>,
@@ -170,10 +169,11 @@ pub fn build_model_progress_event(
         state: state.to_string(),
         downloaded_bytes,
         expected_bytes,
-        error_code: error_code.map(|s| s.to_string()),
+        error_code: error_code.map(|value| value.to_string()),
     }
 }
 
+#[allow(dead_code)]
 pub fn build_job_state_event(
     job_id: &str, session_id: &str, chunk_id: &str,
     state: AsrJobState, error_code: Option<&str>,
@@ -183,6 +183,6 @@ pub fn build_job_state_event(
         session_id: session_id.to_string(),
         chunk_id: chunk_id.to_string(),
         state,
-        error_code: error_code.map(|s| s.to_string()),
+        error_code: error_code.map(|value| value.to_string()),
     }
 }

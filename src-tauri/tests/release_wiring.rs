@@ -1,4 +1,5 @@
-#![cfg(feature = "desktop")]
+#![allow(unexpected_cfgs)]
+#![cfg(all(feature = "desktop", lifesub_release_wiring_gate))]
 
 use lifesub_lib::desktop_runtime::{
     NativeAsrDesktopRuntimeFactory, NativeCaptureDesktopRuntimeFactory,

@@ -101,7 +101,7 @@ TAURI_VERSION=$(read_json_version "$ROOT/src-tauri/tauri.conf.json")
 [ "$TAURI_VERSION" = "$EXPECTED_VERSION" ] || \
   fail "tauri.conf.json version mismatch: expected $EXPECTED_VERSION, got ${TAURI_VERSION:-missing}"
 
-if RELEASE_WIRING_OUTPUT=$(cargo test \
+if RELEASE_WIRING_OUTPUT=$(RUSTFLAGS="${RUSTFLAGS:-} --cfg lifesub_release_wiring_gate --check-cfg=cfg(lifesub_release_wiring_gate)" cargo test \
   --locked \
   --manifest-path "$ROOT/src-tauri/Cargo.toml" \
   --features desktop \

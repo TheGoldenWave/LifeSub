@@ -111,6 +111,7 @@ test.describe('LifeSub V0.2 — Settings Modal', () => {
 test.describe('LifeSub V0.2 — Import notice', () => {
   test('explains that browser preview cannot import real audio', async ({ page }) => {
     await page.goto('/')
+    await page.getByRole('button', { name: '时间线' }).click()
     await page.getByRole('button', { name: '导入音频' }).click()
     await expect(page.getByText('浏览器演示模式仅支持示例数据，请在桌面版中导入真实音频。')).toBeVisible()
   })

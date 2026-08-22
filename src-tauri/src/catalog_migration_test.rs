@@ -108,9 +108,11 @@ fn migrates_v5_to_v6_capture_timing_without_rewriting_existing_chunks() {
 
     assert_eq!(user_version(&connection), 6);
     let existing: (String, String, i64) = connection
-        .query_row("SELECT path, sha256, byte_length FROM chunks WHERE id='c'", [], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
+        .query_row(
+            "SELECT path, sha256, byte_length FROM chunks WHERE id='c'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
         .unwrap();
     assert_eq!(existing, ("audio/x.wav".into(), "aa".repeat(32), 4));
     for table in ["capture_sources", "capture_chunk_timing"] {

@@ -1,1119 +1,729 @@
-//! Model download, verification, safe extraction, and versioned installation.
-//!
-//! The model manager handles the full lifecycle of model artifacts:
-//! downloading, SHA-256 verification, safe archive extraction, versioned
-//! install activation, startup reconciliation, and deletion.
-//!
-//! ## Download pipeline
-//!
-//! ```text
-//! enqueue → downloading → verifying → installing → succeeded
-//!                   ↓            ↓            ↓
-//!               cancelled     failed       failed
-//! ```
-//!
-//! ## Safe extraction rules
-//!
-//! - Reject: absolute paths, `..` components, symlinks, hardlinks
-//! - Enforce: max file count (100), max single file size (500 MB),
-//!   max total expanded size (2 GB)
-//! - Write immutable marker `.lifesub-model-install` after extraction
-//! - fsync and atomic rename into versioned install directory
-//! - Activate in SQLite transaction
-
-use std::fs;
-use std::io::{BufReader, Read, Seek, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
+#[cfg(all(test, unix))]
+use std::os::unix::fs::MetadataExt;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use chrono::Utc;
+use bzip2::read::BzDecoder;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{Catalog, ModelDownloadRow, ModelInstallationRow};
+use crate::asr::manifest::{
+    ArtifactFile, ArtifactInstallMode, DeviceRequirement as ManifestDeviceRequirement,
+    InstallConstraints as ManifestInstallConstraints, ModelManifest,
+    QualificationPolicy as ManifestQualificationPolicy, RuntimeRequirement, VadManifest,
+    model_registry, vad_manifest,
+};
+use crate::catalog::{Catalog, ModelInstallationRecord};
+use crate::domain::AsrProviderKind;
 
-use super::manifest::{self, ModelManifest};
+const COPY_BUFFER_BYTES: usize = 64 * 1024;
+const CHECKPOINT_INTERVAL_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_REDIRECTS: usize = 10;
+const STRUCTURAL_MARKER: &str = ".lifesub-structural.json";
+const DELETE_MARKER: &str = ".lifesub-delete.json";
+const DISK_SAFETY_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+mod anchored_reconcile;
+mod archive;
+mod delete;
+mod download;
+mod fs_support;
+mod install;
+mod install_support;
+mod reconcile;
+mod storage;
+mod types;
 
-/// Maximum total expanded size of an extracted archive (2 GB).
-const MAX_EXPANDED_SIZE: u64 = 2_000_000_000;
-
-/// Maximum number of files allowed in an archive.
-const MAX_FILE_COUNT: usize = 100;
-
-/// Maximum size of a single file after extraction (500 MB).
-const MAX_SINGLE_FILE_SIZE: u64 = 500_000_000;
-
-/// Name of the immutable install marker written to each install directory.
-const IMMUTABLE_MARKER: &str = ".lifesub-model-install";
-
-/// Default download timeout.
-const DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
-
-/// Progress reporting interval (bytes) — persist to DB every N bytes.
-const PROGRESS_INTERVAL_BYTES: u64 = 1_048_576; // 1 MiB
-
-// ---------------------------------------------------------------------------
-// Model download state (mirrors model_downloads table)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DownloadState {
-    Queued,
-    Downloading,
-    Verifying,
-    Installing,
-    Succeeded,
-    Failed,
-    Cancelled,
-}
-
-/// A model download record, as persisted in and read from model_downloads.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct ModelDownload {
-    pub id: String,
-    pub model_id: String,
-    pub manifest_version: String,
-    pub archive_sha256: String,
-    pub state: DownloadState,
-    pub downloaded_bytes: u64,
-    pub expected_bytes: u64,
-    pub temp_path: Option<String>,
-    pub error_code: Option<String>,
-    pub error_summary: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-// ---------------------------------------------------------------------------
-// Model installation state (mirrors model_installations table)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InstallState {
-    Ready,
-    Corrupt,
-    Deleting,
-}
-
-/// A model installation record.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct ModelInstallation {
-    pub model_id: String,
-    pub provider: String,
-    pub manifest_version: String,
-    pub archive_sha256: String,
-    pub install_dir: String,
-    pub state: InstallState,
-    pub installed_at: String,
-    pub last_error_code: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Model manager errors
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+pub(crate) use anchored_reconcile::{
+    clear_ensure_dir_sync_trace_for_test, set_before_install_marker_publish_for_test,
+    set_before_install_stage_claim_for_test, take_ensure_dir_sync_trace_for_test,
+};
+pub(crate) use types::DeleteMarkerFault;
+#[cfg(test)]
+pub(crate) use types::InstallFault;
+pub use types::{
+    ArtifactCheckpoint, ArtifactPlan, DeletionLease, DeviceProfile, DeviceRequirement,
+    DownloadRequest, DownloadResponse, FullSherpaRuntimeIdentity, HttpTransport, InstallContract,
+    InstallMode, ManagerError, ModelCatalog, ModelInstallPlan, ModelManager, QualificationPolicy,
+    RequiredInstalledFile, ReqwestTransport, StoredInstallation,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ModelManagerError {
-    ManifestNotFound(String),
-    InsufficientDiskSpace {
-        needed: u64,
-        available: u64,
-    },
-    DownloadFailed(String),
-    IntegrityCheckFailed(String),
-    ExtractionFailed(String),
-    InstallFailed(String),
-    ModelInUse(String),
-    IoError(String),
-    CatalogError(String),
-    ActiveDownloadExists(String),
-    InvalidArchive(String),
-    RedirectDisallowed(String),
+pub(crate) struct ExecutionInstallationRecord {
+    pub model_id: String,
+    pub manifest_version: String,
+    pub bundle_identity: String,
+    pub install_dir: PathBuf,
+    pub state: String,
+    pub runtime_identity_json: Option<String>,
 }
 
-impl std::fmt::Display for ModelManagerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ManifestNotFound(m) => write!(f, "manifest not found: {}", m),
-            Self::InsufficientDiskSpace { needed, available } => write!(f, "insufficient disk space: need {}, have {}", needed, available),
-            Self::DownloadFailed(m) => write!(f, "download failed: {}", m),
-            Self::IntegrityCheckFailed(m) => write!(f, "integrity check failed: {}", m),
-            Self::ExtractionFailed(m) => write!(f, "extraction failed: {}", m),
-            Self::InstallFailed(m) => write!(f, "install failed: {}", m),
-            Self::ModelInUse(m) => write!(f, "model in use: {}", m),
-            Self::IoError(m) => write!(f, "io error: {}", m),
-            Self::CatalogError(m) => write!(f, "catalog error: {}", m),
-            Self::ActiveDownloadExists(m) => write!(f, "active download exists for: {}", m),
-            Self::InvalidArchive(m) => write!(f, "invalid archive: {}", m),
-            Self::RedirectDisallowed(m) => write!(f, "redirect disallowed: {}", m),
-        }
+#[derive(Clone)]
+pub(crate) struct ModelRuntimeOwnership {
+    keepalive: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    ensure_current: std::sync::Arc<dyn Fn() -> Result<(), ManagerError> + Send + Sync>,
+}
+
+impl std::fmt::Debug for ModelRuntimeOwnership {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelRuntimeOwnership")
+            .finish_non_exhaustive()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Model manager
-// ---------------------------------------------------------------------------
-
-/// Manages model downloads, installation, reconciliation, and deletion.
-pub struct ModelManager {
-    catalog: Arc<Catalog>,
-    models_dir: PathBuf,
-    downloads_dir: PathBuf,
-    staging_dir: PathBuf,
-}
-
-impl ModelManager {
-    /// Create a new model manager.
-    ///
-    /// `data_dir` is the app data directory (e.g. `~/.lifesub`).
-    pub fn new(catalog: Arc<Catalog>, data_dir: &Path) -> Self {
+impl ModelRuntimeOwnership {
+    pub(crate) fn new<K, F>(keepalive: std::sync::Arc<K>, ensure_current: F) -> Self
+    where
+        K: Send + Sync + 'static,
+        F: Fn() -> Result<(), ManagerError> + Send + Sync + 'static,
+    {
         Self {
-            catalog,
-            models_dir: data_dir.join("models").join("asr"),
-            downloads_dir: data_dir.join("downloads"),
-            staging_dir: data_dir.join("models").join(".staging"),
+            keepalive,
+            ensure_current: std::sync::Arc::new(ensure_current),
         }
     }
 
-    /// Ensure required directories exist.
-    pub fn ensure_dirs(&self) -> Result<(), ModelManagerError> {
-        fs::create_dir_all(&self.models_dir)
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-        fs::create_dir_all(&self.downloads_dir)
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-        fs::create_dir_all(&self.staging_dir)
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-        Ok(())
+    fn ensure_current(&self) -> Result<(), ManagerError> {
+        let _ = &self.keepalive;
+        (self.ensure_current)()
+    }
+}
+
+#[derive(Debug)]
+pub struct ExecutableInstallationLease {
+    plan: ModelInstallPlan,
+    install_dir: PathBuf,
+    runtime_identity_json: Option<String>,
+    device: DeviceProfile,
+    #[cfg(test)]
+    observed_sherpa_runtime: Option<FullSherpaRuntimeIdentity>,
+    installation_storage: storage::InstallationStorage,
+    _guard: ExecutionLeaseGuard,
+    #[cfg(test)]
+    validation_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+const DELETE_RESERVED: usize = usize::MAX;
+
+#[cfg(test)]
+type DeleteReservationBarriers =
+    std::sync::Arc<(std::sync::Barrier, std::sync::Barrier, std::sync::Barrier)>;
+
+#[cfg(test)]
+fn delete_reservation_hooks()
+-> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, DeleteReservationBarriers>> {
+    static HOOKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, DeleteReservationBarriers>>,
+    > = std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+pub(super) fn take_delete_reservation_barriers_for_test(
+    install_dir: &Path,
+) -> Option<DeleteReservationBarriers> {
+    delete_reservation_hooks()
+        .lock()
+        .unwrap()
+        .remove(install_dir)
+}
+
+#[derive(Debug)]
+struct ExecutionLeaseGuard {
+    model_id: String,
+    registry: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    _runtime_ownership: Option<ModelRuntimeOwnership>,
+}
+
+impl Drop for ExecutionLeaseGuard {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock().unwrap();
+        if let Some(count) = registry.get_mut(&self.model_id) {
+            debug_assert_ne!(*count, DELETE_RESERVED);
+            *count = count.checked_sub(1).expect("execution lease underflow");
+            if *count == 0 {
+                registry.remove(&self.model_id);
+            }
+        }
+    }
+}
+
+impl ExecutableInstallationLease {
+    pub fn model_id(&self) -> &str {
+        &self.plan.model_id
     }
 
-    // -- Directory accessors (used by tests) --
-
-    pub fn models_dir(&self) -> &Path {
-        &self.models_dir
+    pub(crate) fn plan(&self) -> &ModelInstallPlan {
+        &self.plan
     }
 
-    pub fn downloads_dir(&self) -> &Path {
-        &self.downloads_dir
+    pub(crate) fn install_dir(&self) -> &Path {
+        &self.install_dir
     }
 
-    pub fn staging_dir(&self) -> &Path {
-        &self.staging_dir
+    pub(crate) fn runtime_identity_json(&self) -> Option<&str> {
+        self.runtime_identity_json.as_deref()
     }
 
-    // -----------------------------------------------------------------------
-    // Download operations
-    // -----------------------------------------------------------------------
+    pub(crate) fn device(&self) -> &DeviceProfile {
+        &self.device
+    }
 
-    /// Enqueue a model download.
-    ///
-    /// Returns the download ID on success. Fails if there is already an active
-    /// download (queued, downloading, verifying, or installing) for the same model.
-    pub fn enqueue_download(
+    pub(crate) fn is_fd_anchored(&self) -> bool {
+        self.installation_storage.is_anchored()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_count(&self) -> usize {
+        self.validation_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn revalidate(&self) -> Result<(), ManagerError> {
+        #[cfg(test)]
+        self.validation_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match &self.installation_storage {
+            #[cfg(test)]
+            storage::InstallationStorage::TestPath => validate_executable_installation(
+                &self.plan,
+                &self.install_dir,
+                self.observed_sherpa_runtime.as_ref(),
+            ),
+            storage::InstallationStorage::Anchored(_) => self.installation_storage.revalidate(),
+        }
+    }
+
+    pub(crate) fn revalidate_execution_boundary(&self) -> Result<(), ManagerError> {
+        #[cfg(test)]
+        self.validation_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.installation_storage.revalidate()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn open_required_file(&self, relative: &Path) -> Result<File, ManagerError> {
+        let relative = safe_relative_path(
+            relative
+                .to_str()
+                .ok_or_else(|| ManagerError::structural("non-UTF-8 required path"))?,
+        )?;
+        if !self
+            .plan
+            .install_contract
+            .required_files()
+            .iter()
+            .any(|required| Path::new(&required.path) == relative)
+        {
+            return Err(ManagerError::structural(
+                "file is not part of the execution contract",
+            ));
+        }
+        if let Some(file) = self.installation_storage.open_required(&relative)? {
+            return Ok(file);
+        }
+        #[cfg(test)]
+        return Ok(File::open(self.install_dir.join(relative))?);
+        #[cfg(not(test))]
+        Err(ManagerError::structural(
+            "anchored execution storage is missing",
+        ))
+    }
+
+    pub(crate) fn open_execution_path(
         &self,
-        model_id: &str,
-        manifest_version: &str,
-        archive_sha256: &str,
-        url: &str,
-        expected_bytes: u64,
-    ) -> Result<String, ModelManagerError> {
-        // Check for existing active download
-        let active = self
-            .catalog
-            .list_active_downloads_for_model(model_id)
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
-        if !active.is_empty() {
-            return Err(ModelManagerError::ActiveDownloadExists(model_id.to_string()));
-        }
-
-        let id = format!("mdl_{}", uuid::Uuid::new_v4().simple());
-        let now = Utc::now().to_rfc3339();
-
-        self.catalog
-            .insert_model_download(
-                &id,
-                model_id,
-                manifest_version,
-                archive_sha256,
-                "queued",
-                expected_bytes,
-                &now,
-            )
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
-
-        Ok(id)
-    }
-
-    /// Execute a download (blocking).
-    ///
-    /// Downloads the archive, verifies SHA-256, extracts it safely, and
-    /// activates the installation. The download row is updated through each
-    /// state transition.
-    pub fn download(&self, download_id: &str) -> Result<(), ModelManagerError> {
-        // Load the download record
-        let dl = self
-            .catalog
-            .get_model_download(download_id)
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?
-            .ok_or_else(|| {
-                ModelManagerError::CatalogError(format!("download not found: {}", download_id))
-            })?;
-
-        if dl.state != "queued" {
-            return Err(ModelManagerError::CatalogError(format!(
-                "download {} is not queued (state: {})",
-                download_id, dl.state
-            )));
-        }
-
-        let model_id = dl.model_id.clone();
-        let manifest_version = dl.manifest_version.clone();
-        let expected_hash = dl.archive_sha256.clone();
-        let expected_bytes = dl.expected_bytes;
-
-        // Find the manifest to get the download URL and provider
-        let manifest = manifest::find_by_id(&model_id).ok_or_else(|| {
-            ModelManagerError::ManifestNotFound(model_id.clone())
-        })?;
-
-        let provider = snake_case_provider(
-            manifest
-                .provider
-                .unwrap_or(crate::asr::settings::AsrProviderKind::SenseVoice),
-        );
-        let url = manifest.source.download_url;
-
-        // Transition to downloading
-        self.transition_download(download_id, DownloadState::Downloading)?;
-
-        // Download to temp file
-        let temp_path = self.downloads_dir.join(format!("{}.part", download_id));
-
-        let result = self.download_to_file(url, &temp_path, expected_bytes, download_id);
-
-        match result {
-            Ok(()) => {}
-            Err(e) => {
-                // Clean up partial file
-                let _ = fs::remove_file(&temp_path);
-                self.fail_download(download_id, "model_download_failed", &e.to_string())?;
-                return Err(e);
-            }
-        }
-
-        // Transition to verifying
-        self.transition_download(download_id, DownloadState::Verifying)?;
-
-        // Read the downloaded file and verify SHA-256
-        let archive_bytes = fs::read(&temp_path)
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-
-        let actual_hash = hex::encode(Sha256::digest(&archive_bytes));
-        if actual_hash != expected_hash {
-            let _ = fs::remove_file(&temp_path);
-            let msg = format!(
-                "SHA-256 mismatch: expected {}, got {}",
-                expected_hash, actual_hash
-            );
-            self.fail_download(download_id, "model_integrity_failed", &msg)?;
-            return Err(ModelManagerError::IntegrityCheckFailed(msg));
-        }
-
-        // Transition to installing
-        self.transition_download(download_id, DownloadState::Installing)?;
-
-        // Extract and install
-        let install_result = self.extract_and_verify(
-            &archive_bytes,
-            &expected_hash,
-            &provider,
-            &model_id,
-            &manifest_version,
-        );
-
-        // Clean up temp file regardless of outcome
-        let _ = fs::remove_file(&temp_path);
-
-        match install_result {
-            Ok(install_dir) => {
-                // Activate in SQLite transaction
-                let now = Utc::now().to_rfc3339();
-                self.catalog
-                    .upsert_model_installation(
-                        &model_id,
-                        &provider,
-                        &manifest_version,
-                        &expected_hash,
-                        &install_dir,
-                        "ready",
-                        &now,
-                        None,
-                    )
-                    .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
-
-                // Mark download as succeeded
-                self.transition_download(download_id, DownloadState::Succeeded)?;
-                Ok(())
-            }
-            Err(e) => {
-                self.fail_download(download_id, "model_install_failed", &e.to_string())?;
-                Err(e)
-            }
-        }
-    }
-
-    /// Cancel a download.
-    ///
-    /// Only downloads in `queued`, `downloading`, `verifying`, or `installing`
-    /// state can be cancelled. Already finished or failed downloads are
-    /// unaffected.
-    pub fn cancel_download(&self, download_id: &str) -> Result<(), ModelManagerError> {
-        self.catalog
-            .cancel_model_download(download_id)
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))
-    }
-
-    // -----------------------------------------------------------------------
-    // Safe extraction
-    // -----------------------------------------------------------------------
-
-    /// Extract and verify an archive, returning the versioned install directory.
-    ///
-    /// This is the core safe extraction routine. It:
-    /// 1. Decompresses the bzip2 archive
-    /// 2. Iterates tar entries, rejecting unsafe paths
-    /// 3. Enforces size limits
-    /// 4. Extracts to staging directory
-    /// 5. Writes immutable marker
-    /// 6. Fsyncs and atomically renames to the versioned install directory
-    pub fn extract_and_verify(
-        &self,
-        archive_bytes: &[u8],
-        archive_hash: &str,
-        provider: &str,
-        model_id: &str,
-        manifest_version: &str,
-    ) -> Result<String, ModelManagerError> {
-        // Build the versioned install path
-        let install_dir_name = format!("{}-{}", manifest_version, archive_hash);
-        let install_dir = self
-            .models_dir
-            .join(provider)
-            .join(model_id)
-            .join(&install_dir_name);
-
-        // Create staging directory
-        let staging_id = uuid::Uuid::new_v4().simple().to_string();
-        let staging_dir = self.staging_dir.join(&staging_id);
-
-        fs::create_dir_all(&staging_dir)
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-
-        // Decompress and extract
-        let result = self.extract_tar_bz2(archive_bytes, &staging_dir);
-
-        match result {
-            Ok(()) => {
-                // Write immutable marker
-                let marker_content = format!(
-                    "{}\n{}\n{}\n{}\n",
-                    provider, model_id, manifest_version, archive_hash
-                );
-                let marker_path = staging_dir.join(IMMUTABLE_MARKER);
-                fs::write(&marker_path, &marker_content)
-                    .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-
-                // Fsync marker and staging directory
-                Self::fsync_file(&marker_path)?;
-                Self::fsync_dir(&staging_dir)?;
-
-                // Create parent directories for the install target
-                if let Some(parent) = install_dir.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-                }
-
-                // Atomic rename from staging to install directory
-                fs::rename(&staging_dir, &install_dir).map_err(|e| {
-                    ModelManagerError::IoError(format!(
-                        "rename staging to install dir failed: {}",
-                        e
-                    ))
-                })?;
-
-                // Fsync the parent directory to ensure the rename is durable
-                if let Some(parent) = install_dir.parent() {
-                    Self::fsync_dir(parent)?;
-                }
-
-                Ok(install_dir.to_string_lossy().to_string())
-            }
-            Err(e) => {
-                // Clean up staging on failure
-                let _ = fs::remove_dir_all(&staging_dir);
-                Err(e)
-            }
-        }
-    }
-
-    /// Extract a tar.bz2 archive to the staging directory with safety checks.
-    fn extract_tar_bz2(&self, archive_bytes: &[u8], dest: &Path) -> Result<(), ModelManagerError> {
-        let cursor = std::io::Cursor::new(archive_bytes);
-        let decoder = bzip2::read::BzDecoder::new(cursor);
-        let mut archive = tar::Archive::new(decoder);
-
-        let mut total_size: u64 = 0;
-        let mut file_count: usize = 0;
-
-        for entry_result in archive.entries().map_err(|e| {
-            ModelManagerError::ExtractionFailed(format!("cannot read archive entries: {}", e))
-        })? {
-            let mut entry = entry_result.map_err(|e| {
-                ModelManagerError::ExtractionFailed(format!("cannot read entry: {}", e))
-            })?;
-
-            let path = entry
-                .path()
-                .map_err(|e| {
-                    ModelManagerError::ExtractionFailed(format!("cannot read entry path: {}", e))
-                })?
-                .to_path_buf();
-
-            // -- Safety checks --
-
-            // Reject absolute paths
-            if path.is_absolute() {
-                return Err(ModelManagerError::InvalidArchive(format!(
-                    "absolute path forbidden: {}",
-                    path.display()
-                )));
-            }
-
-            // Reject parent directory traversal
-            if path
-                .components()
-                .any(|c| c == std::path::Component::ParentDir)
+        relative: &Path,
+    ) -> Result<(File, PathBuf), ManagerError> {
+        let file = if self
+            .plan
+            .install_contract
+            .required_files()
+            .iter()
+            .any(|required| Path::new(&required.path) == relative)
+        {
+            self.open_required_file(relative)?
+        } else if let Some(file) = self.installation_storage.open_directory(relative)? {
+            file
+        } else {
+            #[cfg(test)]
             {
-                return Err(ModelManagerError::InvalidArchive(format!(
-                    "parent directory traversal forbidden: {}",
-                    path.display()
-                )));
+                File::open(self.install_dir.join(relative))?
             }
-
-            // Reject symlinks and hardlinks
-            let entry_type = entry.header().entry_type();
-            if entry_type.is_symlink() || entry_type.is_hard_link() {
-                return Err(ModelManagerError::InvalidArchive(format!(
-                    "symlink or hardlink forbidden: {}",
-                    path.display()
-                )));
+            #[cfg(not(test))]
+            {
+                return Err(ManagerError::structural(
+                    "anchored execution storage is missing",
+                ));
             }
-
-            // Only process regular files and directories
-            if entry_type.is_dir() {
-                let target = dest.join(&path);
-                fs::create_dir_all(&target)
-                    .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-                continue;
-            }
-
-            if !entry_type.is_file() {
-                continue; // Skip other entry types
-            }
-
-            // Check file count
-            file_count += 1;
-            if file_count > MAX_FILE_COUNT {
-                return Err(ModelManagerError::InvalidArchive(format!(
-                    "too many files: {} (max {})",
-                    file_count, MAX_FILE_COUNT
-                )));
-            }
-
-            // Check single file size
-            let size = entry.size();
-            if size > MAX_SINGLE_FILE_SIZE {
-                return Err(ModelManagerError::InvalidArchive(format!(
-                    "file too large: {} bytes (max {})",
-                    size, MAX_SINGLE_FILE_SIZE
-                )));
-            }
-
-            // Check total expanded size
-            total_size += size;
-            if total_size > MAX_EXPANDED_SIZE {
-                return Err(ModelManagerError::InvalidArchive(format!(
-                    "total expanded size exceeds limit: {} bytes (max {})",
-                    total_size, MAX_EXPANDED_SIZE
-                )));
-            }
-
-            // Check that the resolved path is within dest
-            let target = dest.join(&path);
-            let canonical_dest = dest
-                .canonicalize()
-                .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-            // The target may not exist yet, so canonicalize its parent
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-            }
-            let canonical_target = target
-                .canonicalize()
-                .unwrap_or_else(|_| target.clone());
-            if !canonical_target.starts_with(&canonical_dest) {
-                return Err(ModelManagerError::InvalidArchive(format!(
-                    "path escapes extraction directory: {}",
-                    path.display()
-                )));
-            }
-
-            // Extract the file
-            entry.unpack(&target).map_err(|e| {
-                ModelManagerError::ExtractionFailed(format!(
-                    "cannot extract {}: {}",
-                    path.display(),
-                    e
-                ))
-            })?;
-        }
-
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------------
-    // Installation management
-    // -----------------------------------------------------------------------
-
-    /// List all model installations.
-    pub fn list_installations(&self) -> Result<Vec<ModelInstallation>, ModelManagerError> {
-        let rows = self
-            .catalog
-            .list_model_installations()
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
-        Ok(rows.into_iter().map(|r| row_to_installation(&r)).collect())
-    }
-
-    /// Get a single model installation by model ID.
-    pub fn get_installation(
-        &self,
-        model_id: &str,
-    ) -> Result<Option<ModelInstallation>, ModelManagerError> {
-        let row = self
-            .catalog
-            .get_model_installation(model_id)
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
-        Ok(row.map(|r| row_to_installation(&r)))
-    }
-
-    /// Delete a model installation.
-    ///
-    /// Removes the install directory from disk and the record from the database.
-    pub fn delete_model(&self, model_id: &str) -> Result<(), ModelManagerError> {
-        // Mark as deleting first
-        self.catalog
-            .update_installation_state(model_id, "deleting", None)
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
-
-        let install = self
-            .catalog
-            .get_model_installation(model_id)
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?
-            .ok_or_else(|| {
-                ModelManagerError::CatalogError(format!("model not installed: {}", model_id))
-            })?;
-
-        // Remove the install directory
-        let install_path = Path::new(&install.install_dir);
-        if install_path.exists() {
-            fs::remove_dir_all(install_path)
-                .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-        }
-
-        // Remove the database record
-        self.catalog
-            .delete_model_installation(model_id)
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
-
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------------
-    // Startup reconciliation
-    // -----------------------------------------------------------------------
-
-    /// Reconcile model installations at startup.
-    ///
-    /// Performs the following cleanup:
-    /// 1. Remove stale `.part` files from downloads directory
-    /// 2. Remove stale staging directories
-    /// 3. Detect unrecorded installs (orphan directories with markers) → mark corrupt
-    /// 4. Detect missing active directories (DB record exists but dir missing) → mark corrupt
-    /// 5. Mark any active downloads from previous sessions as failed/recovery_required
-    pub fn reconcile(&self) -> Result<(), ModelManagerError> {
-        self.ensure_dirs()?;
-
-        // 1. Clean stale .part files
-        self.clean_stale_part_files()?;
-
-        // 2. Clean stale staging directories
-        self.clean_stale_staging()?;
-
-        // 3. Mark active downloads from previous sessions as failed
-        self.fail_stale_downloads()?;
-
-        // 4. Reconcile installations: detect orphans and missing dirs
-        self.reconcile_installations()?;
-
-        Ok(())
-    }
-
-    /// Remove all `.part` files from the downloads directory.
-    fn clean_stale_part_files(&self) -> Result<(), ModelManagerError> {
-        if !self.downloads_dir.exists() {
-            return Ok(());
-        }
-
-        let entries = fs::read_dir(&self.downloads_dir)
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "part") {
-                let _ = fs::remove_file(&path);
-            }
-        }
-        Ok(())
-    }
-
-    /// Remove all staging directories.
-    fn clean_stale_staging(&self) -> Result<(), ModelManagerError> {
-        if !self.staging_dir.exists() {
-            return Ok(());
-        }
-
-        let entries = fs::read_dir(&self.staging_dir)
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            if path.is_dir() {
-                let _ = fs::remove_dir_all(&path);
-            }
-        }
-        Ok(())
-    }
-
-    /// Mark any queued/downloading/verifying/installing downloads as failed.
-    fn fail_stale_downloads(&self) -> Result<(), ModelManagerError> {
-        let active = self
-            .catalog
-            .list_active_downloads()
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
-
-        for dl in active {
-            self.catalog
-                .fail_download_with_code(
-                    &dl.id,
-                    "recovery_required",
-                    "Download was interrupted by previous session termination",
-                )
-                .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    /// Reconcile installations: detect orphan directories and missing directories.
-    fn reconcile_installations(&self) -> Result<(), ModelManagerError> {
-        // Scan for orphan directories (directories with markers but no DB record)
-        self.detect_orphan_installations()?;
-
-        // Check DB records for missing directories
-        self.detect_missing_installations()?;
-
-        Ok(())
-    }
-
-    /// Find directories with immutable markers that aren't in the database and mark
-    /// them as corrupt installations.
-    fn detect_orphan_installations(&self) -> Result<(), ModelManagerError> {
-        if !self.models_dir.exists() {
-            return Ok(());
-        }
-
-        // Walk models/asr/<provider>/<model-id>/<version-hash>/
-        let provider_dirs = match fs::read_dir(&self.models_dir) {
-            Ok(dirs) => dirs,
-            Err(_) => return Ok(()),
         };
-
-        for provider_entry in provider_dirs {
-            let provider_entry = match provider_entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let provider_path = provider_entry.path();
-            if !provider_path.is_dir() {
-                continue;
-            }
-            let provider = provider_path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-
-            let model_dirs = match fs::read_dir(&provider_path) {
-                Ok(dirs) => dirs,
-                Err(_) => continue,
-            };
-
-            for model_entry in model_dirs {
-                let model_entry = match model_entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                let model_path = model_entry.path();
-                if !model_path.is_dir() {
-                    continue;
-                }
-                let model_id = model_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-
-                let version_dirs = match fs::read_dir(&model_path) {
-                    Ok(dirs) => dirs,
-                    Err(_) => continue,
-                };
-
-                for version_entry in version_dirs {
-                    let version_entry = match version_entry {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
-                    let version_path = version_entry.path();
-                    if !version_path.is_dir() {
-                        continue;
-                    }
-
-                    let marker_path = version_path.join(IMMUTABLE_MARKER);
-                    if !marker_path.exists() {
-                        continue;
-                    }
-
-                    // Check if there's a DB record for this install dir
-                    let install_dir_str = version_path.to_string_lossy().to_string();
-                    let existing = self
-                        .catalog
-                        .find_installation_by_dir(&install_dir_str)
-                        .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
-
-                    if existing.is_none() {
-                        // Orphan: insert as corrupt
-                        let marker_content = fs::read_to_string(&marker_path).unwrap_or_default();
-                        let lines: Vec<&str> = marker_content.lines().collect();
-                        let manifest_version = lines.get(2).unwrap_or(&"unknown").to_string();
-                        let archive_hash = lines.get(3).unwrap_or(&"unknown").to_string();
-                        let now = Utc::now().to_rfc3339();
-
-                        let _ = self.catalog.upsert_model_installation(
-                            &model_id,
-                            &provider,
-                            &manifest_version,
-                            &archive_hash,
-                            &install_dir_str,
-                            "corrupt",
-                            &now,
-                            Some("unrecorded_install"),
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        let path = PathBuf::from("/dev/fd").join(file.as_raw_fd().to_string());
+        Ok((file, path))
     }
 
-    /// Find DB installation records whose directories don't exist on disk.
-    fn detect_missing_installations(&self) -> Result<(), ModelManagerError> {
-        let installations = self
-            .catalog
-            .list_model_installations()
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        model_id: &str,
+        install_dir: impl AsRef<Path>,
+        device: crate::asr::provider::DeviceIdentity,
+    ) -> Result<Self, ManagerError> {
+        let plan = fs_support::resolve_current_plan(model_id)?;
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::from(
+            [(model_id.to_owned(), 1)],
+        )));
+        Ok(Self {
+            observed_sherpa_runtime: plan.sherpa_runtime.clone(),
+            installation_storage: storage::InstallationStorage::TestPath,
+            plan,
+            install_dir: install_dir.as_ref().to_path_buf(),
+            runtime_identity_json: Some("{}".to_owned()),
+            device: DeviceProfile {
+                os: device.os,
+                arch: device.arch,
+                macos_major: device.macos_major,
+                memory_gib: device.memory_gib,
+                metal_available: device.backend == "metal",
+                chip: device.chip,
+            },
+            _guard: ExecutionLeaseGuard {
+                model_id: model_id.to_owned(),
+                registry,
+                _runtime_ownership: None,
+            },
+            validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
 
-        for install in installations {
-            if install.state == "corrupt"
-                || install.state == "deleting"
+    #[cfg(test)]
+    pub(crate) fn for_anchored_test(
+        model_id: &str,
+        nominal_root: impl AsRef<Path>,
+        relative: &Path,
+        files: Vec<(PathBuf, Vec<u8>)>,
+        device: crate::asr::provider::DeviceIdentity,
+    ) -> Result<Self, ManagerError> {
+        let plan = fs_support::resolve_current_plan(model_id)?;
+        let required = files
+            .iter()
+            .map(|(path, bytes)| {
+                (
+                    path.clone(),
+                    bytes.len() as u64,
+                    hex::encode(Sha256::digest(bytes)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let root_file = File::open(nominal_root.as_ref())?;
+        let storage =
+            anchored_reconcile::AnchoredFs::new(nominal_root.as_ref().to_path_buf(), root_file);
+        let installation = storage::AnchoredInstallation::capture(&storage, relative, &required)?;
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::from(
+            [(model_id.to_owned(), 1)],
+        )));
+        Ok(Self {
+            observed_sherpa_runtime: plan.sherpa_runtime.clone(),
+            installation_storage: storage::InstallationStorage::Anchored(installation),
+            plan,
+            install_dir: nominal_root.as_ref().join(relative),
+            runtime_identity_json: Some("{}".to_owned()),
+            device: DeviceProfile {
+                os: device.os,
+                arch: device.arch,
+                macos_major: device.macos_major,
+                memory_gib: device.memory_gib,
+                metal_available: device.backend == "metal",
+                chip: device.chip,
+            },
+            _guard: ExecutionLeaseGuard {
+                model_id: model_id.to_owned(),
+                registry,
+                _runtime_ownership: None,
+            },
+            validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+}
+
+impl<T: HttpTransport> ModelManager<T, Catalog> {
+    pub fn executable_installation(
+        &self,
+        model_id: &str,
+    ) -> Result<ExecutableInstallationLease, ManagerError> {
+        self.ensure_runtime_current()?;
+        let guard = self.acquire_execution_lease(model_id)?;
+        let device = DeviceProfile::current();
+        let record = self
+            .catalog
+            .execution_installation(model_id)?
+            .ok_or_else(|| ManagerError::new("model_not_installed", "installation is missing"))?;
+        if record.state != "runtime_qualified" {
+            return Err(ManagerError::new(
+                "model_runtime_unqualified",
+                "installation is not runtime qualified",
+            ));
+        }
+        let plan = ModelInstallPlan::resolve(
+            &record.model_id,
+            &record.manifest_version,
+            &record.bundle_identity,
+        )?;
+        fs_support::validate_device(&plan.device, &device)?;
+        let expected_dir = self.install_dir(&plan);
+        if record.install_dir != expected_dir {
+            return Err(ManagerError::integrity("installation path mismatch"));
+        }
+        let expected_runtime = plan
+            .sherpa_runtime
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| ManagerError::structural(error.to_string()))?;
+        match plan.qualification_policy {
+            QualificationPolicy::StructuralWithPinnedRuntime
+                if record.runtime_identity_json != expected_runtime =>
             {
-                continue;
+                return Err(ManagerError::new(
+                    "model_runtime_identity_mismatch",
+                    "Catalog runtime identity does not match pinned sherpa runtime",
+                ));
             }
-
-            let install_path = Path::new(&install.install_dir);
-            let marker_path = install_path.join(IMMUTABLE_MARKER);
-
-            if !install_path.exists() || !marker_path.exists() {
-                self.catalog
-                    .update_installation_state(
-                        &install.model_id,
-                        "corrupt",
-                        Some("missing_install_dir"),
-                    )
-                    .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?;
+            QualificationPolicy::RuntimeSmokeRequired if record.runtime_identity_json.is_none() => {
+                return Err(ManagerError::new(
+                    "model_runtime_unqualified",
+                    "qualified runtime identity is missing",
+                ));
             }
+            _ => {}
         }
-
-        Ok(())
+        let installation_storage = match &self.storage {
+            #[cfg(test)]
+            storage::ModelStorage::TestPath(_) => {
+                validate_executable_installation(
+                    &plan,
+                    &record.install_dir,
+                    self.observed_sherpa_runtime.as_ref(),
+                )?;
+                storage::InstallationStorage::TestPath
+            }
+            storage::ModelStorage::Anchored(root) => {
+                let relative = self.storage.relative_install_path(&record.install_dir)?;
+                let required = plan
+                    .install_contract
+                    .required_files()
+                    .iter()
+                    .map(|file| {
+                        Ok((
+                            safe_relative_path(&file.path)?,
+                            file.bytes,
+                            file.sha256.clone(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ManagerError>>()?;
+                let installation =
+                    storage::AnchoredInstallation::capture(root, &relative, &required)?;
+                anchored_reconcile::validate_installation_anchored(
+                    installation.root(),
+                    Path::new(""),
+                    &plan,
+                    self.observed_sherpa_runtime.as_ref(),
+                )?;
+                storage::InstallationStorage::Anchored(installation)
+            }
+        };
+        let lease = ExecutableInstallationLease {
+            plan,
+            install_dir: record.install_dir,
+            runtime_identity_json: record.runtime_identity_json,
+            device,
+            #[cfg(test)]
+            observed_sherpa_runtime: self.observed_sherpa_runtime.clone(),
+            installation_storage,
+            _guard: guard,
+            #[cfg(test)]
+            validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        lease.installation_storage.revalidate()?;
+        Ok(lease)
     }
+}
 
-    // -----------------------------------------------------------------------
-    // Internal helpers
-    // -----------------------------------------------------------------------
-
-    fn transition_download(
-        &self,
-        download_id: &str,
-        state: DownloadState,
-    ) -> Result<(), ModelManagerError> {
-        let state_str = download_state_name(&state);
-        self.catalog
-            .update_download_state(download_id, state_str)
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))
-    }
-
-    fn fail_download(
-        &self,
-        download_id: &str,
-        error_code: &str,
-        error_summary: &str,
-    ) -> Result<(), ModelManagerError> {
-        self.catalog
-            .fail_download_with_code(download_id, error_code, error_summary)
-            .map_err(|e| ModelManagerError::CatalogError(e.to_string()))
-    }
-
-    fn download_to_file(
-        &self,
-        url: &str,
-        dest: &Path,
-        expected_bytes: u64,
-        download_id: &str,
-    ) -> Result<(), ModelManagerError> {
-        let client = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                // Only allow redirects to known hosts
-                if attempt.previous().len() >= 5 {
-                    return attempt.error("too many redirects");
+impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
+    fn acquire_execution_lease(&self, model_id: &str) -> Result<ExecutionLeaseGuard, ManagerError> {
+        self.ensure_runtime_current()?;
+        fs_support::validate_component("model_id", model_id)?;
+        let mut registry = self.execution_leases.lock().unwrap();
+        match registry.entry(model_id.to_owned()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if *entry.get() == DELETE_RESERVED {
+                    return Err(ManagerError::new(
+                        "model_in_use",
+                        "model deletion is reserved",
+                    ));
                 }
-                let url = attempt.url();
-                let host = url.host_str().unwrap_or("");
-                // Check against the manifest allowlist
-                if !is_allowed_redirect_host(host) {
-                    return attempt.error("redirect to disallowed host");
-                }
-                attempt.follow()
-            }))
-            .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
-            .build()
-            .map_err(|e| ModelManagerError::DownloadFailed(e.to_string()))?;
-
-        let response = client
-            .get(url)
-            .send()
-            .map_err(|e| ModelManagerError::DownloadFailed(format!("HTTP request failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            return Err(ModelManagerError::DownloadFailed(format!(
-                "HTTP {}",
-                response.status()
-            )));
-        }
-
-        // Verify Content-Length matches expected
-        if let Some(content_length) = response.content_length() {
-            if content_length != expected_bytes {
-                return Err(ModelManagerError::DownloadFailed(format!(
-                    "Content-Length mismatch: header says {}, expected {}",
-                    content_length, expected_bytes
-                )));
+                let count = entry.get_mut();
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| ManagerError::new("model_in_use", "execution lease overflow"))?;
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(1);
             }
         }
+        Ok(ExecutionLeaseGuard {
+            model_id: model_id.to_owned(),
+            registry: self.execution_leases.clone(),
+            _runtime_ownership: self.runtime_ownership.clone(),
+        })
+    }
 
-        // Write to temp file
-        let mut file = fs::File::create(dest)
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
+    #[cfg(test)]
+    pub(crate) fn hold_execution_lease_for_test(
+        &self,
+        model_id: &str,
+        install_dir: impl AsRef<Path>,
+    ) -> Result<ExecutableInstallationLease, ManagerError> {
+        let manifest = model_registry()
+            .model(model_id)
+            .ok_or_else(|| ManagerError::structural("unknown model"))?;
+        let plan = ModelInstallPlan::from_manifest(manifest);
+        Ok(ExecutableInstallationLease {
+            observed_sherpa_runtime: plan.sherpa_runtime.clone(),
+            installation_storage: storage::InstallationStorage::TestPath,
+            plan,
+            install_dir: install_dir.as_ref().to_path_buf(),
+            runtime_identity_json: Some("{}".to_owned()),
+            device: DeviceProfile::current(),
+            _guard: self.acquire_execution_lease(model_id)?,
+            validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        })
+    }
 
-        let mut reader = response;
-        let mut buffer = [0u8; 8192];
-        let mut total_read: u64 = 0;
-        let mut last_progress: u64 = 0;
+    #[cfg(test)]
+    pub(crate) fn hold_anchored_execution_lease_for_test(
+        &self,
+        model_id: &str,
+        install_dir: impl AsRef<Path>,
+        files: Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<ExecutableInstallationLease, ManagerError> {
+        let plan = fs_support::resolve_current_plan(model_id)?;
+        let relative = self.storage.relative_install_path(install_dir.as_ref())?;
+        let required = files
+            .iter()
+            .map(|(path, bytes)| {
+                (
+                    path.clone(),
+                    bytes.len() as u64,
+                    hex::encode(Sha256::digest(bytes)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let root = self
+            .storage
+            .anchored_fs()
+            .ok_or_else(|| ManagerError::structural("anchored model storage required"))?;
+        let installation = storage::AnchoredInstallation::capture(&root, &relative, &required)?;
+        Ok(ExecutableInstallationLease {
+            observed_sherpa_runtime: plan.sherpa_runtime.clone(),
+            installation_storage: storage::InstallationStorage::Anchored(installation),
+            plan,
+            install_dir: install_dir.as_ref().to_path_buf(),
+            runtime_identity_json: Some("{}".to_owned()),
+            device: DeviceProfile::current(),
+            _guard: self.acquire_execution_lease(model_id)?,
+            validation_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
 
-        loop {
-            let bytes_read = reader
-                .read(&mut buffer)
-                .map_err(|e| ModelManagerError::DownloadFailed(format!("read error: {}", e)))?;
-            if bytes_read == 0 {
-                break;
-            }
-            file.write_all(&buffer[..bytes_read])
-                .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-            total_read += bytes_read as u64;
+    #[cfg(test)]
+    pub(crate) fn with_delete_reservation_barriers_for_test(
+        &self,
+        install_dir: impl AsRef<Path>,
+        barriers: DeleteReservationBarriers,
+    ) {
+        delete_reservation_hooks()
+            .lock()
+            .unwrap()
+            .insert(install_dir.as_ref().to_path_buf(), barriers);
+    }
+}
 
-            // Persist progress at bounded intervals
-            if total_read - last_progress >= PROGRESS_INTERVAL_BYTES {
-                last_progress = total_read;
-                let _ = self
-                    .catalog
-                    .update_download_progress(download_id, total_read);
-            }
+impl<T: HttpTransport, C: ModelCatalog> ModelManager<T, C> {
+    fn ensure_runtime_current(&self) -> Result<(), ManagerError> {
+        match &self.runtime_ownership {
+            Some(ownership) => ownership.ensure_current(),
+            None => Ok(()),
         }
-
-        file.flush()
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-        file.sync_all()
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-
-        // Final progress update
-        let _ = self
-            .catalog
-            .update_download_progress(download_id, total_read);
-
-        Ok(())
-    }
-
-    fn fsync_file(path: &Path) -> Result<(), ModelManagerError> {
-        let file = fs::File::open(path).map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-        file.sync_all()
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))
-    }
-
-    fn fsync_dir(path: &Path) -> Result<(), ModelManagerError> {
-        let dir = fs::File::open(path).map_err(|e| ModelManagerError::IoError(e.to_string()))?;
-        dir.sync_all()
-            .map_err(|e| ModelManagerError::IoError(e.to_string()))
     }
 }
 
-// ---------------------------------------------------------------------------
-// Row conversion helpers
-// ---------------------------------------------------------------------------
+#[allow(dead_code)]
+fn validate_executable_installation(
+    plan: &ModelInstallPlan,
+    install_dir: &Path,
+    observed_sherpa_runtime: Option<&FullSherpaRuntimeIdentity>,
+) -> Result<(), ManagerError> {
+    use install::{StructuralMarker, matches_marker};
+    use install_support::{installed_records, validate_inventory};
 
-fn row_to_download(row: &ModelDownloadRow) -> ModelDownload {
-    ModelDownload {
-        id: row.id.clone(),
-        model_id: row.model_id.clone(),
-        manifest_version: row.manifest_version.clone(),
-        archive_sha256: row.archive_sha256.clone(),
-        state: parse_download_state(&row.state),
-        downloaded_bytes: row.downloaded_bytes,
-        expected_bytes: row.expected_bytes,
-        temp_path: row.temp_path.clone(),
-        error_code: row.error_code.clone(),
-        error_summary: row.error_summary.clone(),
-        created_at: row.created_at.clone(),
-        updated_at: row.updated_at.clone(),
+    if !fs_support::real_dir(install_dir)? {
+        return Err(ManagerError::integrity("installation directory is missing"));
+    }
+    let marker: StructuralMarker = serde_json::from_slice(&fs_support::read_regular(
+        &install_dir.join(STRUCTURAL_MARKER),
+    )?)
+    .map_err(|_| ManagerError::structural("invalid structural marker"))?;
+    let structural_runtime = plan
+        .sherpa_runtime
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| ManagerError::structural(error.to_string()))?;
+    if !matches_marker(&marker, plan, structural_runtime.as_deref()) {
+        return Err(ManagerError::structural("structural marker mismatch"));
+    }
+    let actual = installed_records(install_dir)?;
+    if marker.installed_files != actual {
+        return Err(ManagerError::integrity(
+            "installed file inventory or hash mismatch",
+        ));
+    }
+    validate_inventory(plan, &actual)?;
+    install_support::validate_structure_for_reconcile(plan, install_dir, observed_sherpa_runtime)
+}
+
+pub const fn checked_required_additional_free(
+    remaining_parts: u64,
+    peak_additional_assembly: u64,
+    safety_margin: u64,
+) -> Option<u64> {
+    match remaining_parts.checked_add(peak_additional_assembly) {
+        Some(value) => value.checked_add(safety_margin),
+        None => None,
     }
 }
 
-fn row_to_installation(row: &ModelInstallationRow) -> ModelInstallation {
-    ModelInstallation {
-        model_id: row.model_id.clone(),
-        provider: row.provider.clone(),
-        manifest_version: row.manifest_version.clone(),
-        archive_sha256: row.archive_sha256.clone(),
-        install_dir: row.install_dir.clone(),
-        state: parse_install_state(&row.state),
-        installed_at: row.installed_at.clone(),
-        last_error_code: row.last_error_code.clone(),
+pub(crate) fn safe_relative_path(value: &str) -> Result<PathBuf, ManagerError> {
+    if value.is_empty() || value.contains('\\') {
+        return Err(ManagerError::structural("unsafe required path"));
+    }
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(ManagerError::structural("unsafe required path"));
+    }
+    Ok(path.to_path_buf())
+}
+
+pub(crate) use archive::extract_tar_bz2_safely;
+#[cfg(test)]
+pub(crate) fn extract_tar_bz2_from_held_files_for_test(
+    archive: File,
+    destination: File,
+    contract: &InstallContract,
+) -> Result<u64, ManagerError> {
+    let storage = anchored_reconcile::AnchoredFs::new(PathBuf::new(), destination);
+    archive::extract_tar_bz2_from_held_files(archive, &storage, contract)
+}
+#[cfg(test)]
+pub(crate) use install_support::validate_required_inventory_for_test;
+
+impl<T, C> ModelManager<T, C>
+where
+    T: HttpTransport,
+    C: ModelCatalog + crate::asr::runtime_qualifier::QualificationCatalog,
+{
+    #[cfg(test)]
+    pub(crate) fn runtime_qualifier_for_test<S>(
+        &self,
+        smoke: S,
+    ) -> crate::asr::runtime_qualifier::RuntimeQualifier<&C, S>
+    where
+        S: crate::asr::runtime_qualifier::RuntimeSmoke,
+    {
+        crate::asr::runtime_qualifier::RuntimeQualifier::new(&self.catalog, smoke)
     }
 }
 
-fn parse_download_state(value: &str) -> DownloadState {
-    match value {
-        "queued" => DownloadState::Queued,
-        "downloading" => DownloadState::Downloading,
-        "verifying" => DownloadState::Verifying,
-        "installing" => DownloadState::Installing,
-        "succeeded" => DownloadState::Succeeded,
-        "failed" => DownloadState::Failed,
-        "cancelled" => DownloadState::Cancelled,
-        _ => DownloadState::Failed,
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+impl<T, C> ModelManager<T, C>
+where
+    T: HttpTransport,
+    C: ModelCatalog + crate::asr::runtime_qualifier::QualificationCatalog,
+{
+    pub fn qualify_qwen17_current_device(
+        &self,
+        install_dir: impl AsRef<Path>,
+    ) -> Result<
+        crate::asr::runtime_qualifier::QualifiedRuntimeIdentity,
+        crate::asr::runtime_qualifier::QualifierError,
+    > {
+        self.ensure_runtime_current().map_err(|error| {
+            crate::asr::runtime_qualifier::QualifierError::new(error.code(), error.to_string())
+        })?;
+        const MODEL_ID: &str = "qwen3-asr-1.7b";
+        let manifest = model_registry().model(MODEL_ID).ok_or_else(|| {
+            crate::asr::runtime_qualifier::QualifierError::new(
+                "model_runtime_qualification_failed",
+                "Qwen 1.7B manifest is missing",
+            )
+        })?;
+        let plan = ModelInstallPlan::from_manifest(manifest);
+        let install_dir = install_dir.as_ref();
+        let device = DeviceProfile::current();
+        fs_support::validate_device(&plan.device, &device).map_err(|error| {
+            crate::asr::runtime_qualifier::QualifierError::new(error.code(), error.to_string())
+        })?;
+        validate_executable_installation(&plan, install_dir, self.observed_sherpa_runtime.as_ref())
+            .map_err(|error| {
+                crate::asr::runtime_qualifier::QualifierError::new(error.code(), error.to_string())
+            })?;
+        let current_device = crate::asr::provider::DeviceIdentity::current();
+        let handle = crate::asr::runtime_qualifier::QualificationHandle::from_manifest(
+            manifest,
+            install_dir,
+            current_device.clone(),
+        );
+        let smoke = crate::asr::qwen3_asr::Qwen17RuntimeSmoke::new(current_device.chip);
+        crate::asr::runtime_qualifier::RuntimeQualifier::new(&self.catalog, smoke).qualify(&handle)
     }
-}
 
-fn parse_install_state(value: &str) -> InstallState {
-    match value {
-        "ready" => InstallState::Ready,
-        "corrupt" => InstallState::Corrupt,
-        "deleting" => InstallState::Deleting,
-        _ => InstallState::Corrupt,
+    pub fn reconcile_qwen17_current_device(
+        &self,
+        install_dir: impl AsRef<Path>,
+    ) -> Result<(), crate::asr::runtime_qualifier::QualifierError> {
+        self.ensure_runtime_current().map_err(|error| {
+            crate::asr::runtime_qualifier::QualifierError::new(error.code(), error.to_string())
+        })?;
+        const MODEL_ID: &str = "qwen3-asr-1.7b";
+        let manifest = model_registry().model(MODEL_ID).ok_or_else(|| {
+            crate::asr::runtime_qualifier::QualifierError::new(
+                "model_runtime_qualification_recovery_required",
+                "Qwen 1.7B manifest is missing",
+            )
+        })?;
+        let device = crate::asr::provider::DeviceIdentity::current();
+        let handle = crate::asr::runtime_qualifier::QualificationHandle::from_manifest(
+            manifest,
+            install_dir,
+            device.clone(),
+        );
+        let smoke = crate::asr::qwen3_asr::Qwen17RuntimeSmoke::new(device.chip);
+        crate::asr::runtime_qualifier::RuntimeQualifier::new(&self.catalog, smoke)
+            .reconcile(&handle)
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn download_state_name(state: &DownloadState) -> &'static str {
-    match state {
-        DownloadState::Queued => "queued",
-        DownloadState::Downloading => "downloading",
-        DownloadState::Verifying => "verifying",
-        DownloadState::Installing => "installing",
-        DownloadState::Succeeded => "succeeded",
-        DownloadState::Failed => "failed",
-        DownloadState::Cancelled => "cancelled",
-    }
-}
-
-fn snake_case_provider(kind: crate::asr::settings::AsrProviderKind) -> String {
-    match kind {
-        crate::asr::settings::AsrProviderKind::SenseVoice => "sense_voice".to_string(),
-        crate::asr::settings::AsrProviderKind::Whisper => "whisper".to_string(),
-    }
-}
-
-/// Check if a redirect host is in the global allowlist.
-fn is_allowed_redirect_host(host: &str) -> bool {
-    // All models in the manifest share the same set of redirect hosts.
-    // We check against the known list.
-    const ALLOWED_HOSTS: &[&str] = &["github.com", "objects.githubusercontent.com"];
-    ALLOWED_HOSTS.contains(&host)
-}
-
-// ---------------------------------------------------------------------------
-// Public reconciliation entry point (used by service)
-// ---------------------------------------------------------------------------
-
-/// Reconcile model installations at startup.
-///
-/// Checks for orphan .part files, unrecorded installs, missing active
-/// directories, and corrupt files. Returns a list of reconciliation actions.
-pub fn reconcile_models(
-    manager: &ModelManager,
-    catalog: &crate::catalog::Catalog,
-) -> Result<Vec<String>, ModelManagerError> {
-    manager.reconcile()?;
-    // Return list of actions (for logging/monitoring)
-    let actions = catalog
-        .list_model_installations()
-        .map_err(|e| ModelManagerError::CatalogError(e.to_string()))?
-        .into_iter()
-        .filter(|i| i.state == "corrupt")
-        .map(|i| format!("model {} marked corrupt", i.model_id))
-        .collect();
-    Ok(actions)
 }

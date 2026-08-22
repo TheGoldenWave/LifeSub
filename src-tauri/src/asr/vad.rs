@@ -1,428 +1,437 @@
-//! Voice Activity Detection and audio partitioning.
-//!
-//! Provides a VAD detector trait, a deterministic fake detector for tests,
-//! and audio partitioning into non-overlapping windows with 200 ms speech
-//! padding and 25-second maximum duration. Windows exceeding 25 seconds are
-//! split at minimum-energy points or hard-split at the boundary.
+use crate::asr::audio::{AudioPreparationError, SampleRange, checked_sample_index};
+use crate::asr::manifest::VadManifest;
+use crate::asr::model_manager::ExecutableInstallationLease;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+use std::fs::File;
+use std::path::{Path, PathBuf};
 
-/// VAD speech padding in milliseconds (applied to each side of core interval).
-const SPEECH_PADDING_MS: u64 = 200;
+pub const PADDING: u64 = 3_200;
+pub const MAX_PROVIDER_WINDOW: u64 = 400_000;
+pub const ENERGY_FRAME: u64 = 320;
+pub const ENERGY_HALF_FRAME: u64 = 160;
+pub const SPLIT_SEARCH_RADIUS: u64 = 32_000;
 
-/// Maximum continuous speech window duration in milliseconds.
-const MAX_WINDOW_MS: u64 = 25_000;
-
-/// Energy search window for split-point detection (ms on each side).
-const ENERGY_SEARCH_WINDOW_MS: u64 = 2_000;
-
-/// Standard ASR sample rate for time/sample conversion.
-#[allow(dead_code)]
-const TARGET_SAMPLE_RATE: u32 = 16_000;
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/// A core speech interval detected by VAD (no padding applied).
-///
-/// These are the non-overlapping evidence ranges. Padded intervals used for
-/// inference context are derived during partitioning.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SpeechSegment {
-    /// Start time in milliseconds (chunk-relative, core interval).
-    pub start_ms: u64,
-    /// End time in milliseconds (chunk-relative, core interval).
-    pub end_ms: u64,
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderWindow {
+    pub core: SampleRange,
+    pub inference: SampleRange,
 }
 
-/// A partitioned audio window ready for inference.
-///
-/// The core interval is the non-overlapping evidence range. The padded
-/// interval extends by 200 ms on each side to provide inference context.
-/// The sample range indexes into the full decoded audio buffer.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PartitionedWindow {
-    /// Core interval start in milliseconds (non-overlapping, for evidence).
-    pub core_start_ms: u64,
-    /// Core interval end in milliseconds.
-    pub core_end_ms: u64,
-    /// Padded interval start (core_start_ms - 200 ms, clamped to 0).
-    pub padded_start_ms: u64,
-    /// Padded interval end (core_end_ms + 200 ms, clamped to duration).
-    pub padded_end_ms: u64,
-    /// Starting sample index in the full decoded audio buffer.
-    pub sample_offset: usize,
-    /// Number of samples in this window (padded range).
-    pub sample_count: usize,
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvidenceUtterance {
+    pub evidence: SampleRange,
+    pub windows: Vec<ProviderWindow>,
 }
 
-/// Trait for voice activity detection.
-///
-/// Implementations include the real Silero VAD (`asr-runtime` feature) and
-/// a deterministic fake detector for fast tests.
-pub trait VadDetector: Send {
-    /// Detect speech segments in the given audio samples.
-    ///
-    /// Returns core (non-padded) speech intervals in chronological order.
-    fn detect(&self, samples: &[f32], sample_rate: u32) -> Vec<SpeechSegment>;
+pub struct VerifiedVadModel {
+    path: PathBuf,
+    _file: File,
+    _lease: ExecutableInstallationLease,
 }
 
-/// A deterministic fake VAD detector for tests.
-///
-/// Returns pre-configured segments regardless of the audio content.
-pub struct FakeVadDetector {
-    segments: Vec<SpeechSegment>,
-}
+impl VerifiedVadModel {
+    pub fn new(lease: ExecutableInstallationLease) -> Result<Self, AudioPreparationError> {
+        if lease.model_id() != crate::asr::manifest::vad_manifest().id || !lease.is_fd_anchored() {
+            return Err(AudioPreparationError::InvalidVadConfig);
+        }
+        lease
+            .revalidate_execution_boundary()
+            .map_err(|_| AudioPreparationError::DetectorFailed)?;
+        let (file, path) = lease
+            .open_execution_path(Path::new("silero_vad.onnx"))
+            .map_err(|_| AudioPreparationError::DetectorFailed)?;
+        lease
+            .revalidate_execution_boundary()
+            .map_err(|_| AudioPreparationError::DetectorFailed)?;
+        Ok(Self {
+            path,
+            _file: file,
+            _lease: lease,
+        })
+    }
 
-impl FakeVadDetector {
-    /// Create a fake detector that always returns the given segments.
-    pub fn new(segments: Vec<SpeechSegment>) -> Self {
-        Self { segments }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[cfg(feature = "asr-runtime")]
+    fn revalidate(&self) -> Result<(), AudioPreparationError> {
+        self._lease
+            .revalidate_execution_boundary()
+            .map_err(|_| AudioPreparationError::DetectorFailed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_count_for_test(&self) -> usize {
+        self._lease.validation_count()
     }
 }
 
-impl VadDetector for FakeVadDetector {
-    fn detect(&self, _samples: &[f32], _sample_rate: u32) -> Vec<SpeechSegment> {
-        self.segments.clone()
+#[derive(Clone, Debug, PartialEq)]
+pub struct VadRuntimeConfig {
+    pub threshold: f32,
+    pub min_silence_duration_seconds: f32,
+    pub min_speech_duration_seconds: f32,
+    pub max_speech_duration_seconds: f32,
+    pub window_size_samples: i32,
+    pub sample_rate_hz: i32,
+    pub num_threads: i32,
+    pub provider: String,
+}
+
+impl VadRuntimeConfig {
+    pub fn canonical() -> Self {
+        Self {
+            threshold: 0.5,
+            min_silence_duration_seconds: 0.5,
+            min_speech_duration_seconds: 0.25,
+            max_speech_duration_seconds: 20.0,
+            window_size_samples: 512,
+            sample_rate_hz: 16_000,
+            num_threads: 1,
+            provider: "cpu".to_owned(),
+        }
+    }
+
+    pub fn from_manifest(manifest: &VadManifest) -> Result<Self, AudioPreparationError> {
+        let config = Self {
+            threshold: manifest.threshold,
+            min_silence_duration_seconds: manifest.min_silence_duration_seconds,
+            min_speech_duration_seconds: manifest.min_speech_duration_seconds,
+            max_speech_duration_seconds: manifest.max_speech_duration_seconds,
+            window_size_samples: manifest.window_size_samples,
+            sample_rate_hz: manifest.sample_rate_hz,
+            num_threads: manifest.num_threads,
+            provider: manifest.provider.to_owned(),
+        };
+        if config != Self::canonical() {
+            return Err(AudioPreparationError::InvalidVadConfig);
+        }
+        Ok(config)
+    }
+
+    #[cfg(feature = "asr-runtime")]
+    pub fn to_sherpa_config(
+        &self,
+        model_path: &std::path::Path,
+    ) -> Result<sherpa_onnx::VadModelConfig, AudioPreparationError> {
+        let model = model_path
+            .to_str()
+            .ok_or(AudioPreparationError::DetectorFailed)?
+            .to_owned();
+        Ok(sherpa_onnx::VadModelConfig {
+            silero_vad: sherpa_onnx::SileroVadModelConfig {
+                model: Some(model),
+                threshold: self.threshold,
+                min_silence_duration: self.min_silence_duration_seconds,
+                min_speech_duration: self.min_speech_duration_seconds,
+                window_size: self.window_size_samples,
+                max_speech_duration: self.max_speech_duration_seconds,
+            },
+            ten_vad: sherpa_onnx::TenVadModelConfig {
+                model: None,
+                threshold: self.threshold,
+                min_silence_duration: self.min_silence_duration_seconds,
+                min_speech_duration: self.min_speech_duration_seconds,
+                window_size: self.window_size_samples,
+                max_speech_duration: self.max_speech_duration_seconds,
+            },
+            sample_rate: self.sample_rate_hz,
+            num_threads: self.num_threads,
+            provider: Some(self.provider.clone()),
+            debug: false,
+        })
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+pub trait SpeechDetector {
+    fn detect(&mut self, samples: &[f32]) -> Result<Vec<SampleRange>, AudioPreparationError>;
+}
 
-/// Partition decoded audio into non-overlapping windows with padding.
-///
-/// Each `SpeechSegment` is expanded by 200 ms on each side for inference
-/// context. Segments (or groups of segments) exceeding 25 seconds are split
-/// at minimum-energy points; if no clear energy dip is found, they are
-/// hard-split at the 25-second boundary. Core intervals remain monotonic
-/// and non-overlapping.
-///
-/// Evidence ranges must use `core_start_ms`/`core_end_ms`, not the padded
-/// inference context.
-pub fn partition_audio(
+#[cfg(feature = "asr-runtime")]
+pub struct SherpaSpeechDetector {
+    detector: sherpa_onnx::VoiceActivityDetector,
+    window_size_samples: usize,
+    _model: VerifiedVadModel,
+}
+
+#[cfg(feature = "asr-runtime")]
+impl SherpaSpeechDetector {
+    pub fn new(
+        verified_model: VerifiedVadModel,
+        config: VadRuntimeConfig,
+    ) -> Result<Self, AudioPreparationError> {
+        verified_model.revalidate()?;
+        let native = config.to_sherpa_config(verified_model.path())?;
+        let detector = sherpa_onnx::VoiceActivityDetector::create(
+            &native,
+            config.max_speech_duration_seconds + config.min_silence_duration_seconds + 1.0,
+        )
+        .ok_or(AudioPreparationError::DetectorFailed)?;
+        verified_model.revalidate()?;
+        let window_size_samples = usize::try_from(config.window_size_samples)
+            .map_err(|_| AudioPreparationError::InvalidVadConfig)?;
+        if window_size_samples == 0 {
+            return Err(AudioPreparationError::InvalidVadConfig);
+        }
+        Ok(Self {
+            detector,
+            window_size_samples,
+            _model: verified_model,
+        })
+    }
+
+    fn drain(&self, ranges: &mut Vec<SampleRange>) -> Result<(), AudioPreparationError> {
+        while let Some(segment) = self.detector.front() {
+            let start = u64::try_from(segment.start())
+                .map_err(|_| AudioPreparationError::DetectorFailed)?;
+            let length =
+                u64::try_from(segment.n()).map_err(|_| AudioPreparationError::DetectorFailed)?;
+            let end = start
+                .checked_add(length)
+                .ok_or(AudioPreparationError::ArithmeticOverflow)?;
+            ranges.push(SampleRange::new(start, end)?);
+            self.detector.pop();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "asr-runtime")]
+impl SpeechDetector for SherpaSpeechDetector {
+    fn detect(&mut self, samples: &[f32]) -> Result<Vec<SampleRange>, AudioPreparationError> {
+        self.detector.reset();
+        let mut ranges = Vec::new();
+        for window in samples.chunks(self.window_size_samples) {
+            self.detector.accept_waveform(window);
+            self.drain(&mut ranges)?;
+        }
+        self.detector.flush();
+        self.drain(&mut ranges)?;
+        Ok(ranges)
+    }
+}
+
+pub struct FakeSpeechDetector {
+    cores: Vec<SampleRange>,
+}
+
+impl FakeSpeechDetector {
+    pub fn new(cores: Vec<SampleRange>) -> Self {
+        Self { cores }
+    }
+}
+
+impl SpeechDetector for FakeSpeechDetector {
+    fn detect(&mut self, _samples: &[f32]) -> Result<Vec<SampleRange>, AudioPreparationError> {
+        Ok(self.cores.clone())
+    }
+}
+
+pub fn select_boundary(latest_safe: u64, candidates: &[(u64, f64)]) -> u64 {
+    candidates
+        .iter()
+        .min_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)))
+        .map(|candidate| candidate.0)
+        .unwrap_or(latest_safe)
+}
+
+pub fn select_split_boundary(
     samples: &[f32],
-    sample_rate: u32,
-    segments: &[SpeechSegment],
-    duration_ms: u64,
-) -> Vec<PartitionedWindow> {
-    if segments.is_empty() {
-        return Vec::new();
+    core: SampleRange,
+    cursor: u64,
+    latest_safe: u64,
+    injected_candidates: Option<&[u64]>,
+) -> Result<u64, AudioPreparationError> {
+    let total_samples =
+        u64::try_from(samples.len()).map_err(|_| AudioPreparationError::IndexOutOfRange)?;
+    if core.start > cursor
+        || cursor >= latest_safe
+        || latest_safe >= core.end
+        || core.end > total_samples
+    {
+        return Err(AudioPreparationError::InvalidRange);
     }
-
-    let mut windows = Vec::new();
-
-    for segment in segments {
-        let seg_start = segment.start_ms;
-        let seg_end = segment.end_ms;
-
-        if seg_end <= seg_start || seg_start >= duration_ms {
+    let search_start = checked_sub_or_zero(latest_safe, SPLIT_SEARCH_RADIUS);
+    let search_end = latest_safe
+        .checked_add(SPLIT_SEARCH_RADIUS)
+        .ok_or(AudioPreparationError::ArithmeticOverflow)?;
+    let generated;
+    let candidates = if let Some(candidates) = injected_candidates {
+        candidates
+    } else {
+        generated = absolute_grid_candidates(search_start, latest_safe)?;
+        &generated
+    };
+    let mut scored = Vec::new();
+    for candidate in candidates.iter().copied() {
+        let frame_start = match candidate.checked_sub(ENERGY_HALF_FRAME) {
+            Some(value) => value,
+            None => continue,
+        };
+        let frame_end = candidate
+            .checked_add(ENERGY_HALF_FRAME)
+            .ok_or(AudioPreparationError::ArithmeticOverflow)?;
+        if candidate % ENERGY_FRAME != 0
+            || candidate <= cursor
+            || candidate > latest_safe
+            || candidate < core.start
+            || candidate >= core.end
+            || candidate < search_start
+            || candidate > search_end
+            || frame_start < core.start
+            || frame_end > core.end
+            || frame_end > total_samples
+        {
             continue;
         }
-
-        let clamped_end = seg_end.min(duration_ms);
-
-        // Split segments longer than MAX_WINDOW_MS
-        let sub_segments = split_long_segment(samples, sample_rate, seg_start, clamped_end);
-
-        for (sub_start, sub_end) in sub_segments {
-            let padded_start = sub_start.saturating_sub(SPEECH_PADDING_MS);
-            let padded_end = (sub_end + SPEECH_PADDING_MS).min(duration_ms);
-
-            let sample_offset = ms_to_sample_index(padded_start, sample_rate);
-            let sample_end = ms_to_sample_index(padded_end, sample_rate);
-            let sample_count = sample_end.saturating_sub(sample_offset);
-
-            windows.push(PartitionedWindow {
-                core_start_ms: sub_start,
-                core_end_ms: sub_end,
-                padded_start_ms: padded_start,
-                padded_end_ms: padded_end,
-                sample_offset,
-                sample_count,
-            });
+        let start = checked_sample_index(frame_start, samples.len())?;
+        let end = usize::try_from(frame_end).map_err(|_| AudioPreparationError::IndexOutOfRange)?;
+        if end > samples.len() {
+            return Err(AudioPreparationError::IndexOutOfRange);
         }
+        let sum = samples[start..end].iter().fold(0.0_f64, |sum, sample| {
+            let value = f64::from(*sample);
+            sum + value * value
+        });
+        scored.push((candidate, sum / ENERGY_FRAME as f64));
     }
-
-    windows
+    Ok(select_boundary(latest_safe, &scored))
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Split a long segment (>25s) into sub-segments at minimum-energy points.
-///
-/// Returns a list of (start_ms, end_ms) pairs each ≤ MAX_WINDOW_MS.
-fn split_long_segment(
+pub fn partition_detector_cores(
     samples: &[f32],
-    sample_rate: u32,
-    start_ms: u64,
-    end_ms: u64,
-) -> Vec<(u64, u64)> {
-    let total_duration = end_ms - start_ms;
+    cores: &[SampleRange],
+) -> Result<Vec<EvidenceUtterance>, AudioPreparationError> {
+    validate_detector_cores(samples, cores)?;
+    cores
+        .iter()
+        .copied()
+        .map(|core| {
+            Ok(EvidenceUtterance {
+                evidence: core,
+                windows: partition_core(samples, core)?,
+            })
+        })
+        .collect()
+}
 
-    if total_duration <= MAX_WINDOW_MS {
-        return vec![(start_ms, end_ms)];
+pub fn partition_without_vad(samples: &[f32]) -> Result<EvidenceUtterance, AudioPreparationError> {
+    let total_samples =
+        u64::try_from(samples.len()).map_err(|_| AudioPreparationError::IndexOutOfRange)?;
+    let evidence = SampleRange::new(0, total_samples)?;
+    Ok(EvidenceUtterance {
+        evidence,
+        windows: partition_core(samples, evidence)?,
+    })
+}
+
+fn validate_detector_cores(
+    samples: &[f32],
+    cores: &[SampleRange],
+) -> Result<(), AudioPreparationError> {
+    if cores.is_empty() {
+        return Err(AudioPreparationError::InvalidDetectorCores);
     }
+    let total_samples =
+        u64::try_from(samples.len()).map_err(|_| AudioPreparationError::IndexOutOfRange)?;
+    let mut previous: Option<SampleRange> = None;
+    for core in cores {
+        if core.start >= core.end || core.end > total_samples {
+            return Err(AudioPreparationError::InvalidDetectorCores);
+        }
+        if let Some(previous_core) = previous
+            && (core.start <= previous_core.start || core.start < previous_core.end)
+        {
+            return Err(AudioPreparationError::InvalidDetectorCores);
+        }
+        previous = Some(*core);
+    }
+    Ok(())
+}
 
-    let mut splits = Vec::new();
-    let mut cursor = start_ms;
-
-    while cursor < end_ms {
-        let remaining = end_ms - cursor;
-        if remaining <= MAX_WINDOW_MS {
-            splits.push((cursor, end_ms));
+fn partition_core(
+    samples: &[f32],
+    core: SampleRange,
+) -> Result<Vec<ProviderWindow>, AudioPreparationError> {
+    let total_samples =
+        u64::try_from(samples.len()).map_err(|_| AudioPreparationError::IndexOutOfRange)?;
+    if core.start >= core.end || core.end > total_samples {
+        return Err(AudioPreparationError::InvalidRange);
+    }
+    let mut windows = Vec::new();
+    let mut cursor = core.start;
+    while cursor < core.end {
+        let inference_start = checked_sub_or_zero(cursor, PADDING);
+        let padded_core_end = core
+            .end
+            .checked_add(PADDING)
+            .ok_or(AudioPreparationError::ArithmeticOverflow)?
+            .min(total_samples);
+        let padded_len = padded_core_end
+            .checked_sub(inference_start)
+            .ok_or(AudioPreparationError::ArithmeticOverflow)?;
+        if padded_len <= MAX_PROVIDER_WINDOW {
+            windows.push(ProviderWindow {
+                core: SampleRange::new(cursor, core.end)?,
+                inference: SampleRange::new(inference_start, padded_core_end)?,
+            });
             break;
         }
 
-        // Try to find a minimum-energy split point within the last
-        // ENERGY_SEARCH_WINDOW_MS before the MAX_WINDOW_MS boundary.
-        let boundary = cursor + MAX_WINDOW_MS;
-        let search_start = boundary.saturating_sub(ENERGY_SEARCH_WINDOW_MS);
-        let search_end = boundary;
-
-        let split_point = find_min_energy_split(
-            samples,
-            sample_rate,
-            search_start,
-            search_end,
-            cursor,
-            end_ms,
-        );
-
-        splits.push((cursor, split_point));
-        cursor = split_point;
-    }
-
-    splits
-}
-
-/// Find the minimum-energy point in a search window.
-///
-/// Returns the split point in milliseconds. If no clear energy dip is found,
-/// falls back to a hard split at the boundary.
-fn find_min_energy_split(
-    samples: &[f32],
-    sample_rate: u32,
-    search_start_ms: u64,
-    search_end_ms: u64,
-    clip_start_ms: u64,
-    clip_end_ms: u64,
-) -> u64 {
-    let boundary_ms = search_end_ms;
-
-    let search_start_sample = ms_to_sample_index(search_start_ms, sample_rate);
-    let search_end_sample = ms_to_sample_index(search_end_ms, sample_rate).min(samples.len());
-
-    if search_start_sample >= search_end_sample || search_end_sample - search_start_sample < 100 {
-        // Search window too small — hard split at boundary
-        return boundary_ms;
-    }
-
-    // Compute energy in overlapping windows of ~20ms
-    let window_size = ms_to_sample_index(20, sample_rate);
-    let hop_size = window_size / 2;
-
-    let mut min_energy = f32::MAX;
-    let mut min_energy_sample = search_start_sample;
-
-    let mut pos = search_start_sample;
-    while pos + window_size <= search_end_sample {
-        let energy: f32 = samples[pos..pos + window_size]
-            .iter()
-            .map(|&s| s * s)
-            .sum();
-        if energy < min_energy {
-            min_energy = energy;
-            min_energy_sample = pos + window_size / 2;
+        let latest_safe = inference_start
+            .checked_add(MAX_PROVIDER_WINDOW)
+            .and_then(|value| value.checked_sub(PADDING))
+            .ok_or(AudioPreparationError::ArithmeticOverflow)?;
+        if latest_safe <= cursor || latest_safe >= core.end {
+            return Err(AudioPreparationError::InvalidRange);
         }
-        pos += hop_size;
-    }
-
-    // Convert sample index back to ms
-    let min_energy_ms = (min_energy_sample as u64 * 1000) / sample_rate as u64;
-
-    // Ensure the split point is within the valid range
-    if min_energy_ms > clip_start_ms && min_energy_ms < clip_end_ms {
-        min_energy_ms
-    } else {
-        boundary_ms
-    }
-}
-
-/// Convert milliseconds to sample index at the given sample rate.
-fn ms_to_sample_index(ms: u64, sample_rate: u32) -> usize {
-    // Use ceil: (ms * sample_rate + 999) / 1000
-    ((ms as u64 * sample_rate as u64 + 999) / 1000) as usize
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fake_detector_returns_provided_segments() {
-        let segments = vec![
-            SpeechSegment {
-                start_ms: 100,
-                end_ms: 500,
-            },
-            SpeechSegment {
-                start_ms: 1000,
-                end_ms: 2000,
-            },
-        ];
-        let detector = FakeVadDetector::new(segments.clone());
-        let result = detector.detect(&[0.0f32; 100], TARGET_SAMPLE_RATE);
-        assert_eq!(result, segments);
-    }
-
-    #[test]
-    fn fake_detector_empty() {
-        let detector = FakeVadDetector::new(vec![]);
-        let result = detector.detect(&[0.0f32; 100], TARGET_SAMPLE_RATE);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn partition_empty_segments() {
-        let samples = vec![0.0f32; 160_000];
-        let windows = partition_audio(&samples, TARGET_SAMPLE_RATE, &[], 10_000);
-        assert!(windows.is_empty());
-    }
-
-    #[test]
-    fn partition_single_short_segment() {
-        let segments = vec![SpeechSegment {
-            start_ms: 1000,
-            end_ms: 2000,
-        }];
-        let samples = vec![0.0f32; 160_000];
-        let windows = partition_audio(&samples, TARGET_SAMPLE_RATE, &segments, 10_000);
-        assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].core_start_ms, 1000);
-        assert_eq!(windows[0].core_end_ms, 2000);
-        assert_eq!(windows[0].padded_start_ms, 800); // 1000 - 200
-        assert_eq!(windows[0].padded_end_ms, 2200); // 2000 + 200
-    }
-
-    #[test]
-    fn padding_clamped_to_zero() {
-        let segments = vec![SpeechSegment {
-            start_ms: 50,
-            end_ms: 500,
-        }];
-        let samples = vec![0.0f32; 160_000];
-        let windows = partition_audio(&samples, TARGET_SAMPLE_RATE, &segments, 10_000);
-        assert_eq!(windows[0].padded_start_ms, 0);
-    }
-
-    #[test]
-    fn padding_clamped_to_duration() {
-        let segments = vec![SpeechSegment {
-            start_ms: 9500,
-            end_ms: 10_000,
-        }];
-        let samples = vec![0.0f32; 160_000];
-        let windows = partition_audio(&samples, TARGET_SAMPLE_RATE, &segments, 10_000);
-        assert_eq!(windows[0].padded_end_ms, 10_000);
-    }
-
-    #[test]
-    fn windows_are_monotonic_and_non_overlapping() {
-        let segments = vec![
-            SpeechSegment {
-                start_ms: 0,
-                end_ms: 1000,
-            },
-            SpeechSegment {
-                start_ms: 2000,
-                end_ms: 3000,
-            },
-            SpeechSegment {
-                start_ms: 5000,
-                end_ms: 7000,
-            },
-        ];
-        let samples = vec![0.0f32; 160_000];
-        let windows = partition_audio(&samples, TARGET_SAMPLE_RATE, &segments, 10_000);
-
-        for pair in windows.windows(2) {
-            assert!(pair[0].core_end_ms <= pair[1].core_start_ms);
+        let boundary = select_split_boundary(samples, core, cursor, latest_safe, None)?;
+        if boundary <= cursor || boundary > latest_safe {
+            return Err(AudioPreparationError::InvalidRange);
         }
-        for w in &windows {
-            assert!(w.core_start_ms < w.core_end_ms);
-            assert!(w.core_end_ms <= 10_000);
+        let inference_end = boundary
+            .checked_add(PADDING)
+            .ok_or(AudioPreparationError::ArithmeticOverflow)?;
+        let inference = SampleRange::new(inference_start, inference_end)?;
+        if inference.checked_len()? > MAX_PROVIDER_WINDOW {
+            return Err(AudioPreparationError::InvalidRange);
         }
-    }
-
-    #[test]
-    fn long_segment_splits_at_25s() {
-        let segments = vec![SpeechSegment {
-            start_ms: 0,
-            end_ms: 55_000,
-        }];
-        let samples = vec![0.5f32; 880_000]; // 55s @ 16kHz
-        let windows = partition_audio(&samples, TARGET_SAMPLE_RATE, &segments, 55_000);
-
-        assert!(windows.len() >= 3);
-        for w in &windows {
-            assert!(w.core_end_ms - w.core_start_ms <= MAX_WINDOW_MS);
-        }
-    }
-
-    #[test]
-    fn min_energy_split_finds_dip() {
-        let segments = vec![SpeechSegment {
-            start_ms: 0,
-            end_ms: 30_000,
-        }];
-        let mut samples = vec![0.5f32; 480_000];
-        // Create energy dip near the 25s boundary (within search window: 23_000–25_000 ms)
-        let dip_center_ms = 24_000;
-        let dip_center = (dip_center_ms * TARGET_SAMPLE_RATE as u64 / 1000) as usize;
-        let dip_width = 1600;
-        for i in dip_center.saturating_sub(dip_width)..(dip_center + dip_width).min(samples.len()) {
-            samples[i] = 0.0;
-        }
-
-        let windows = partition_audio(&samples, TARGET_SAMPLE_RATE, &segments, 30_000);
-        assert!(windows.len() >= 2);
-
-        let has_split_near_dip = windows.windows(2).any(|pair| {
-            let split = pair[0].core_end_ms;
-            split >= 23_000 && split <= 25_000
+        windows.push(ProviderWindow {
+            core: SampleRange::new(cursor, boundary)?,
+            inference,
         });
-        assert!(has_split_near_dip);
+        cursor = boundary;
     }
+    Ok(windows)
+}
 
-    #[test]
-    fn window_sample_indices_are_valid() {
-        let segments = vec![
-            SpeechSegment {
-                start_ms: 1000,
-                end_ms: 2000,
-            },
-            SpeechSegment {
-                start_ms: 3000,
-                end_ms: 4000,
-            },
-        ];
-        let samples = vec![0.5f32; 160_000];
-        let windows = partition_audio(&samples, TARGET_SAMPLE_RATE, &segments, 10_000);
-
-        for w in &windows {
-            assert!(w.sample_offset + w.sample_count <= samples.len());
-            assert!(w.sample_count > 0);
-        }
+fn absolute_grid_candidates(start: u64, end: u64) -> Result<Vec<u64>, AudioPreparationError> {
+    if start > end {
+        return Ok(Vec::new());
     }
+    let remainder = start % ENERGY_FRAME;
+    let first = if remainder == 0 {
+        start
+    } else {
+        start
+            .checked_add(ENERGY_FRAME - remainder)
+            .ok_or(AudioPreparationError::ArithmeticOverflow)?
+    };
+    let mut candidates = Vec::new();
+    let mut candidate = first;
+    while candidate <= end {
+        candidates.push(candidate);
+        candidate = match candidate.checked_add(ENERGY_FRAME) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    Ok(candidates)
+}
+
+#[allow(clippy::manual_saturating_arithmetic)]
+fn checked_sub_or_zero(value: u64, amount: u64) -> u64 {
+    // The frozen contract requires checked arithmetic followed by an explicit zero clamp.
+    value.checked_sub(amount).unwrap_or(0)
 }

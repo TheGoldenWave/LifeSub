@@ -6,17 +6,17 @@ export interface TranscriptSegment {
   endMs: number
   source: '麦克风' | '系统音频' | '导入音频'
   text: string
+  chunkId?: string | null
+  chunkStartMs?: number | null
+  chunkEndMs?: number | null
 }
 
 export interface TranscriptRevision {
   number: number
   provider: string
   label: string
+  createdAt?: string
   segments: TranscriptSegment[]
-  /** V0.2: provenance status for the revision */
-  provenance?: 'legacy_unverified' | 'verified_local_asr' | 'manual'
-  /** V0.2: IDs of associated provider receipts */
-  receiptIds?: string[]
 }
 
 export interface EvidenceRecord {
@@ -25,155 +25,103 @@ export interface EvidenceRecord {
   startedAt: string
   duration: string
   status: 'available' | 'processing'
+  chunks: Array<{
+    id: string
+    source: '麦克风' | '系统音频' | '导入音频'
+    audioPath: string
+    integrityState: 'available' | 'corrupted' | 'missing'
+    errorCode?: string | null
+  }>
+  latestJob?: {
+    id: string
+    state: string
+    errorCode?: string | null
+    errorSummary?: string | null
+    chunkId: string
+  } | null
   revision: TranscriptRevision
   originalRevision: TranscriptRevision
-  /** V0.2: all revisions for this record (for revision selector) */
-  allRevisions?: TranscriptRevision[]
-  /** V0.2: current chunk integrity state */
-  chunkIntegrity?: 'available' | 'corrupted' | 'missing'
+  revisions: TranscriptRevision[]
+  /** 录音过程中添加的笔记 */
+  notes: CaptureNote[]
 }
 
-// -- ASR domain types (V0.2) --
+// ── New types for UI redesign ──────────────────────────────────────────────
 
-export type AsrProviderKind = 'sense_voice' | 'whisper'
+/** 笔记标签 */
+export type NoteTag = '待办' | '备忘' | '问题' | '决定' | string
 
-export type WhisperTask = 'transcribe' | 'translate'
-
-/** camelCase view model — the only shape UI components import. */
-export type AsrProviderOptions =
-  | { kind: 'sense_voice'; useItn: boolean }
-  | { kind: 'whisper'; task: WhisperTask }
-
-export interface AsrSettings {
-  provider: AsrProviderKind
-  modelId: string
-  language: string
-  numThreads: number
-  vadEnabled: boolean
-  autoTranscribeImports: boolean
-  providerOptions: AsrProviderOptions
-}
-
-/** snake_case Core DTO — only used inside the ASR service boundary. */
-export interface AsrSettingsCore {
-  provider: AsrProviderKind
-  model_id: string
-  language: string
-  num_threads: number
-  vad_enabled: boolean
-  auto_transcribe_imports: boolean
-  provider_options: AsrProviderOptionsCore
-}
-
-export type AsrProviderOptionsCore =
-  | { kind: 'sense_voice'; use_itn: boolean }
-  | { kind: 'whisper'; task: WhisperTask }
-
-export type ModelDownloadState =
-  | 'queued'
-  | 'downloading'
-  | 'verifying'
-  | 'installing'
-  | 'succeeded'
-  | 'failed'
-  | 'cancelled'
-
-export interface ModelDownload {
+/** 录音过程中添加的笔记 */
+export interface CaptureNote {
   id: string
-  modelId: string
-  state: ModelDownloadState
-  downloadedBytes: number
-  expectedBytes: number
-  errorCode: string | null
-}
-
-export interface ModelDownloadCore {
-  id: string
-  model_id: string
-  manifest_version: string
-  state: ModelDownloadState
-  downloaded_bytes: number
-  expected_bytes: number
-  error_code: string | null
-}
-
-export interface ModelInfo {
-  modelId: string
-  provider: AsrProviderKind
-  displayName: string
-  description: string
-  sizeBytes: number
-  license: string
-  languages: string[]
-  recommended: boolean
-  installed: boolean
-  downloadState: ModelDownload | null
-}
-
-export interface ModelInfoCore {
-  model_id: string
-  provider: AsrProviderKind
-  display_name: string
-  description: string
-  size_bytes: number
-  license: string
-  languages: string[]
-  recommended: boolean
-  installed: boolean
-  download_state: ModelDownloadCore | null
-}
-
-export type AsrJobState =
-  | 'queued'
-  | 'blocked_model'
-  | 'preparing'
-  | 'transcribing'
-  | 'succeeded'
-  | 'failed'
-  | 'cancelled'
-
-export interface AsrJob {
-  id: string
-  sessionId: string
-  chunkId: string
-  provider: AsrProviderKind
-  modelId: string
-  state: AsrJobState
-  errorCode: string | null
-  errorSummary: string | null
+  content: string
+  timestampMs: number
+  tag: NoteTag
+  segmentId: string | null
   createdAt: string
 }
 
-export interface AsrJobCore {
+/** 捕获模式 */
+export type CaptureMode = 'smart' | 'mic-only' | 'system-only'
+
+/** 声纹库中的注册说话人 */
+export interface Voiceprint {
   id: string
-  session_id: string
-  chunk_id: string
-  provider: AsrProviderKind
-  model_id: string
-  state: AsrJobState
-  error_code: string | null
-  error_summary: string | null
-  created_at: string
+  name: string
+  embeddingPath: string
+  dictionaryEntryId: string | null
+  sampleCount: number
+  updatedAt: string
 }
 
-export interface ProviderReceipt {
+/** 说话人标识 */
+export interface Speaker {
   id: string
-  jobId: string
-  chunkId: string
-  provider: AsrProviderKind
-  modelId: string
-  manifestVersion: string
-  startedAt: string
-  finishedAt: string
+  label: string
+  source: 'voiceprint' | 'dictionary' | 'manual' | 'unknown'
+  voiceprintId: string | null
 }
 
-export interface ProviderReceiptCore {
+/** 实时流式段落 */
+export interface LiveSegment {
   id: string
-  job_id: string
-  chunk_id: string
-  provider: AsrProviderKind
-  model_id: string
-  manifest_version: string
-  started_at: string
-  finished_at: string
+  startMs: number
+  speaker: Speaker
+  text: string
+  completed: boolean
+}
+
+/** 词典分类 */
+export interface DictionaryCategory {
+  id: string
+  name: string
+  scope: 'global' | string
+  entryCount: number
+}
+
+/** 词典词条 */
+export interface DictionaryEntry {
+  id: string
+  categoryId: string
+  term: string
+  pinyin: string
+  aliases: string
+  note: string
+  enabled: boolean
+}
+
+/** 24 小时录音统计快照 */
+export interface StatsSnapshot {
+  hourlySlots: Array<{
+    hour: number
+    minutes: number
+    sessionId: string | null
+    title: string | null
+  }>
+  weekSessions: number
+  weekMinutes: number
+  monthSessions: number
+  monthMinutes: number
+  totalSessions: number
+  totalMinutes: number
 }

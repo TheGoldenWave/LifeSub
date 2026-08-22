@@ -1,571 +1,919 @@
-//! Fake-provider contract tests for the ASR provider trait.
-//!
-//! These tests validate the provider interface without loading native models:
-//! - Provider/model identity
-//! - Language mapping
-//! - SenseVoice ITN (inverse text normalization)
-//! - Whisper task (transcribe vs translate)
-//! - Empty-output rejection
-//! - Cancellation between windows
-//! - Error mapping
-//!
-//! Fake providers return deterministic text so tests are fast and repeatable.
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::{fs, path::Path};
 
 use crate::asr::provider::{
-    AsrError, AsrProvider, AsrRequest, AsrText, AudioSlice, CancellationToken, ProviderIdentity,
+    AsrProvider, AudioSlice, BackendKind, CancellationToken, DeviceIdentity, NativeBackend,
+    NativeBackendFactory, NativeRequest, ProviderError, ProviderFactory, ProviderOptions,
+    ProviderRequest, ProviderSelection, QualificationEvidence, RuntimeFamily,
 };
-use crate::asr::settings::{AsrLanguage, AsrProviderKind, AsrProviderOptions, WhisperTask};
+use crate::asr::settings::WhisperTask;
+use crate::domain::{AsrErrorCode, AsrProviderKind};
 
-// ---------------------------------------------------------------------------
-// Fake providers for contract testing
-// ---------------------------------------------------------------------------
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+use crate::asr::provider::{Qwen17RuntimeBoundary, create_qwen17_backend_with_runtime};
 
-/// A fake SenseVoice provider that returns preset text.
-/// Respects the ITN setting: when ITN is on, the output includes "[ITN]" marker.
-struct FakeSenseVoiceProvider {
-    identity: ProviderIdentity,
+const SENSE: &str = "sense-voice-small-int8-2024-07-17";
+const TINY: &str = "whisper-tiny";
+const BASE: &str = "whisper-base";
+const SMALL: &str = "whisper-small";
+const QWEN06: &str = "qwen3-asr-0.6b-int8-2026-03-25";
+const QWEN17: &str = "qwen3-asr-1.7b";
+type RequestMutation = Box<dyn Fn(&mut ProviderRequest)>;
+
+#[derive(Clone, Default)]
+struct FakeBackendFactory {
+    constructed: Arc<Mutex<Vec<NativeRequest>>>,
+    calls: Arc<Mutex<usize>>,
+    create_failure: Option<AsrErrorCode>,
+    transcribe_failure: Option<AsrErrorCode>,
+    cancel_during_call: Option<CancellationToken>,
 }
 
-impl FakeSenseVoiceProvider {
-    fn new() -> Self {
-        Self {
-            identity: ProviderIdentity {
-                kind: AsrProviderKind::SenseVoice,
-                model_id: "sense-voice-small-int8-2024-07-17".to_string(),
-                runtime_version: "1.13.5".to_string(),
-                runtime_build_id: "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5".to_string(),
-            },
+impl NativeBackendFactory for FakeBackendFactory {
+    fn create(&self, request: &NativeRequest) -> Result<Box<dyn NativeBackend>, ProviderError> {
+        self.constructed.lock().unwrap().push(request.clone());
+        if let Some(code) = self.create_failure {
+            return Err(ProviderError::new(
+                code,
+                "fake native initialization failure",
+            ));
         }
+        Ok(Box::new(FakeBackend {
+            calls: self.calls.clone(),
+            transcribe_failure: self.transcribe_failure,
+            cancel_during_call: self.cancel_during_call.clone(),
+        }))
     }
 }
 
-impl AsrProvider for FakeSenseVoiceProvider {
-    fn identity(&self) -> &ProviderIdentity {
-        &self.identity
-    }
+struct FakeBackend {
+    calls: Arc<Mutex<usize>>,
+    transcribe_failure: Option<AsrErrorCode>,
+    cancel_during_call: Option<CancellationToken>,
+}
 
-    fn transcribe(
-        &self,
-        audio: AudioSlice<'_>,
-        request: &AsrRequest,
-        cancellation: &CancellationToken,
-    ) -> Result<AsrText, AsrError> {
-        if cancellation.is_cancelled() {
-            return Err(AsrError::Cancelled);
+impl NativeBackend for FakeBackend {
+    fn transcribe(&mut self, _audio: AudioSlice<'_>) -> Result<String, ProviderError> {
+        *self.calls.lock().unwrap() += 1;
+        if let Some(token) = &self.cancel_during_call {
+            token.cancel();
         }
-
-        if audio.samples.is_empty() {
-            return Err(AsrError::EmptyOutput);
-        }
-
-        let use_itn = match &request.options {
-            AsrProviderOptions::SenseVoice { use_itn } => *use_itn,
-            _ => {
-                return Err(AsrError::InvalidProviderParameter {
-                    reason: "expected SenseVoice options".to_string(),
-                })
-            }
-        };
-
-        let text = if use_itn {
-            // ITN transforms numeric text: "一百二十三" -> "123"
-            format!("[ITN] 今天气温二十三点五度，采样率{}", audio.sample_rate)
+        if let Some(code) = self.transcribe_failure {
+            Err(ProviderError::new(code, "fake native inference failure"))
         } else {
-            format!("今天气温二十三点五度，采样率{}", audio.sample_rate)
-        };
-
-        Ok(AsrText { text })
+            Ok("transcript".to_owned())
+        }
     }
 }
 
-/// A fake Whisper provider that returns preset text.
-/// Respects the task setting: translate produces English output.
-struct FakeWhisperProvider {
-    identity: ProviderIdentity,
-}
-
-impl FakeWhisperProvider {
-    fn new() -> Self {
-        Self {
-            identity: ProviderIdentity {
-                kind: AsrProviderKind::Whisper,
-                model_id: "whisper-base".to_string(),
-                runtime_version: "1.13.5".to_string(),
-                runtime_build_id: "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5".to_string(),
+fn request(model_id: &str) -> ProviderRequest {
+    let manifest = crate::asr::manifest::model_registry()
+        .model(model_id)
+        .unwrap();
+    ProviderRequest {
+        provider: manifest.provider,
+        model_id: model_id.to_owned(),
+        manifest_version: manifest.manifest_version.to_owned(),
+        bundle_identity: manifest.bundle.identity_sha256.to_owned(),
+        install_dir: PathBuf::from("/qualified/model"),
+        language: "auto".to_owned(),
+        num_threads: 2,
+        options: match manifest.provider {
+            AsrProviderKind::SenseVoice => ProviderOptions::SenseVoice { use_itn: true },
+            AsrProviderKind::Whisper => ProviderOptions::Whisper {
+                task: WhisperTask::Transcribe,
             },
-        }
+            AsrProviderKind::Qwen3Asr => ProviderOptions::Qwen3Asr,
+        },
+        qualification: QualificationEvidence::matching(manifest, DeviceIdentity::current()),
     }
 }
 
-impl AsrProvider for FakeWhisperProvider {
-    fn identity(&self) -> &ProviderIdentity {
-        &self.identity
-    }
-
-    fn transcribe(
-        &self,
-        audio: AudioSlice<'_>,
-        request: &AsrRequest,
-        cancellation: &CancellationToken,
-    ) -> Result<AsrText, AsrError> {
-        if cancellation.is_cancelled() {
-            return Err(AsrError::Cancelled);
-        }
-
-        if audio.samples.is_empty() {
-            return Err(AsrError::EmptyOutput);
-        }
-
-        let task = match &request.options {
-            AsrProviderOptions::Whisper { task } => *task,
+#[test]
+fn shipping_models_dispatch_to_exact_backend_once() {
+    let cases = [
+        (SENSE, BackendKind::SenseVoiceSherpa),
+        (TINY, BackendKind::WhisperSherpa),
+        (BASE, BackendKind::WhisperSherpa),
+        (SMALL, BackendKind::WhisperSherpa),
+        (QWEN06, BackendKind::Qwen06Sherpa),
+        (QWEN17, BackendKind::Qwen17CandleMetal),
+    ];
+    for (model_id, expected) in cases {
+        let backend = FakeBackendFactory::default();
+        let provider = ProviderFactory::new(backend.clone())
+            .create(request(model_id))
+            .unwrap();
+        assert_eq!(provider.identity().backend, expected);
+        match expected {
+            BackendKind::Qwen17CandleMetal => {
+                assert_eq!(provider.identity().execution.backend, "metal");
+                assert_eq!(
+                    provider.identity().execution.version,
+                    "qwen3-asr/0.2.2;candle-core/0.9.2"
+                );
+                assert_eq!(provider.identity().execution.device_index, Some(0));
+            }
             _ => {
-                return Err(AsrError::InvalidProviderParameter {
-                    reason: "expected Whisper options".to_string(),
-                })
+                assert_eq!(provider.identity().execution.runtime_name, "sherpa-onnx");
+                assert_eq!(provider.identity().execution.version, "1.13.5");
+                assert!(
+                    provider
+                        .identity()
+                        .execution
+                        .native_archive_sha256
+                        .is_some()
+                );
             }
-        };
-
-        let text = match task {
-            WhisperTask::Transcribe => {
-                format!(
-                    "This is a transcription of audio at {} Hz",
-                    audio.sample_rate
-                )
-            }
-            WhisperTask::Translate => {
-                format!(
-                    "[TRANSLATE] This is a translation at {} Hz",
-                    audio.sample_rate
-                )
-            }
-        };
-
-        Ok(AsrText { text })
+        }
+        assert_eq!(backend.constructed.lock().unwrap().len(), 1);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helper to create a non-empty audio slice for tests
-// ---------------------------------------------------------------------------
-
-fn audio_slice(samples: &[f32]) -> AudioSlice<'_> {
-    AudioSlice {
-        samples,
-        sample_rate: 16000,
+#[test]
+fn invalid_identity_or_qualification_never_constructs_a_backend() {
+    let mutations: Vec<RequestMutation> = vec![
+        Box::new(|value| value.provider = AsrProviderKind::Whisper),
+        Box::new(|value| value.bundle_identity = "wrong-bundle".to_owned()),
+        Box::new(|value| value.manifest_version = "wrong-version".to_owned()),
+        Box::new(|value| value.qualification.marker_identity = "wrong-marker".to_owned()),
+        Box::new(|value| value.qualification.device.arch = "x86_64".to_owned()),
+    ];
+    for mutate in mutations {
+        let backend = FakeBackendFactory::default();
+        let mut provider_request = request(QWEN17);
+        mutate(&mut provider_request);
+        assert!(
+            ProviderFactory::new(backend.clone())
+                .create(provider_request)
+                .is_err()
+        );
+        assert!(backend.constructed.lock().unwrap().is_empty());
     }
 }
 
-fn non_empty_audio() -> Vec<f32> {
-    vec![0.0_f32; 16000] // 1 second of silence at 16 kHz
+#[test]
+fn backend_initialization_failure_preserves_code_without_fallback() {
+    let backend = FakeBackendFactory {
+        create_failure: Some(AsrErrorCode::ProviderInitializationFailed),
+        ..Default::default()
+    };
+
+    let error = ProviderFactory::new(backend.clone())
+        .create(request(QWEN17))
+        .unwrap_err();
+
+    assert_eq!(error.code(), AsrErrorCode::ProviderInitializationFailed);
+    let constructed = backend.constructed.lock().unwrap();
+    assert_eq!(constructed.len(), 1);
+    assert_eq!(constructed[0].runtime, RuntimeFamily::QwenCandleMetal);
+    assert_eq!(*backend.calls.lock().unwrap(), 0);
 }
 
-// ---------------------------------------------------------------------------
-// 1. Provider/model identity
-// ---------------------------------------------------------------------------
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+#[test]
+fn production_qwen17_metal_construction_failure_never_loads_or_falls_back_to_cpu() {
+    #[derive(Clone, Default)]
+    struct FailingMetalRuntime {
+        device_indices: Arc<Mutex<Vec<usize>>>,
+        loads: Arc<Mutex<usize>>,
+    }
+
+    impl Qwen17RuntimeBoundary for FailingMetalRuntime {
+        type Device = ();
+
+        fn create_metal_device(&self, device_index: usize) -> Result<Self::Device, String> {
+            self.device_indices.lock().unwrap().push(device_index);
+            Err("simulated Metal construction failure".to_owned())
+        }
+
+        fn load(
+            &self,
+            _request: &NativeRequest,
+            _device: Self::Device,
+        ) -> Result<Box<dyn NativeBackend>, String> {
+            *self.loads.lock().unwrap() += 1;
+            unreachable!("model load must not run after Metal construction fails")
+        }
+    }
+
+    let runtime = FailingMetalRuntime::default();
+    let native = crate::asr::qwen3_asr::native_request(
+        &request(QWEN17),
+        crate::asr::manifest::model_registry()
+            .model(QWEN17)
+            .unwrap(),
+    )
+    .unwrap();
+
+    let Err(error) = create_qwen17_backend_with_runtime(&native, &runtime) else {
+        panic!("Metal construction failure must fail provider initialization");
+    };
+
+    assert_eq!(error.code(), AsrErrorCode::ProviderInitializationFailed);
+    assert_eq!(*runtime.device_indices.lock().unwrap(), vec![0]);
+    assert_eq!(*runtime.loads.lock().unwrap(), 0);
+}
+
+#[cfg(all(
+    feature = "asr-qwen17-runtime",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+#[test]
+fn production_qwen17_inference_failure_does_not_reload_or_reconstruct_backend() {
+    #[derive(Clone, Default)]
+    struct FailingInferenceRuntime {
+        device_indices: Arc<Mutex<Vec<usize>>>,
+        loads: Arc<Mutex<usize>>,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    struct FailingInferenceBackend {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl NativeBackend for FailingInferenceBackend {
+        fn transcribe(&mut self, _audio: AudioSlice<'_>) -> Result<String, ProviderError> {
+            *self.calls.lock().unwrap() += 1;
+            Err(ProviderError::new(
+                AsrErrorCode::TranscriptionFailed,
+                "simulated inference failure",
+            ))
+        }
+    }
+
+    impl Qwen17RuntimeBoundary for FailingInferenceRuntime {
+        type Device = ();
+
+        fn create_metal_device(&self, device_index: usize) -> Result<Self::Device, String> {
+            self.device_indices.lock().unwrap().push(device_index);
+            Ok(())
+        }
+
+        fn load(
+            &self,
+            _request: &NativeRequest,
+            _device: Self::Device,
+        ) -> Result<Box<dyn NativeBackend>, String> {
+            *self.loads.lock().unwrap() += 1;
+            Ok(Box::new(FailingInferenceBackend {
+                calls: self.calls.clone(),
+            }))
+        }
+    }
+
+    let runtime = FailingInferenceRuntime::default();
+    let native = crate::asr::qwen3_asr::native_request(
+        &request(QWEN17),
+        crate::asr::manifest::model_registry()
+            .model(QWEN17)
+            .unwrap(),
+    )
+    .unwrap();
+    let mut backend = create_qwen17_backend_with_runtime(&native, &runtime).unwrap();
+
+    let error = backend
+        .transcribe(AudioSlice::new(&[0.1; 16_000], 16_000).unwrap())
+        .unwrap_err();
+
+    assert_eq!(error.code(), AsrErrorCode::TranscriptionFailed);
+    assert_eq!(*runtime.device_indices.lock().unwrap(), vec![0]);
+    assert_eq!(*runtime.loads.lock().unwrap(), 1);
+    assert_eq!(*runtime.calls.lock().unwrap(), 1);
+}
 
 #[test]
-fn sense_voice_provider_reports_correct_identity() {
-    let provider = FakeSenseVoiceProvider::new();
-    let id = provider.identity();
-    assert_eq!(id.kind, AsrProviderKind::SenseVoice);
-    assert_eq!(id.model_id, "sense-voice-small-int8-2024-07-17");
-    assert_eq!(id.runtime_version, "1.13.5");
+fn backend_inference_failure_preserves_code_without_fallback() {
+    let backend = FakeBackendFactory {
+        transcribe_failure: Some(AsrErrorCode::TranscriptionFailed),
+        ..Default::default()
+    };
+    let mut provider = ProviderFactory::new(backend.clone())
+        .create(request(QWEN06))
+        .unwrap();
+
+    let error = provider
+        .transcribe(
+            AudioSlice::new(&[0.1; 16_000], 16_000).unwrap(),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), AsrErrorCode::TranscriptionFailed);
+    let constructed = backend.constructed.lock().unwrap();
+    assert_eq!(constructed.len(), 1);
+    assert_eq!(constructed[0].runtime, RuntimeFamily::SherpaOnnx);
+    assert_eq!(*backend.calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn qwen_models_never_fallback_across_runtime_families() {
+    let qwen06 = FakeBackendFactory {
+        transcribe_failure: Some(AsrErrorCode::TranscriptionFailed),
+        ..Default::default()
+    };
+    let mut provider = ProviderFactory::new(qwen06.clone())
+        .create(request(QWEN06))
+        .unwrap();
+    assert!(
+        provider
+            .transcribe(
+                AudioSlice::new(&[0.1; 16_000], 16_000).unwrap(),
+                &CancellationToken::new()
+            )
+            .is_err()
+    );
     assert_eq!(
-        id.runtime_build_id,
-        "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5"
+        qwen06.constructed.lock().unwrap()[0].runtime,
+        RuntimeFamily::SherpaOnnx
     );
-}
+    assert_eq!(qwen06.constructed.lock().unwrap().len(), 1);
 
-#[test]
-fn whisper_provider_reports_correct_identity() {
-    let provider = FakeWhisperProvider::new();
-    let id = provider.identity();
-    assert_eq!(id.kind, AsrProviderKind::Whisper);
-    assert_eq!(id.model_id, "whisper-base");
-    assert_eq!(id.runtime_version, "1.13.5");
+    let qwen17 = FakeBackendFactory {
+        transcribe_failure: Some(AsrErrorCode::TranscriptionFailed),
+        ..Default::default()
+    };
+    let mut provider = ProviderFactory::new(qwen17.clone())
+        .create(request(QWEN17))
+        .unwrap();
+    assert!(
+        provider
+            .transcribe(
+                AudioSlice::new(&[0.1; 16_000], 16_000).unwrap(),
+                &CancellationToken::new()
+            )
+            .is_err()
+    );
     assert_eq!(
-        id.runtime_build_id,
-        "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5"
+        qwen17.constructed.lock().unwrap()[0].runtime,
+        RuntimeFamily::QwenCandleMetal
     );
+    assert_eq!(qwen17.constructed.lock().unwrap().len(), 1);
 }
 
 #[test]
-fn identity_is_stable_across_transcriptions() {
-    let provider = FakeSenseVoiceProvider::new();
-    let id1 = provider.identity() as *const ProviderIdentity;
-    let id2 = provider.identity() as *const ProviderIdentity;
-    assert_eq!(id1, id2, "identity pointer must be stable");
-}
-
-// ---------------------------------------------------------------------------
-// 2. Language mapping
-// ---------------------------------------------------------------------------
-
-#[test]
-fn sense_voice_language_zh_passes_to_provider() {
-    let provider = FakeSenseVoiceProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::Zh,
-        options: AsrProviderOptions::SenseVoice { use_itn: false },
-        num_threads: 4,
-    };
-    let token = CancellationToken::new();
-    let result = provider
-        .transcribe(audio_slice(&audio), &request, &token)
+fn provider_options_map_without_pseudo_languages() {
+    let sense_backend = FakeBackendFactory::default();
+    let mut sense = request(SENSE);
+    sense.language = "yue".to_owned();
+    sense.options = ProviderOptions::SenseVoice { use_itn: false };
+    ProviderFactory::new(sense_backend.clone())
+        .create(sense)
         .unwrap();
-    // The fake provider includes the sample rate, so we verify output is
-    // non-empty and contains expected language-specific content.
-    assert!(!result.text.is_empty());
-    assert!(result.text.contains("采样率"));
-}
+    let sense_spec = &sense_backend.constructed.lock().unwrap()[0];
+    assert_eq!(sense_spec.language.as_deref(), Some("yue"));
+    assert_eq!(sense_spec.use_itn, Some(false));
 
-#[test]
-fn whisper_language_en_passes_to_provider() {
-    let provider = FakeWhisperProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::En,
-        options: AsrProviderOptions::Whisper {
-            task: WhisperTask::Transcribe,
-        },
-        num_threads: 2,
+    let whisper_backend = FakeBackendFactory::default();
+    let mut whisper = request(TINY);
+    whisper.language = "en".to_owned();
+    whisper.options = ProviderOptions::Whisper {
+        task: WhisperTask::Translate,
     };
-    let token = CancellationToken::new();
-    let result = provider
-        .transcribe(audio_slice(&audio), &request, &token)
+    ProviderFactory::new(whisper_backend.clone())
+        .create(whisper)
         .unwrap();
-    assert!(!result.text.is_empty());
-    assert!(result.text.contains("transcription"));
+    let whisper_spec = &whisper_backend.constructed.lock().unwrap()[0];
+    assert_eq!(whisper_spec.language.as_deref(), Some("en"));
+    assert_eq!(whisper_spec.whisper_task.as_deref(), Some("translate"));
+
+    let backend = FakeBackendFactory::default();
+    let mut invalid = request(TINY);
+    invalid.language = "multilingual".to_owned();
+    let error = ProviderFactory::new(backend.clone())
+        .create(invalid)
+        .unwrap_err();
+    assert_eq!(error.code(), AsrErrorCode::InvalidProviderParameter);
+    assert!(backend.constructed.lock().unwrap().is_empty());
 }
 
 #[test]
-fn auto_language_accepted_by_provider() {
-    let provider = FakeWhisperProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::Auto,
-        options: AsrProviderOptions::Whisper {
-            task: WhisperTask::Transcribe,
-        },
-        num_threads: 2,
-    };
-    let token = CancellationToken::new();
-    let result = provider.transcribe(audio_slice(&audio), &request, &token);
-    assert!(result.is_ok(), "auto language should be accepted");
-}
+fn qwen_language_contracts_are_runtime_specific() {
+    let backend = FakeBackendFactory::default();
+    let mut qwen06 = request(QWEN06);
+    qwen06.language = "en".to_owned();
+    assert_eq!(
+        ProviderFactory::new(backend.clone())
+            .create(qwen06)
+            .unwrap_err()
+            .code(),
+        AsrErrorCode::InvalidProviderParameter
+    );
+    assert!(backend.constructed.lock().unwrap().is_empty());
 
-// ---------------------------------------------------------------------------
-// 3. SenseVoice ITN (inverse text normalization)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn sense_voice_with_itn_enabled() {
-    let provider = FakeSenseVoiceProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::Zh,
-        options: AsrProviderOptions::SenseVoice { use_itn: true },
-        num_threads: 4,
-    };
-    let token = CancellationToken::new();
-    let result = provider
-        .transcribe(audio_slice(&audio), &request, &token)
+    let backend = FakeBackendFactory::default();
+    let mut qwen17 = request(QWEN17);
+    qwen17.language = "zh".to_owned();
+    ProviderFactory::new(backend.clone())
+        .create(qwen17)
         .unwrap();
-    // ITN output should contain the [ITN] marker (fake provider convention)
+    assert_eq!(
+        backend.constructed.lock().unwrap()[0].language.as_deref(),
+        Some("chinese")
+    );
+
+    let backend = FakeBackendFactory::default();
+    let mut invalid = request(QWEN17);
+    invalid.language = "xx".to_owned();
     assert!(
-        result.text.contains("[ITN]"),
-        "ITN output should contain ITN marker, got: {}",
-        result.text
+        ProviderFactory::new(backend.clone())
+            .create(invalid)
+            .is_err()
+    );
+    assert!(backend.constructed.lock().unwrap().is_empty());
+}
+
+#[test]
+fn audio_slice_and_cancellation_bound_the_native_call() {
+    assert!(AudioSlice::new(&[], 16_000).is_err());
+    assert!(AudioSlice::new(&[0.0; 16_000], 8_000).is_err());
+    assert!(AudioSlice::new(&[0.0; 400_001], 16_000).is_err());
+
+    let before = FakeBackendFactory::default();
+    let mut provider = ProviderFactory::new(before.clone())
+        .create(request(SENSE))
+        .unwrap();
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert_eq!(
+        provider
+            .transcribe(AudioSlice::new(&[0.0; 16_000], 16_000).unwrap(), &cancelled)
+            .unwrap_err()
+            .code(),
+        AsrErrorCode::Cancelled
+    );
+    assert_eq!(*before.calls.lock().unwrap(), 0);
+
+    let during = CancellationToken::new();
+    let backend = FakeBackendFactory {
+        cancel_during_call: Some(during.clone()),
+        ..Default::default()
+    };
+    let mut provider = ProviderFactory::new(backend.clone())
+        .create(request(SENSE))
+        .unwrap();
+    assert_eq!(
+        provider
+            .transcribe(AudioSlice::new(&[0.0; 16_000], 16_000).unwrap(), &during)
+            .unwrap_err()
+            .code(),
+        AsrErrorCode::Cancelled
+    );
+    assert_eq!(*backend.calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn empty_native_output_is_a_stable_transcription_failure() {
+    #[derive(Clone)]
+    struct EmptyFactory;
+    struct EmptyBackend;
+    impl NativeBackendFactory for EmptyFactory {
+        fn create(
+            &self,
+            _request: &NativeRequest,
+        ) -> Result<Box<dyn NativeBackend>, ProviderError> {
+            Ok(Box::new(EmptyBackend))
+        }
+    }
+    impl NativeBackend for EmptyBackend {
+        fn transcribe(&mut self, _audio: AudioSlice<'_>) -> Result<String, ProviderError> {
+            Ok(" \n\t".to_owned())
+        }
+    }
+    let mut provider = ProviderFactory::new(EmptyFactory)
+        .create(request(SENSE))
+        .unwrap();
+    assert_eq!(
+        provider
+            .transcribe(
+                AudioSlice::new(&[0.0; 16_000], 16_000).unwrap(),
+                &CancellationToken::new()
+            )
+            .unwrap_err()
+            .code(),
+        AsrErrorCode::TranscriptionFailed
     );
 }
 
 #[test]
-fn sense_voice_without_itn() {
-    let provider = FakeSenseVoiceProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::Zh,
-        options: AsrProviderOptions::SenseVoice { use_itn: false },
-        num_threads: 4,
-    };
-    let token = CancellationToken::new();
-    let result = provider
-        .transcribe(audio_slice(&audio), &request, &token)
+fn executable_lease_revalidates_every_shipping_bundle_before_backend_construction() {
+    use crate::asr::model_manager::ExecutableInstallationLease;
+    for model_id in [SENSE, TINY, BASE, SMALL, QWEN06, QWEN17] {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = FakeBackendFactory::default();
+        let lease = ExecutableInstallationLease::for_test(
+            model_id,
+            directory.path(),
+            DeviceIdentity::current(),
+        )
         .unwrap();
-    assert!(
-        !result.text.contains("[ITN]"),
-        "non-ITN output should not contain ITN marker, got: {}",
-        result.text
+        assert!(lease.revalidate().is_err());
+        assert!(backend.constructed.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn provider_factory_revalidates_held_inventory_before_and_after_native_construction() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("data");
+    fs::create_dir_all(&root).unwrap();
+    let lease = anchored_test_lease(SENSE, &root);
+    assert_eq!(lease.validation_count(), 0);
+    let backend = FakeBackendFactory::default();
+    let provider = ProviderFactory::new(backend.clone())
+        .create_verified(lease, ProviderSelection::for_test(SENSE))
+        .unwrap();
+    assert_eq!(backend.constructed.lock().unwrap().len(), 1);
+    assert_eq!(provider.identity().model_id, SENSE);
+    assert_eq!(provider.inventory_validation_count_for_test(), 2);
+}
+
+fn anchored_test_lease(
+    model_id: &str,
+    root: &Path,
+) -> crate::asr::model_manager::ExecutableInstallationLease {
+    use crate::asr::model_manager::ExecutableInstallationLease;
+
+    let relative = Path::new("models/asr/test/model/bundle");
+    let manifest = crate::asr::manifest::model_registry()
+        .model(model_id)
+        .unwrap();
+    let required_files = match manifest.bundle.install_constraints {
+        crate::asr::manifest::InstallConstraints::Archive(constraints) => {
+            constraints.required_files
+        }
+        crate::asr::manifest::InstallConstraints::Direct(constraints) => constraints.required_files,
+    };
+    let files = required_files
+        .iter()
+        .map(|required| {
+            let bytes = format!("held:{}:{}", model_id, required.path).into_bytes();
+            let path = root.join(relative).join(required.path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            (PathBuf::from(required.path), bytes)
+        })
+        .collect::<Vec<_>>();
+    ExecutableInstallationLease::for_anchored_test(
+        model_id,
+        root,
+        relative,
+        files,
+        DeviceIdentity::current(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn verified_sherpa_provider_consumes_held_fds_and_releases_them_on_drop() {
+    for model_id in [SENSE, TINY, BASE, SMALL, QWEN06] {
+        let parent = tempfile::tempdir().unwrap();
+        let nominal_root = parent.path().join("data");
+        fs::create_dir_all(&nominal_root).unwrap();
+        let lease = anchored_test_lease(model_id, &nominal_root);
+        let backend = FakeBackendFactory::default();
+
+        let provider = ProviderFactory::new(backend.clone())
+            .create_verified(lease, ProviderSelection::for_test(model_id))
+            .unwrap();
+        let native = backend.constructed.lock().unwrap()[0].clone();
+        let direct_fd_count = if model_id == QWEN06 {
+            3
+        } else {
+            native.required_files.len()
+        };
+        assert!(
+            native.required_files[..direct_fd_count]
+                .iter()
+                .all(|path| path.starts_with("/dev/fd"))
+        );
+        assert!(native.required_files.iter().all(|path| path.exists()));
+        let held_identities = native
+            .required_files
+            .iter()
+            .map(|path| fs::metadata(path).map(|metadata| (metadata.dev(), metadata.ino())))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        drop(provider);
+        assert!(
+            native
+                .required_files
+                .iter()
+                .zip(held_identities)
+                .all(|(path, original)| fs::metadata(path)
+                    .map(|metadata| (metadata.dev(), metadata.ino()) != original)
+                    .unwrap_or(true))
+        );
+    }
+}
+
+#[test]
+fn qwen06_tokenizer_uses_a_private_alias_directory_backed_by_held_file_fds() {
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_test_lease(QWEN06, &nominal_root);
+    let backend = FakeBackendFactory::default();
+
+    let provider = ProviderFactory::new(backend.clone())
+        .create_verified(lease, ProviderSelection::for_test(QWEN06))
+        .unwrap();
+    let tokenizer = backend.constructed.lock().unwrap()[0].required_files[3].clone();
+    assert!(!tokenizer.starts_with("/dev/fd"));
+    assert_eq!(
+        fs::metadata(&tokenizer).unwrap().permissions().mode() & 0o777,
+        0o700
     );
+    for name in ["merges.txt", "tokenizer_config.json", "vocab.json"] {
+        let bytes = fs::read(tokenizer.join(name)).unwrap();
+        assert_eq!(bytes, format!("held:{QWEN06}:tokenizer/{name}").as_bytes());
+    }
+
+    drop(provider);
+    assert!(!tokenizer.exists());
 }
 
-// ---------------------------------------------------------------------------
-// 4. Whisper task
-// ---------------------------------------------------------------------------
-
 #[test]
-fn whisper_transcribe_task() {
-    let provider = FakeWhisperProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::En,
-        options: AsrProviderOptions::Whisper {
-            task: WhisperTask::Transcribe,
-        },
-        num_threads: 2,
-    };
-    let token = CancellationToken::new();
-    let result = provider
-        .transcribe(audio_slice(&audio), &request, &token)
+fn qwen17_candle_load_uses_one_private_alias_backed_by_all_held_file_fds() {
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_test_lease(QWEN17, &nominal_root);
+    let backend = FakeBackendFactory::default();
+
+    let provider = ProviderFactory::new(backend.clone())
+        .create_fd_anchored_for_test(lease, ProviderSelection::for_test(QWEN17))
         .unwrap();
-    assert!(result.text.contains("transcription"));
-    assert!(
-        !result.text.contains("[TRANSLATE]"),
-        "transcribe should not contain translate marker"
+    let native = backend.constructed.lock().unwrap()[0].clone();
+
+    assert_ne!(native.install_dir, nominal_root);
+    assert_eq!(
+        fs::metadata(&native.install_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
     );
+    for path in &native.required_files {
+        assert!(path.starts_with(&native.install_dir));
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert_eq!(
+            fs::read(path).unwrap(),
+            format!("held:{QWEN17}:{name}").as_bytes()
+        );
+    }
+
+    let alias = native.install_dir.clone();
+    drop(provider);
+    assert!(!alias.exists());
 }
 
 #[test]
-fn whisper_translate_task() {
-    let provider = FakeWhisperProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::En,
-        options: AsrProviderOptions::Whisper {
-            task: WhisperTask::Translate,
-        },
-        num_threads: 2,
-    };
-    let token = CancellationToken::new();
-    let result = provider
-        .transcribe(audio_slice(&audio), &request, &token)
+fn qwen17_any_required_file_swap_during_candle_construction_fails_closed() {
+    #[derive(Clone)]
+    struct SwappingFactory {
+        target: PathBuf,
+    }
+
+    impl NativeBackendFactory for SwappingFactory {
+        fn create(&self, request: &NativeRequest) -> Result<Box<dyn NativeBackend>, ProviderError> {
+            assert!(
+                request
+                    .required_files
+                    .iter()
+                    .all(|path| fs::read(path).unwrap().starts_with(b"held:"))
+            );
+            fs::rename(&self.target, self.target.with_extension("held")).unwrap();
+            fs::write(&self.target, b"replacement").unwrap();
+            Ok(Box::new(FakeBackend {
+                calls: Arc::new(Mutex::new(0)),
+                transcribe_failure: None,
+                cancel_during_call: None,
+            }))
+        }
+    }
+
+    let manifest = crate::asr::manifest::model_registry()
+        .model(QWEN17)
         .unwrap();
-    assert!(result.text.contains("[TRANSLATE]"));
-    assert!(result.text.contains("translation"));
-}
+    for required in manifest.bundle.required_paths {
+        let parent = tempfile::tempdir().unwrap();
+        let nominal_root = parent.path().join("data");
+        fs::create_dir_all(&nominal_root).unwrap();
+        let lease = anchored_test_lease(QWEN17, &nominal_root);
+        let target = nominal_root
+            .join("models/asr/test/model/bundle")
+            .join(required);
 
-// ---------------------------------------------------------------------------
-// 5. Empty-output rejection
-// ---------------------------------------------------------------------------
+        let error = ProviderFactory::new(SwappingFactory { target })
+            .create_fd_anchored_for_test(lease, ProviderSelection::for_test(QWEN17))
+            .unwrap_err();
 
-#[test]
-fn sense_voice_empty_audio_rejected() {
-    let provider = FakeSenseVoiceProvider::new();
-    let request = AsrRequest {
-        language: AsrLanguage::Zh,
-        options: AsrProviderOptions::SenseVoice { use_itn: true },
-        num_threads: 4,
-    };
-    let token = CancellationToken::new();
-    let result = provider.transcribe(audio_slice(&[]), &request, &token);
-    assert_eq!(result, Err(AsrError::EmptyOutput));
+        assert_eq!(error.code(), AsrErrorCode::ModelIntegrityFailed);
+    }
 }
 
 #[test]
-fn whisper_empty_audio_rejected() {
-    let provider = FakeWhisperProvider::new();
-    let request = AsrRequest {
-        language: AsrLanguage::En,
-        options: AsrProviderOptions::Whisper {
-            task: WhisperTask::Transcribe,
-        },
-        num_threads: 2,
-    };
-    let token = CancellationToken::new();
-    let result = provider.transcribe(audio_slice(&[]), &request, &token);
-    assert_eq!(result, Err(AsrError::EmptyOutput));
-}
-
-#[test]
-fn empty_output_after_transcription_is_rejected() {
-    // The fake provider already rejects empty audio before inference,
-    // but this test documents that the real provider must also reject
-    // cases where the model returns an empty or whitespace-only string.
-    let provider = FakeSenseVoiceProvider::new();
-    let request = AsrRequest {
-        language: AsrLanguage::Zh,
-        options: AsrProviderOptions::SenseVoice { use_itn: true },
-        num_threads: 4,
-    };
-    let token = CancellationToken::new();
-    // Non-empty audio should produce non-empty output
-    let result = provider
-        .transcribe(audio_slice(&non_empty_audio()), &request, &token)
+fn qwen17_root_swap_never_redirects_candle_to_replacement_files() {
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    let held_root = parent.path().join("held-data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_test_lease(QWEN17, &nominal_root);
+    fs::rename(&nominal_root, &held_root).unwrap();
+    let replacement_dir = nominal_root.join("models/asr/test/model/bundle");
+    fs::create_dir_all(&replacement_dir).unwrap();
+    let manifest = crate::asr::manifest::model_registry()
+        .model(QWEN17)
         .unwrap();
-    assert!(!result.text.trim().is_empty());
+    for required in manifest.bundle.required_paths {
+        fs::write(replacement_dir.join(required), b"replacement").unwrap();
+    }
+    let backend = FakeBackendFactory::default();
+
+    let _provider = ProviderFactory::new(backend.clone())
+        .create_fd_anchored_for_test(lease, ProviderSelection::for_test(QWEN17))
+        .unwrap();
+    let native = backend.constructed.lock().unwrap()[0].clone();
+
+    assert!(native.required_files.iter().all(|path| {
+        let bytes = fs::read(path).unwrap();
+        bytes.starts_with(b"held:")
+    }));
 }
 
-// ---------------------------------------------------------------------------
-// 6. Cancellation between windows
-// ---------------------------------------------------------------------------
+#[test]
+fn root_entry_swap_never_redirects_verified_provider_to_replacement_files() {
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    let held_root = parent.path().join("held-data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_test_lease(SENSE, &nominal_root);
+    fs::rename(&nominal_root, &held_root).unwrap();
+    fs::create_dir_all(nominal_root.join("models/asr/test/model/bundle")).unwrap();
+    fs::write(
+        nominal_root.join("models/asr/test/model/bundle/model.int8.onnx"),
+        b"replacement",
+    )
+    .unwrap();
+    fs::write(
+        nominal_root.join("models/asr/test/model/bundle/tokens.txt"),
+        b"replacement",
+    )
+    .unwrap();
+    let backend = FakeBackendFactory::default();
+
+    let _provider = ProviderFactory::new(backend.clone())
+        .create_verified(lease, ProviderSelection::for_test(SENSE))
+        .unwrap();
+    let native = backend.constructed.lock().unwrap()[0].clone();
+    assert!(native.required_files.iter().all(|path| {
+        let bytes = fs::read(path).unwrap();
+        bytes.starts_with(b"held:")
+    }));
+}
 
 #[test]
-fn cancellation_before_transcription_returns_cancelled() {
-    let provider = FakeSenseVoiceProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::Zh,
-        options: AsrProviderOptions::SenseVoice { use_itn: true },
-        num_threads: 4,
+fn required_file_swap_during_backend_construction_fails_post_revalidation() {
+    #[derive(Clone)]
+    struct SwappingFactory {
+        target: PathBuf,
+        constructed: Arc<Mutex<usize>>,
+    }
+
+    impl NativeBackendFactory for SwappingFactory {
+        fn create(
+            &self,
+            _request: &NativeRequest,
+        ) -> Result<Box<dyn NativeBackend>, ProviderError> {
+            *self.constructed.lock().unwrap() += 1;
+            fs::rename(&self.target, self.target.with_extension("held")).unwrap();
+            fs::write(&self.target, b"replacement").unwrap();
+            Ok(Box::new(FakeBackend {
+                calls: Arc::new(Mutex::new(0)),
+                transcribe_failure: None,
+                cancel_during_call: None,
+            }))
+        }
+    }
+
+    let parent = tempfile::tempdir().unwrap();
+    let nominal_root = parent.path().join("data");
+    fs::create_dir_all(&nominal_root).unwrap();
+    let lease = anchored_test_lease(SENSE, &nominal_root);
+    let constructed = Arc::new(Mutex::new(0));
+    let factory = SwappingFactory {
+        target: nominal_root.join("models/asr/test/model/bundle/model.int8.onnx"),
+        constructed: constructed.clone(),
     };
-    let token = CancellationToken::new();
-    token.cancel();
-    let result = provider.transcribe(audio_slice(&audio), &request, &token);
-    assert_eq!(result, Err(AsrError::Cancelled));
+
+    let error = ProviderFactory::new(factory)
+        .create_verified(lease, ProviderSelection::for_test(SENSE))
+        .unwrap_err();
+    assert_eq!(error.code(), AsrErrorCode::ModelIntegrityFailed);
+    assert_eq!(*constructed.lock().unwrap(), 1);
 }
 
 #[test]
-fn cancellation_checked_before_each_window() {
-    // The fake provider checks cancellation at the start of transcribe().
-    // Real providers must check before each VAD window.
-    let provider = FakeWhisperProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::En,
-        options: AsrProviderOptions::Whisper {
-            task: WhisperTask::Transcribe,
-        },
-        num_threads: 2,
+fn model_manager_refuses_to_issue_a_lease_for_unqualified_database_state() {
+    use crate::asr::model_manager::{
+        ModelCatalog, ModelManager, ReqwestTransport, StoredInstallation,
     };
-    let token = CancellationToken::new();
-    token.cancel();
-    let result = provider.transcribe(audio_slice(&audio), &request, &token);
-    assert_eq!(result, Err(AsrError::Cancelled));
+    use crate::catalog::Catalog;
+
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = Catalog::in_memory().unwrap();
+    let manifest = crate::asr::manifest::model_registry()
+        .model(QWEN17)
+        .unwrap();
+    catalog
+        .publish_installation(&StoredInstallation {
+            model_id: QWEN17.to_owned(),
+            provider: "qwen3_asr".to_owned(),
+            manifest_version: manifest.manifest_version.to_owned(),
+            bundle_identity: manifest.bundle.identity_sha256.to_owned(),
+            install_dir: directory.path().to_path_buf(),
+            state: "installed_unqualified".to_owned(),
+            runtime_identity_json: None,
+        })
+        .unwrap();
+    let manager = ModelManager::new(directory.path(), ReqwestTransport::new().unwrap(), catalog);
+    let error = manager.executable_installation(QWEN17).unwrap_err();
+    assert_eq!(error.code(), "model_runtime_unqualified");
 }
-
-#[test]
-fn cancellation_token_is_independent_per_provider_call() {
-    let provider = FakeSenseVoiceProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::Zh,
-        options: AsrProviderOptions::SenseVoice { use_itn: false },
-        num_threads: 4,
-    };
-
-    // First call: not cancelled
-    let token1 = CancellationToken::new();
-    let result1 = provider.transcribe(audio_slice(&audio), &request, &token1);
-    assert!(result1.is_ok());
-
-    // Second call: cancelled
-    let token2 = CancellationToken::new();
-    token2.cancel();
-    let result2 = provider.transcribe(audio_slice(&audio), &request, &token2);
-    assert_eq!(result2, Err(AsrError::Cancelled));
-
-    // Third call: new token, not cancelled
-    let token3 = CancellationToken::new();
-    let result3 = provider.transcribe(audio_slice(&audio), &request, &token3);
-    assert!(result3.is_ok());
-}
-
-// ---------------------------------------------------------------------------
-// 7. Error mapping
-// ---------------------------------------------------------------------------
-
-#[test]
-fn sense_voice_wrong_options_variant_returns_error() {
-    let provider = FakeSenseVoiceProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::Zh,
-        // Whisper options on a SenseVoice provider
-        options: AsrProviderOptions::Whisper {
-            task: WhisperTask::Transcribe,
-        },
-        num_threads: 4,
-    };
-    let token = CancellationToken::new();
-    let result = provider.transcribe(audio_slice(&audio), &request, &token);
-    assert!(matches!(
-        result,
-        Err(AsrError::InvalidProviderParameter { .. })
-    ));
-}
-
-#[test]
-fn whisper_wrong_options_variant_returns_error() {
-    let provider = FakeWhisperProvider::new();
-    let audio = non_empty_audio();
-    let request = AsrRequest {
-        language: AsrLanguage::En,
-        // SenseVoice options on a Whisper provider
-        options: AsrProviderOptions::SenseVoice { use_itn: true },
-        num_threads: 2,
-    };
-    let token = CancellationToken::new();
-    let result = provider.transcribe(audio_slice(&audio), &request, &token);
-    assert!(matches!(
-        result,
-        Err(AsrError::InvalidProviderParameter { .. })
-    ));
-}
-
-#[test]
-fn asr_error_is_send() {
-    // AsrError must be Send so providers can be used across threads.
-    fn assert_send<T: Send>() {}
-    assert_send::<AsrError>();
-}
-
-#[test]
-fn asr_text_is_send() {
-    fn assert_send<T: Send>() {}
-    assert_send::<AsrText>();
-}
-
-#[test]
-fn provider_identity_is_send_and_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<ProviderIdentity>();
-}
-
-#[test]
-fn cancellation_token_is_send_and_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<CancellationToken>();
-}
-
-#[test]
-fn audio_slice_is_copy() {
-    // AudioSlice should be Copy so it can be passed by value.
-    fn assert_copy<T: Copy>() {}
-    assert_copy::<AudioSlice<'_>>();
-}
-
-// ---------------------------------------------------------------------------
-// 8. AsrRequest covers all required fields
-// ---------------------------------------------------------------------------
-
-#[test]
-fn asr_request_carries_language_options_and_threads() {
-    let request = AsrRequest {
-        language: AsrLanguage::Zh,
-        options: AsrProviderOptions::SenseVoice { use_itn: true },
-        num_threads: 4,
-    };
-    assert_eq!(request.language, AsrLanguage::Zh);
-    assert_eq!(request.num_threads, 4);
-    assert!(matches!(
-        request.options,
-        AsrProviderOptions::SenseVoice { use_itn: true }
-    ));
-}
-
-// ---------------------------------------------------------------------------
-// 9. Real provider identity contract (when asr-runtime is available)
-// ---------------------------------------------------------------------------
 
 #[cfg(feature = "asr-runtime")]
 #[test]
-fn runtime_version_matches_pinned_build() {
-    // When asr-runtime is enabled, the runtime version and build identity
-    // must match the pinned values from mod.rs.
-    assert_eq!(crate::asr::runtime_version(), "1.13.5");
-    assert_eq!(
-        crate::asr::runtime_git_sha1(),
-        "3dc7c569f31ca2cd4a20ed6f7db780327e6714c5"
+fn sherpa_configs_use_exact_required_files_and_supported_runtime_fields() {
+    let sense = crate::asr::sense_voice::sherpa_config(
+        &crate::asr::sense_voice::native_request(
+            &request(SENSE),
+            crate::asr::manifest::model_registry().model(SENSE).unwrap(),
+        )
+        .unwrap(),
     );
+    assert_eq!(
+        sense.model_config.sense_voice.model.as_deref(),
+        Some("/qualified/model/model.int8.onnx")
+    );
+    assert_eq!(
+        sense.model_config.tokens.as_deref(),
+        Some("/qualified/model/tokens.txt")
+    );
+    assert!(sense.model_config.sense_voice.use_itn);
+
+    let whisper_request = crate::asr::whisper::native_request(
+        &request(BASE),
+        crate::asr::manifest::model_registry().model(BASE).unwrap(),
+    )
+    .unwrap();
+    let whisper = crate::asr::whisper::sherpa_config(&whisper_request);
+    assert_eq!(
+        whisper.model_config.whisper.encoder.as_deref(),
+        Some("/qualified/model/base-encoder.onnx")
+    );
+    assert_eq!(
+        whisper.model_config.whisper.decoder.as_deref(),
+        Some("/qualified/model/base-decoder.onnx")
+    );
+    assert_eq!(
+        whisper.model_config.whisper.language.as_deref(),
+        Some("auto")
+    );
+    assert_eq!(
+        whisper.model_config.whisper.task.as_deref(),
+        Some("transcribe")
+    );
+
+    let qwen_request = crate::asr::qwen3_asr::native_request(
+        &request(QWEN06),
+        crate::asr::manifest::model_registry()
+            .model(QWEN06)
+            .unwrap(),
+    )
+    .unwrap();
+    let qwen = crate::asr::qwen3_asr::sherpa_config(&qwen_request);
+    assert_eq!(
+        qwen.model_config.qwen3_asr.conv_frontend.as_deref(),
+        Some("/qualified/model/conv_frontend.onnx")
+    );
+    assert_eq!(
+        qwen.model_config.qwen3_asr.tokenizer.as_deref(),
+        Some("/qualified/model/tokenizer")
+    );
+    assert_eq!(qwen.model_config.qwen3_asr.hotwords, None);
 }

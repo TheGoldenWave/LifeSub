@@ -1,0 +1,71 @@
+- generic [ref=e3]:
+  - navigation "主导航" [ref=e4]:
+    - generic [ref=e8]:
+      - strong [ref=e9]: LifeSub
+      - generic [ref=e10]: 旁白
+    - generic [ref=e11]:
+      - button "时间线" [ref=e12] [cursor=pointer]
+      - button "导入音频" [ref=e16] [cursor=pointer]
+    - button "设置" [ref=e20] [cursor=pointer]
+  - generic [ref=e24]:
+    - region "录音控制" [ref=e25]:
+      - generic [ref=e28]:
+        - text: Capture
+        - strong [ref=e29]: 正在记录
+      - generic [ref=e30]:
+        - button "暂停" [ref=e129] [cursor=pointer]
+        - button "停止" [ref=e132] [cursor=pointer]
+    - generic [ref=e37]:
+      - complementary [ref=e38]:
+        - searchbox "搜索转写" [active] [ref=e43]
+        - generic [ref=e44]:
+          - generic [ref=e45]: 最近记录
+          - generic [ref=e46]: 2 条
+        - generic [ref=e47]:
+          - button "LifeSub 首版范围讨论 今天 16:18 · 38 分钟 证据可用" [ref=e48] [cursor=pointer]:
+            - generic [ref=e53]:
+              - strong [ref=e54]: LifeSub 首版范围讨论
+              - generic [ref=e55]: 今天 16:18 · 38 分钟
+            - generic "证据可用" [ref=e56]
+          - button "架构边界复盘 昨天 10:05 · 22 分钟 证据可用" [ref=e57] [cursor=pointer]:
+            - generic [ref=e62]:
+              - strong [ref=e63]: 架构边界复盘
+              - generic [ref=e64]: 昨天 10:05 · 22 分钟
+            - generic "证据可用" [ref=e65]
+      - main [ref=e66]:
+        - generic [ref=e67]:
+          - generic [ref=e68]:
+            - text: Evidence Record
+            - heading "LifeSub 首版范围讨论" [level=1] [ref=e69]
+            - paragraph [ref=e70]: 今天 16:18 · 38 分钟 · 麦克风 + 系统音频
+          - generic [ref=e71]:
+            - button "复制 Evidence URI" [ref=e72] [cursor=pointer]
+            - button "导出 Markdown" [ref=e76] [cursor=pointer]
+        - generic [ref=e80]:
+          - generic [ref=e81]: 证据可用
+          - code [ref=e85]: lifesub://record/rec-20260815-001
+          - generic [ref=e86]: 原始转写 · r1
+        - generic [ref=e87]:
+          - generic [ref=e88]:
+            - generic [ref=e89]: 原始转写 · r1
+            - generic [ref=e90]: 本地演示 ASR
+            - button "创建修订" [ref=e91] [cursor=pointer]
+          - generic [ref=e95]:
+            - article [ref=e96]:
+              - button "播放 00:12" [ref=e97] [cursor=pointer]: 00:12
+              - generic [ref=e104]:
+                - text: 麦克风
+                - paragraph [ref=e105]: 我们今天先确认首版范围，重点是把基础闭环真正跑起来。
+                - generic [ref=e106]: 00:12–00:19 · seg-001
+            - article [ref=e107]:
+              - button "播放 00:24" [ref=e108] [cursor=pointer]: 00:24
+              - generic [ref=e115]:
+                - text: 系统音频
+                - paragraph [ref=e116]: 证据链必须保留原始转写，并且每次修改都能追溯。
+                - generic [ref=e117]: 00:24–00:31 · seg-002
+            - article [ref=e118]:
+              - button "播放 00:42" [ref=e119] [cursor=pointer]: 00:42
+              - generic [ref=e126]:
+                - text: 麦克风
+                - paragraph [ref=e127]: 搜索结果要能回到准确的音频时间范围。
+                - generic [ref=e128]: 00:42–00:49 · seg-003

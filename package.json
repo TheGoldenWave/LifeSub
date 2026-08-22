@@ -9,10 +9,14 @@
     "dev": "vite",
     "prebuild": "npm run tokens",
     "build": "tsc -b && vite build",
+    "build:capture-helper": "sh scripts/build-capture-helper.sh",
     "pretest": "npm run tokens",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:release-source": "bash tests/scripts/verify-release-source.test.sh",
+    "test:capture-helper-build": "bash tests/scripts/build-capture-helper.test.sh",
+    "verify:release-source": "bash scripts/verify-release-source.sh",
     "tauri": "tauri"
   },
   "dependencies": {

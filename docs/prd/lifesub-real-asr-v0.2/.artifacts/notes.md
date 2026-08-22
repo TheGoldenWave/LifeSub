@@ -1,7 +1,5 @@
 # LifeSub 真实本地 ASR V0.2 设计记录
 
-- 2026-08-20：遗留生产能力正式拆为 V0.2.1 真实本地 ASR、V0.2.2 原生 macOS 采集、V0.3 匿名 Diarization、V0.3.1 CAM++ 声纹身份。排序采用“先导入音频真实 ASR，再接真实采集”，用于隔离 ASR 与采集故障域；模型安装 UI 是 V0.2.1 可用闭环的一部分，不单独作为版本。多设备合并从 V0.3 释放并待重新排期。
-
 - 2026-08-15：用户未明确阿里云或本地模型；依据项目 D-003 本地优先决策，本版选择 SenseVoiceSmall/FunASR 本地路径，DashScope 延后。
 - 2026-08-15：sherpa-onnx 1.13.5 的 Rust API 已同时提供 SenseVoice 与 Whisper 离线识别示例，并支持静态链接。
 - 2026-08-15：SenseVoiceSmall INT8 官方 sherpa-onnx 模型包约 163 MB；Whisper Tiny/Base/Small 分别约 116/208/639 MB。
@@ -14,12 +12,57 @@
 - 2026-08-15：规格三审发现 claim 与 `preparing` 状态之间存在崩溃窗口，且 boot ID 恢复隐含单实例假设；设计改为持有进程级 `asr-worker.lock`，并在同一 CAS 中完成 claim、attempt 递增和状态切换。
 - 2026-08-15：规格四审发现 lease 过期 Worker 可能在被接管后发布结果；设计增加 claim_generation fencing，所有续租、状态转换和 Evidence 成功事务必须校验 claimed_by 与 generation。
 - 2026-08-15：实施计划首审发现 `cargo test --exact` 可能零测试通过、Playwright 无法证明 native ASR、native runtime archive 未校验和 evidence commit 自失效等问题；计划已增加完整测试路径、verified archive、production desktop acceptance harness、单一 real-model Gate、固定 digest scope 和先提交代码后生成 evidence 的闭环。
-- 2026-08-20：补充存储策略。全天录制存储增长风险确认，架构设计新增 §11 音频编码优化（Opus 16kbps + DTX 可降至 ~7 MB/h）和 §12 存储保留策略（配额上限、分级保留 L1-L4、冷归档、存储仪表盘）。版本路线已更新。重要标记两个时间点：录制开始时影响编码质量（HQ 档），录制后只影响保留策略。
-- 2026-08-20：ASR 兼容性确认。SenseVoice 与 Whisper 均以 16kHz 单声道为原生输入（sherpa-onnx `sampling_rate=16000`、Whisper 特征提取器重采样到 16kHz），故 16kHz 不是降级而是最优。Opus 压缩影响经 Amazon Science Interspeech 2021 论文验证：32kbps 相对 WER 退化 <1%，16kbps 退化 <3-5%（近讲不可感知），远优于同码率 MP3/AAC。§11.2 已补充 ASR 兼容性分析表。
-- 2026-08-20：Qwen3-ASR 评估。模型同样以 16kHz 单声道为原生输入（Qwen3ASRFeatureExtractor `sampling_rate=16000`），架构为 Whisper 风格 Encoder + Qwen3 LLM Decoder，0.6B/1.7B 两个尺寸，Apache 2.0 许可。精度优于 Whisper Large v3，但模型体积大（0.6B ONNX ~1.2GB），不适合默认 Provider。已列入 V0.5 评估候选。与现有 16kHz Opus 编码策略完全兼容。
-- 2026-08-20：简化为单一编码配置。三模型均确认 16kHz 为原生最优输入，16kbps Opus 对 ASR 无实质影响，去掉 Voice HQ 24kHz 档和"录制开始时标记重要→HQ 编码"逻辑。统一为 Opus 16kbps VBR 16kHz Mono + DTX，每小时 ~7MB。重要标记只影响保留策略（永久），不影响编码。
-- 2026-08-19：安装包实机走查确认 `src-tauri/src/capture/streaming.rs` 的生产启动路径固定实例化 `MockStreamingSource`，前端却显示“实时 SenseVoice”，属于能力与来源误报，必须在真实 Capture Adapter/Provider 接通前显式标记演示模式并禁止生成“已保存”证据提示。
-- 2026-08-19：当前 UI 存在多处可点击但无处理逻辑的控件：音频播放、模型下载、声纹注册/重命名/删除、词条编辑；时间线导入仅弹提示，统计与记录固定使用 demo 数据。
-- 2026-08-19：设置弹窗 `.modal-body` 与 `.settings-layout` 同时定义双列 Grid，但后者作为前者唯一子元素被放进 180px 首列，导致设置正文压缩；Modal 也未管理初始焦点、焦点循环和关闭后的焦点恢复。
-- 2026-08-19：已将实机功能审计与 5 张截图的 UI 观察合并为 `ui-walkthrough-issues-2026-08-19.md`。后续修复应以该文件为统一问题列表，优先解决 Mock 冒充真实能力、虚假保存成功、真实数据加载、音频播放、修订持久化与设置弹窗阻断问题。
-- 2026-08-21：较旧客户端打开较新 Catalog 时，不能仅按 `user_version` 不在当前枚举中就判定数据库损坏。应验证当前客户端所需的最小 schema 指纹；兼容的较新 schema 只允许打开且必须保留原版本与新增数据，不得执行降级 DDL。较新 schema 缺少当前必需结构时仍应 fail closed。
+- 2026-08-15：仅设置 `SHERPA_ONNX_ARCHIVE_DIR` 不能阻止 `sherpa-onnx-sys` 复用 `target/sherpa-onnx-prebuilt`。Task 1 增加持锁 wrapper，每次原子隔离旧 prebuilt、强制 scoped rebuild，并通过 PID/mtime 回收 stale lock。
+- 2026-08-15：sherpa native API 报告 8 位 Git SHA，不能伪装成完整 commit。实现分别保存 observed SHA 与 pinned full SHA，并使用非 panic 的 typed validation。
+- 2026-08-15：代码质量审查留下 Minor：`with-sherpa-runtime.sh` 调用 fetcher 时应为脚本路径加引号，以兼容仓库路径包含空格；当前工作区路径不触发，后续维护时处理。
+- 2026-08-15：用户要求同时考虑 Qwen3-ASR 0.6B 与 1.7B。sherpa-onnx 1.13.5 已提供 Qwen3-ASR Rust 配置；其官方模型发布中存在 0.6B INT8 包（878,702,423 B，SHA-256 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`），因此 0.6B 可复用当前静态 Rust 运行时。
+- 2026-08-15：未发现 Qwen3-ASR 1.7B 的 sherpa-onnx 预转换发布包。Hugging Face `-hf` 原始权重需要 Transformers/Python 或另一原生适配器，不能直接交给当前 Rust Provider。V0.2 将其作为高质量实验选项，但在固定 size/hash/required-files/conversion provenance 和 Apple Silicon memory/RTF Gate 前禁止安装，且不得静默回退到 0.6B。
+- 2026-08-15：Task 2 最终质量复审发现 SQL normalizer 会丢失 token 边界，使 `TEXT NOT NULL` 与 `TEXTNOT NULL` 发生碰撞。修复必须先加入负向测试，再保留 token 边界或改用结构化 PRAGMA 校验。
+- 2026-08-16：Qwen 范围规格审查要求 Manifest 区分 `Installable` 与 `ExperimentalUnavailable`，并把 selectable/installable/executable 能力贯穿设置、下载、Core enqueue 与 Provider Factory。1.7B Gate 固定 Apple Silicon/16 GB/macOS 14+、CER/WER <= 20%、混合关键短语 100%、RTF <= 1.0、RSS <= 6 GiB，并使用确定性 300 秒 fixture。
+- 2026-08-16：Task 3 质量审查发现内部设置错误会形成第二套序列化错误码，且公开 Provider Receipt 字段可构造不可信 provenance。实现改为内部错误 exhaustive 映射到 `AsrErrorCode`，Receipt 仅能通过验证 draft/custom Deserialize 构造，并校验 hash、JSON、VAD identity 与时间顺序。
+- 2026-08-16：Agent MVP 架构采用 C -> A：先抽出 CoreRuntime 与版本化 Local Tool API，Tauri/Unix socket 仅作适配器；最终由 launchd `lifesubd` 托管。插件/Gateway 不得调用 Tauri Command、打开 SQLite 或读取内部路径。C 阶段退出 Tauri 进程仍会停止录音，不能提前宣称 daemon 生命周期。
+- 2026-08-16：Task 4 安全复审证明 `symlink_metadata` 后再按路径打开存在 check/use 竞态。音频导入、校验和 reconciliation 改为以 no-follow 目录 fd 为锚点，使用 descriptor-relative 操作，并在文件副作用与 DB commit 前复验目录 `(dev, ino)`。
+- 2026-08-16：文件锁必须绑定完整 Core 生命周期，且所有 Catalog 写入口必须结构化经过 ownership guard。当前单用户 macOS 产品以 canonical parent directory inode 锁防止协作式第二 LifeSub 实例进入 writable Catalog/migration/reconciliation；同 UID 恶意篡改文件系统 namespace 不属于该并发锁的安全边界，因为该主体本已能直接修改本地 SQLite 与音频。
+- 2026-08-16：reconciliation 的可删除文件 grammar 必须与 importer 生成规则完全一致。最终仅接受 lowercase SHA/chunk ID 和规范化的 1–16 字节 ASCII 字母数字扩展名；空、非 UTF-8、过长或含标点扩展名统一落为 `audio`，未知或伪装 entry fail closed 且不删除。
+- 2026-08-16：未知持久化 `integrity_state` 不能在启动修复或 ASR 前校验中被重新哈希后覆盖为 `available`；服务在任何文件副作用与状态更新前先解析当前 DB 状态，未知值直接返回 Catalog 错误。
+- 2026-08-16：Task 6 migration 必须保留历史 v2 DDL 不变，再以独立 v3 transaction 重建 `model_installations` 并创建 `model_download_artifacts`。旧 `ready` 缺少结构与 runtime attestation，唯一安全迁移是 `installed_unqualified`。
+- 2026-08-16：可恢复下载的 source identity 不能只比较 repository/model/revision/URL；还必须包含 expected SHA-256 与 required path。长度已完整但 hash 错误的 `.part` 必须从 0 重启，不能发送 `Range: bytes=<total>-`。
+- 2026-08-16：测试 loopback HTTP 通过注入 transport 实现；production `ReqwestTransport` 始终 HTTPS-only，并在每个 redirect hop 和最终 URL 使用当前 artifact 的精确 host allowlist。
+- 2026-08-16：sherpa structural qualification 必须消费 Task 5 canonical full identity（version/full Git/native archive SHA/build ID），四字段任一不匹配都不发布 installation，并 quarantine staging/install directory。Qwen 1.7B Task 6 只做五文件 structural Gate，状态保持 `installed_unqualified`，禁止初始化 Candle。
+- 2026-08-16：streaming checkpoint 必须在 response copy loop 内按 4 MiB bound 持久化；checkpoint 之前先 flush/sync_data。network EOF、cancel 与短 body 都保存实际 durable bytes 和 validators，retry 才能从真实 checkpoint 发 Range/If-Range。
+- 2026-08-16：archive install contract 是 Task5 manifest 的 canonical derived metadata：scan 全 entry，但去掉唯一顶层 root 后只写 exact whitelist；entry count、单文件 bytes、总写入 bytes、required size/hash 全部精确匹配。README/scripts/optional INT8 不安装，Qwen06 tokenizer 三件套必须安装。
+- 2026-08-16：磁盘预检比较 available free bytes 时不能重复加入已占用的 verified parts 或旧安装；同卷 staging->final rename 不复制 payload。精确 additional requirement 是 `remaining parts + one required inventory total + 512 MiB`，并使用 checked arithmetic 与 volume identity 检查。
+- 2026-08-16：删除使用 Catalog deletion lease 保存完整 prior qualification，安装目录先写 durable delete marker、rename 到 trash 并 fsync，再删除 Catalog row；DB 失败 rename 回并恢复 exact prior。startup global reconcile 处理 marker 前崩溃、trash 残留与 DB/FS 不一致。
+- 2026-08-16：Task 6 review 收尾发现，仅从 manifest 复制 `install_constraints` 不足以证明消费端 canonical。凡 `model_id + manifest_version + bundle_identity` 命中静态 registry 的下载计划，manager 必须在任何 DB/network 副作用前对完整 `ModelInstallPlan` 做等值绑定，防止扩大 archive bounds、替换 required hash/path 或漂移 source/runtime/device contract。
+- 2026-08-16：delete marker 是独立的两阶段持久化协议。`.lifesub-delete.json.tmp` 的 write、sync、rename 或最终 directory fsync 任一失败，都必须移除 tmp 与 final marker 并再次 fsync 安装目录；startup 看到 `deleting` 但没有 durable final marker 时也执行同一清理后恢复精确 prior state，避免残留 tmp 阻塞后续删除。
+- 2026-08-16：global model reconciliation 不能丢弃 `reconcile_installation` 错误。实现以 `ReconcileOutcome::RejectedDurably` 区分“已完成 quarantine/Catalog 降级的语义拒绝”和真正的操作失败；quarantine rename/fsync、Catalog recovery/publish 等错误必须向上传播，使 `CoreRuntime::initialize` 返回 Err，禁止旧 `runtime_qualified` 状态继续形成可用 runtime。
+- 2026-08-16：download row 进入 `installing` 后必须由统一 completion 状态机收口。assembly/structural/rename 等 pre-commit 失败写入 `failed + stable error code` 释放 active unique index；final rename 后的 Catalog publication 歧义立即 reconcile，无法确认时写入 `failed + recovery_required`。verified parts 保留，使同进程 `retry_install` 不需重启或重新下载。
+- 2026-08-16：下载前磁盘预检不能替代 assembly 前预检。安装状态切换后、创建 staging payload/marker 前必须再次使用当前 checkpoint 与 available space 计算 exact formula；流复制在每次 write 前以 checked arithmetic 校验 `expected_body` hard bound，生产 transport 同时设置 connect 与 bounded response timeout，timeout 后重新观察 cancellation。
+- 2026-08-16：所有进入路径 join 的 identifier 必须通过 bounded ASCII single-component grammar；production API 只接受 model ID 并从静态 registry resolve canonical plan，合成 plan API 仅保留 crate/test 可见。reconciliation 目录发现统一使用 `symlink_metadata`，只遍历真实目录、只 hash regular file，FIFO/socket/device 和 provider/model/final symlink 均 fail closed。
+- 2026-08-16：deletion marker 必须逐字段等于当前 `deleting` Catalog lease，包含 model/path/prior state/runtime/qualified timestamp/error；trash recovery 也先查询当前 lease，Catalog DELETE 必须 CAS 命中恰好一行。stale/mismatch marker 不删除 payload 或 row。
+- 2026-08-16：Task 6 model manager 最终按 download/install/delete/reconcile/archive/fs/types 拆分；一次机械 split 因 apply_patch 同路径 delete+add 限制删除了未跟踪单文件，随后依据 69 个行为测试、manifest 与 Catalog contract 从模块化实现完整恢复，并重新通过全部质量门。后续大文件拆分必须先落目标模块或保留可验证副本，再删除源文件。
+- 2026-08-16：安装已经 publish 后，最终 `model_downloads.state = succeeded` 写入失败同样属于 post-commit ambiguity；必须再次 reconcile 安装并重试状态转换，若仍失败则尽力写入 `failed + recovery_required`，不能留下 active `installing`。对应 one-shot state transition fault 已加入回归测试。
+- 2026-08-16：文件尺寸剩余 Minor：`model_manager/download.rs` 为 531 行，略高于约 500 行目标但已从原 2570 行单文件隔离；按新 review 规则不再为零 Minor 做第三轮结构调整，后续下载协议变更时再拆 transport/checkpoint 两层。
+- 2026-08-16：stalled-response 测试的 server 不能永久阻塞在 `accept()`。并行测试中 cancellation 可能在 request 前触发，导致 client 不连接而测试线程永远 join accept。fixture 改为 nonblocking accept + shutdown channel + 2 秒 server deadline，并只在 accept 确认后启动 cancellation；production response timeout 同步收紧为 2 秒。exact 与 focused 均在外部 10 秒 alarm 内退出。
+- 2026-08-16：Task 8 qualification smoke 不能把可注入泛型 adapter 暴露为 production API，否则测试 fake 可成为生产资格来源。production 只允许 ModelManager 绑定当前设备、重验 bundle 并构造真实 Qwen Candle/Metal smoke；generic RuntimeQualifier 仅供 crate 内测试与该固定入口使用。
+- 2026-08-16：Job 的零行 fenced UPDATE 不能统一解释为 ownership lost。renew、阶段转换与 fail 都必须在同一事务内区分 `CancelRequested` / `OwnershipLost`；Coordinator 只有在 fenced acknowledge 将数据库写成 `cancelled` 后才能清 active 并领取下一任务。
+- 2026-08-16：模型删除不能只依赖 Catalog job lease。Provider 必须持有共享 registry 的 RAII execution lease，Manager clone 共享同一计数；Provider 构造消费已重验 installation，不能重复执行 inventory hash pass。
+- 2026-08-16：资格音频 hash 本身不足以冻结 smoke 语义。phrases、匹配阈值、normalization、expected text、source/PCM hashes、archive path/hash、license 与 provenance 必须形成 canonical digest，并写入 runtime identity，防止 fixture metadata 漂移后仍资格通过。
+- 2026-08-16：UUID qualification temp marker 的错误清理必须覆盖 create/write/sync/rename/publish 冲突，启动 reconcile 还需枚举并删除合法 UUID grammar 的 stale temp 后 fsync 目录；不可用固定 `.tmp` 假设。
+- 2026-08-16：ignored real-model gate 被显式选择时不能因缺环境静默 return。缺 `LIFESUB_RUN_QWEN17_SMOKE=1` 或 `LIFESUB_QWEN17_MODEL_DIR` 必须测试失败，使 CI/人工 gate 不会产生零工作假绿。
+- 2026-08-16：目录 fd 经 `F_GETPATH`/`readlink` 转回普通 pathname 不是 SQLite 锚定，路径解析后仍可二次 swap。macOS 首发采用进程级 tokenized wrapper VFS：主库与 sidecar 用 `openat(O_NOFOLLOW)`，NULL temp fail closed + `temp_store=MEMORY`，`unix-excl` 避免物理 SHM，`HAS_MOVED` 比较 open fd 与 anchored entry 的 dev/ino，并验证 regular/current uid/0600/nlink=1。
+- 2026-08-16：文件 cleanup 即使先比较 dev/ino，identity check 与裸 `unlink` 之间仍有同名替换窗口。Evidence 与 Model startup reconciliation 的破坏性清理统一使用 no-replace 随机 tombstone 原子 rename，移动后再次核验 identity；失配时恢复原名并 fail closed。
+- 2026-08-16：Task 10 publication 成功事务必须同时 fence claimed_by、claim_generation、`state = transcribing`、cancel marker 与同一 `now` 下未过期 lease；只检查 generation 仍允许过期 worker 在 recovery 前发布。
+- 2026-08-16：Core startup fd-anchored 不等于 ModelManager 全生命周期安全。Task 10 M3 必须把 download/install/delete/qualification/provider lease 统一收口到 AnchoredFs capability，并让 provider 从已验证 fd 加载，禁止 production 模块继续直接 `root.join`。
+- 2026-08-17：流程优化——双审合并为单轮合并审查、测试改为三层分级、文件行数放宽至 600 行、新增 `scripts/check.sh` 一键验证。优化原因：双审串行导致每 Task 至少 2 轮沟通，全量 283+ tests 每次必跑耗时巨大，300 行限制在 Rust 模块中不切实际。新流程：`make check`（Tier2）作为日常预提交指令，`make check-full`（Tier3）仅在 Task 收尾时执行一次。
+- 2026-08-19：设置弹窗缺陷的根因不是单点 bug，而是“演示态 UI”残留：`Modal` 只有视觉层没有真实 dialog 焦点管理；设置页同时继承了全局 `.modal-body` grid 和局部 `.settings-layout` grid，窄窗/放大字时双重压缩；模型/关于/声纹动作依赖硬编码占位数据或无反馈按钮。修复时先补组件级失败测试，再把版本与模型状态改为只读运行时投影，未落地动作统一降级为禁用的“计划中”。
+- 2026-08-19：二轮 review 指出第一版设置修复仍有生命周期/错误路径缺口：多实例 modal 会双重处理 Escape/Tab；Tauri 设置加载错误被 adapter 静默吞掉；模型安装/下载状态只按 `model_id` 聚合；声纹重命名/删除没有 pending/error。修复方式：Modal 改为全局 stack + inert 引用计数；Tauri adapter 加载接口改为直接抛错，由组件显式显示错误并提供 retry；模型投影精确按 `(model_id, manifest_version, bundle_identity)` 匹配并选择当前 bundle 最新下载记录；声纹动作增加 pending/禁用/error UI。
+- 2026-08-19：UI 走查修复的核心安全原则是“不可用必须 fail closed”。生产采集、LLM、Catalog、模型或音频绑定失败时，不得回退 Demo、替换文本或播放另一 Chunk；浏览器 Demo 必须持续标记且永不宣称保存。
+- 2026-08-19：录音状态不能只锁 UI。后端 error、pause/resume/stop 的迟到 Promise 也必须以 lifecycle generation + session ID 在远端 mutation 前校验，否则 Catalog 仍可能被旧操作复活。
+- 2026-08-19：设置弹窗双重 Grid 不能只靠低特异性覆盖。实际 CSS 顺序使 `.modal-body` 覆盖 `.settings-modal__body`；最终使用 `.modal-body.settings-modal__body` 并以浏览器计算样式确认 body=block、内容宽度 738px。
+- 2026-08-19：`/dev/fd/N` 在并行测试中可能立即被其他线程复用，不能用 `path.exists() == false` 证明 fd 已释放；应比较关闭前后的 `(dev, ino)` 文件身份。
+- 2026-08-21：Task 2 release gate 修复提交 `371faea` 因 `commands.rs` / `lib.rs` 已是 dirty integration baseline，提交同时捕获了既有 import job、Timeline projection、model/runtime API、worker lifecycle 与 command registration 改动。现有 focused 覆盖包括 `commands::tests::{import_persists_failed_job_when_configured_model_is_invalid, invalidated_ownership_blocks_every_write_class_without_db_changes, list_timeline_records_returns_resolved_audio_and_revision_history, list_asr_models_ignores_stale_installations_and_downloads, list_asr_models_uses_latest_current_bundle_download}`，以及 `asr::worker::tests` 的 recovery、lease renewal、cancel、failure、shutdown 和 single-coordinator cases。本轮尝试新鲜运行 `commands::tests::` 时被另一协作者 PID 9693 持有的 `.lifesub-sherpa-runtime.lock` 阻塞，未将该次执行表述为通过；行为代码未在本修复中重写。
+- 2026-08-19：Job snapshot 的 required-file inventory 是 JSON 数组，Receipt 层若强制 JSON object 会让真实 publication 永远失败。Receipt 只校验合法 JSON，snapshot loader 校验数组结构/路径/hash，publication 再做字符串身份等值。
+- 2026-08-19：Tauri 项目若 Cargo 默认 feature 为空，直接 `tauri build` 会把 `#[cfg(not(feature = "desktop"))] run()` 打成空实现，应用启动后立即正常退出。桌面打包必须显式使用 `tauri build --features desktop`，并以“启动后进程持续存在”作为安装前门禁，不能只看 bundle 生成成功。
+- 2026-08-21：Task 2 release wiring 证明不能依赖 factory 自报的布尔常量，否则 fail-closed 实现可伪装成 native。门禁改为 crate 内 sealed capability marker，外部测试仅接受同时具备 native capture 与 native ASR capability 的 production factory；新增 lying-flags 回归 fixture。当前 production alias 仍指向 `FailClosedDesktopRuntimeFactory`，因此正式门禁必须失败，planned audit 也必须明确 `not release-ready`。
+- 2026-08-21：Task 3 协议复审发现 PCM payload 对齐、Swift socket 合并帧消费和跨语言 fixture 三个 Important 缺口；已改为编解码均校验非空 frame stride、`decodePrefix` 返回消费字节数，并让 Rust/Swift 共读单一 hex fixture。剩余 Minor：Foundation `JSONSerialization` 对重复 key 的行为尚未与 Rust 做显式一致化；已严格拒绝未知字段/未知消息/尾随数据，duplicate-key 加固在 helper 认证与 fuzz 覆盖时处理。

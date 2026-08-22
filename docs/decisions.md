@@ -57,38 +57,19 @@
 - 决定：首版 Codex 插件连接本机 LifeSub Core，通过本地或仓库插件市场分发。
 - 延后：需要公网 MCP 与认证的公共 ChatGPT/Codex 插件。
 
-## D-011：Logo 与 macOS 菜单栏呈现
+## D-011：契约先独立，最终演进为 `lifesubd`
 
 - 状态：已确认
-- 决定：菜单栏常驻图标采用 `A1 · Balanced Evidence Trace`；录音中沿用 A1，通过间断播放的音波脉冲表达状态，不永久附加独立录音圆点。
-- 品牌：Dock / App Icon 已定稿为 `B2 · Evidence First Narration Bubble`，使用深色圆角底板、加宽气泡边框与白色 A1 Evidence Trace；官网与品牌主视觉沿用该母版扩展。
-- 布局：优先探索将 A1 放在刘海左侧或右侧的专属邻近位置；只有公共 API、空间和多屏回退可验证时启用，标准菜单栏 `NSStatusItem` 始终作为可靠回退。
-- 无障碍：Reduce Motion 时禁用 pulse；状态必须同时提供文字或可访问名称，不能只靠动画或颜色。
-- 详情：见 [`docs/design/lifesub-logo-decision.md`](design/lifesub-logo-decision.md)。
-
-## D-012：多设备录音作为 Evidence 治理能力
-
-- 状态：已确认；2026-08-20 从 V0.3 释放，待说话人能力完成后重新排期
-- 决定：LifeSub 支持将 Mac、手机、手表等设备对同一事件产生的多份录音和 ASR 结果进行归并、校准、去重、冲突治理，并产出新的最终合并音频/ASR Revision 与 Markdown 文档。
-- 原则：原始录音、设备独立 ASR 和历史 Revision 永久保留；合并结果必须是新的不可变 Revision，不能静默覆盖来源结果。
-- 追溯：最终片段必须能追溯到设备、Physical Audio Chunk、原始 ASR Revision、时间范围、采用的治理规则和冲突来源。
-- 边界：这属于 Audio、Transcript、Evidence 的治理，不扩展为通用文件管理、会议纪要、Project 状态或长期知识治理。
-- 默认策略：先做确定性时间对齐、音频质量评估、重叠检测和来源优先级；ASR 冲突需要保留来源，不能静默选择“看起来更好”的文本。
-- 删除与保留：本版本不自动删除低质量来源；用户确认的合并结果与来源保留策略另行建模。
-
-## D-013：本地 ASR 技术栈
-
-- 状态：已确认（V0.2 已实现）
-- 决定：采用 sherpa-onnx 1.13.5 静态链接，统一支持 SenseVoiceSmall INT8 与 Whisper Tiny/Base/Small 模型。
-- 原因：同一 Rust API 覆盖两种 Provider；无 Python Sidecar；模型下载、校验、安装和切换统一管理。
-- 模型规格：SenseVoiceSmall 163 MB（默认中文/中英混合），Whisper Tiny 116 MB、Base 208 MB、Small 639 MB，Silero VAD 0.6 MB。
-- 边界：不接入云端 ASR；不引入 whisper.cpp 双运行时；不复制 GPLv3 参考代码。
-- 详情：见 [`docs/superpowers/specs/2026-08-15-lifesub-real-asr-design.md`](../superpowers/specs/2026-08-15-lifesub-real-asr-design.md)。
+- 决定：当前采用过渡方案 C，先抽出不依赖 Tauri 的 `CoreRuntime` 与版本化 Local Tool API；目标架构 A 是由独立常驻本地服务 `lifesubd` 托管同一 Core。
+- 所有权：SQLite、录音状态、模型安装和 ASR Worker 只能由一个 Core 实例拥有。Tauri、DeepSeek Harness 与 ChatGPT Gateway 不得直接访问 SQLite、音频路径或模型目录。
+- 接入：Tauri Command、本机 Unix socket 和未来 MCP Gateway 都是同一工具契约的适配器，不得复制业务逻辑。
+- 生命周期：C 阶段退出 Tauri 进程仍会停止录音与处理；只有 A 阶段可承诺 UI 退出不影响后台任务。
+- 安全：daemon 不直接监听公网或局域网；ChatGPT 开发者模式通过独立、认证的 Gateway 映射 MCP。
 
 ## 待决事项
 
-- 技术栈与进程边界。
-- ~~首选本地 ASR 模型和最低硬件要求。~~ → D-013 已确认。
+- `lifesubd` 的 launchd 安装、升级与崩溃恢复细节。
+- 首选本地 ASR 模型和最低硬件要求。
 - 记忆 schema、敏感级别和授权生命周期。
 - 搜索与引用的精确工具契约。
 - GitHub 加密与密钥恢复方案。

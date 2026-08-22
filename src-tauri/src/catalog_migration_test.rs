@@ -1,511 +1,445 @@
-use rusqlite::Connection;
+use std::collections::BTreeSet;
+use std::fs;
+use std::time::Duration;
+use std::{sync::mpsc, thread};
 
-use crate::catalog::migrations::{classify_schema, SchemaKind};
+use rusqlite::{Connection, Error, ffi};
+use tempfile::TempDir;
 
-/// Create an in-memory database with the exact V0.1 schema fingerprint.
-fn create_v0_1_db() -> Connection {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "PRAGMA foreign_keys = ON;
-         CREATE TABLE sessions (
-           id TEXT PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL,
-           started_at TEXT NOT NULL, ended_at TEXT
-         );
-         CREATE TABLE revisions (
-           id TEXT PRIMARY KEY, session_id TEXT NOT NULL, number INTEGER NOT NULL,
-           provider TEXT NOT NULL, created_at TEXT NOT NULL,
-           UNIQUE(session_id, number), FOREIGN KEY(session_id) REFERENCES sessions(id)
-         );
-         CREATE TABLE segments (
-           id TEXT NOT NULL, revision_id TEXT NOT NULL, start_ms INTEGER NOT NULL,
-           end_ms INTEGER NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL,
-           PRIMARY KEY(id, revision_id), FOREIGN KEY(revision_id) REFERENCES revisions(id)
-         );
-         CREATE TABLE chunks (
-           id TEXT PRIMARY KEY, session_id TEXT NOT NULL, source TEXT NOT NULL,
-           path TEXT NOT NULL, sha256 TEXT NOT NULL, byte_length INTEGER NOT NULL,
-           FOREIGN KEY(session_id) REFERENCES sessions(id)
-         );
-         CREATE VIRTUAL TABLE segment_search USING fts5(
-           segment_id UNINDEXED, revision_id UNINDEXED, text, tokenize='trigram'
-         );",
-    )
-    .unwrap();
-    conn
+use crate::catalog::{
+    Catalog,
+    migrations::{self, SchemaKind},
+};
+
+const FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tests/fixtures/catalog/lifesub-v0.1.sqlite3"
+);
+const V2_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tests/fixtures/catalog/lifesub-v0.2.sqlite3"
+);
+const V3_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tests/fixtures/catalog/lifesub-v0.3.sqlite3"
+);
+const V4_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tests/fixtures/catalog/lifesub-v0.4.sqlite3"
+);
+const V2_FIXTURE_SHA256: &str = "e2956f8a5c0531e8b444519c8e11e2de5952f6b4b4ec391c3321e9f60e6e4639";
+const V3_FIXTURE_SHA256: &str = "79f8ec380b1555691e9bc4fd79bd743213b275270d35a61e791c0f278d970de2";
+const V4_FIXTURE_SHA256: &str = "75c5782564ebf499ac3b3439267bbf3012100efa2e86b1bb91f3e256ac587445";
+
+type ColumnContract<'a> = (&'a str, &'a str, bool, Option<&'a str>, i64);
+type ForeignKeyContract = (String, String, String, String, String, String);
+type UniqueContract = (String, bool, Vec<String>);
+type SegmentSnapshot = (
+    String,
+    String,
+    i64,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+type ChunkSnapshot = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+fn fixture_copy() -> (TempDir, std::path::PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(FIXTURE, &path).unwrap();
+    (directory, path)
 }
 
-/// Create an in-memory database with the exact V0.1 schema and representative
-/// test data — a session, a chunk, two revisions with segments, and search
-/// content — so that migration assertions can verify legacy data is still
-/// readable after upgrade.
-fn create_v0_1_db_with_data() -> Connection {
-    let conn = create_v0_1_db();
-    conn.execute_batch(
-        "INSERT INTO sessions(id, title, state, started_at) VALUES('rec_test', '迁移测试', 'stopped', '2025-01-01T00:00:00Z');
-         INSERT INTO chunks(id, session_id, source, path, sha256, byte_length) VALUES('chk_test', 'rec_test', 'imported', 'audio/test.wav', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', 0);
-         INSERT INTO revisions(id, session_id, number, provider, created_at) VALUES('rev_1', 'rec_test', 1, 'demo-local', '2025-01-01T00:00:01Z');
-         INSERT INTO revisions(id, session_id, number, provider, created_at) VALUES('rev_2', 'rec_test', 2, 'manual', '2025-01-01T00:00:02Z');
-         INSERT INTO segments(id, revision_id, start_ms, end_ms, source, text) VALUES('seg_1', 'rev_1', 0, 4200, 'microphone', '原始转写文本');
-         INSERT INTO segments(id, revision_id, start_ms, end_ms, source, text) VALUES('seg_2', 'rev_2', 0, 4200, 'microphone', '修订后的转写文本');
-         INSERT INTO segment_search(segment_id, revision_id, text) VALUES('seg_1', 'rev_1', '原始转写文本');
-         INSERT INTO segment_search(segment_id, revision_id, text) VALUES('seg_2', 'rev_2', '修订后的转写文本');",
-    )
-    .unwrap();
-    conn
+fn fresh_file_connection() -> (TempDir, std::path::PathBuf, Connection) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    let mut connection = Connection::open(&path).unwrap();
+    migrations::migrate(&mut connection).unwrap();
+    (directory, path, connection)
 }
 
-// ── Schema classification ──────────────────────────────────────────────
+fn user_version(connection: &Connection) -> i64 {
+    connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap()
+}
 
 #[test]
-fn classify_fresh_database() {
-    let conn = Connection::open_in_memory().unwrap();
-    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::Fresh);
-}
-
-#[test]
-fn classify_legacy_v1_database() {
-    let conn = create_v0_1_db();
-    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::LegacyV1);
-}
-
-#[test]
-fn classify_unknown_v0_database() {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE unknown_table (id INTEGER PRIMARY KEY);",
-    )
-    .unwrap();
-    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::Unknown);
-}
-
-#[test]
-fn classify_unknown_when_columns_differ() {
-    let conn = Connection::open_in_memory().unwrap();
-    // Missing a column: sessions without `ended_at`
-    conn.execute_batch(
-        "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL);
-         CREATE TABLE revisions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, number INTEGER NOT NULL, provider TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(session_id, number), FOREIGN KEY(session_id) REFERENCES sessions(id));
-         CREATE TABLE segments (id TEXT NOT NULL, revision_id TEXT NOT NULL, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY(id, revision_id), FOREIGN KEY(revision_id) REFERENCES revisions(id));
-         CREATE TABLE chunks (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, source TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL, byte_length INTEGER NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id));
-         CREATE VIRTUAL TABLE segment_search USING fts5(segment_id UNINDEXED, revision_id UNINDEXED, text, tokenize='trigram');",
-    )
-    .unwrap();
-    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::Unknown);
-}
-
-// ── Migration: legacy data preservation ────────────────────────────────
-
-#[test]
-fn migrate_v1_preserves_revisions() {
-    let conn = create_v0_1_db_with_data();
-    // Classify before migration
-    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::LegacyV1);
-
-    // Run the migration
-    crate::catalog::migrations::migrate(&conn).unwrap();
-
-    // Verify user_version is now 2
-    let version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
+#[ignore = "Task 7 pending: remove ignore to resume the recorded v5-to-v6 RED cycle"]
+fn migrates_v5_to_v6_capture_timing_without_rewriting_existing_chunks() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::migrate(&mut connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO sessions(id,title,state,started_at) VALUES('s','existing','stopped','2026-01-01T00:00:00Z')",
+            [],
+        )
         .unwrap();
-    assert_eq!(version, 2);
-
-    // Revisions still readable
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM revisions", [], |row| row.get(0))
+    connection
+        .execute(
+            "INSERT INTO chunks(id,session_id,source,path,sha256,byte_length) VALUES('c','s','imported','audio/x.wav',?1,4)",
+            ["aa".repeat(32)],
+        )
         .unwrap();
-    assert_eq!(count, 2);
+    connection.pragma_update(None, "user_version", 5).unwrap();
+    connection
+        .execute_batch("DROP TABLE capture_chunk_timing; DROP TABLE capture_sources;")
+        .ok();
 
-    // Provider strings preserved
-    let providers: Vec<String> = conn
-        .prepare("SELECT provider FROM revisions ORDER BY number")
+    migrations::migrate(&mut connection).unwrap();
+
+    assert_eq!(user_version(&connection), 6);
+    let existing: (String, String, i64) = connection
+        .query_row("SELECT path, sha256, byte_length FROM chunks WHERE id='c'", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(existing, ("audio/x.wav".into(), "aa".repeat(32), 4));
+    for table in ["capture_sources", "capture_chunk_timing"] {
+        let exists: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "missing {table}");
+    }
+}
+
+#[test]
+fn fresh_catalog_uses_v3_model_install_contract() {
+    let mut connection = Connection::open_in_memory().unwrap();
+
+    migrations::migrate(&mut connection).unwrap();
+
+    assert_eq!(user_version(&connection), 5);
+    assert_columns(
+        &connection,
+        "model_download_artifacts",
+        &[
+            ("download_id", "TEXT", true, None, 1),
+            ("artifact_id", "TEXT", true, None, 2),
+            ("source_repository", "TEXT", true, None, 0),
+            ("source_model", "TEXT", true, None, 0),
+            ("source_url", "TEXT", true, None, 0),
+            ("source_revision", "TEXT", true, None, 0),
+            ("expected_bytes", "INTEGER", true, None, 0),
+            ("downloaded_bytes", "INTEGER", true, Some("0"), 0),
+            ("expected_sha256", "TEXT", true, None, 0),
+            ("verified_sha256", "TEXT", false, None, 0),
+            ("required_path", "TEXT", true, None, 0),
+            ("temp_path", "TEXT", false, None, 0),
+            ("etag", "TEXT", false, None, 0),
+            ("last_modified", "TEXT", false, None, 0),
+            ("checkpointed_at", "TEXT", false, None, 0),
+            ("verified_at", "TEXT", false, None, 0),
+            ("state", "TEXT", true, None, 0),
+            ("error_code", "TEXT", false, None, 0),
+            ("error_summary", "TEXT", false, None, 0),
+            ("created_at", "TEXT", true, None, 0),
+            ("updated_at", "TEXT", true, None, 0),
+        ],
+    );
+    let installation_sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name = 'model_installations'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let normalized = migrations::normalize_sql_for_test(&installation_sql);
+    assert!(normalized.contains("'installed_unqualified','runtime_qualified','deleting'"));
+    assert!(normalized.contains("runtime_identity_json text"));
+    assert!(normalized.contains("qualified_at text"));
+}
+
+#[test]
+fn migrates_immutable_v2_without_blind_runtime_qualification() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(V2_FIXTURE, &path).unwrap();
+    let mut connection = Connection::open(&path).unwrap();
+
+    migrations::migrate(&mut connection).unwrap();
+
+    assert_eq!(user_version(&connection), 5);
+    let state: String = connection
+        .query_row(
+            "SELECT state FROM model_installations WHERE model_id = 'legacy-ready-model'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "installed_unqualified");
+    assert_eq!(
+        migrations::classify(&mut connection).unwrap(),
+        SchemaKind::CurrentV5
+    );
+}
+
+#[test]
+fn immutable_v4_fixture_upgrades_to_v5_and_reopens_idempotently() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(V4_FIXTURE, &path).unwrap();
+
+    let mut connection = Connection::open(&path).unwrap();
+    migrations::migrate(&mut connection).unwrap();
+    assert_eq!(user_version(&connection), 5);
+    assert_eq!(
+        migrations::classify(&mut connection).unwrap(),
+        SchemaKind::CurrentV5
+    );
+    drop(connection);
+
+    // V4→V5 migration changes the file, so reopen and verify it stays V5
+    let mut reopened = Connection::open(&path).unwrap();
+    migrations::migrate(&mut reopened).unwrap();
+    assert_eq!(user_version(&reopened), 5);
+    assert_eq!(
+        migrations::classify(&mut reopened).unwrap(),
+        SchemaKind::CurrentV5
+    );
+}
+
+#[test]
+fn catalog_fixtures_have_frozen_bytes() {
+    use sha2::{Digest, Sha256};
+
+    assert_eq!(
+        hex::encode(Sha256::digest(fs::read(V2_FIXTURE).unwrap())),
+        V2_FIXTURE_SHA256
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(fs::read(V3_FIXTURE).unwrap())),
+        V3_FIXTURE_SHA256
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(fs::read(V4_FIXTURE).unwrap())),
+        V4_FIXTURE_SHA256
+    );
+}
+
+#[test]
+fn task9_reuses_v2_job_schema_without_migration_or_version_drift() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(V2_FIXTURE, &path).unwrap();
+    let mut connection = Connection::open(&path).unwrap();
+    let job_sql_before = schema_sql(&connection, "asr_jobs");
+    let job_columns_before: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('asr_jobs') ORDER BY cid")
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(providers, vec!["demo-local", "manual"]);
 
-    // Legacy revisions marked legacy_unverified
-    let statuses: Vec<String> = conn
-        .prepare("SELECT provenance_status FROM revisions ORDER BY number")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(statuses, vec!["legacy_unverified", "legacy_unverified"]);
+    assert_eq!(user_version(&connection), 2);
+    for required in [
+        "attempt_count",
+        "claim_generation",
+        "max_attempts",
+        "available_at",
+        "claimed_by",
+        "lease_expires_at",
+        "cancel_requested_at",
+    ] {
+        assert!(job_columns_before.iter().any(|column| column == required));
+    }
+
+    migrations::migrate(&mut connection).unwrap();
+
+    assert_eq!(user_version(&connection), 5);
+    assert_eq!(schema_sql(&connection, "asr_jobs"), job_sql_before);
+    assert_eq!(
+        migrations::classify(&mut connection).unwrap(),
+        SchemaKind::CurrentV5
+    );
 }
 
 #[test]
-fn migrate_v1_preserves_segments_and_search() {
-    let conn = create_v0_1_db_with_data();
-    crate::catalog::migrations::migrate(&conn).unwrap();
+fn v2_to_v3_failure_rolls_back_original_bytes_and_version() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(V2_FIXTURE, &path).unwrap();
+    let before = fs::read(&path).unwrap();
+    let mut connection = Connection::open(&path).unwrap();
 
-    // Segments still readable with original start_ms/end_ms
-    let segments: Vec<(String, i64, i64)> = conn
-        .prepare("SELECT text, start_ms, end_ms FROM segments ORDER BY id")
+    let error = migrations::migrate_with_hook(&mut connection, || {
+        Err(Error::SqliteFailure(
+            ffi::Error::new(ffi::SQLITE_ABORT),
+            Some("forced v3 failure".to_owned()),
+        ))
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("forced v3 failure"));
+    assert_eq!(user_version(&connection), 2);
+    drop(connection);
+    assert_eq!(fs::read(path).unwrap(), before);
+}
+
+fn user_objects(connection: &Connection) -> Vec<String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT name FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE 'segment_search_%'
+             ORDER BY name",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
         .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn assert_columns(connection: &Connection, table: &str, expected: &[ColumnContract<'_>]) {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info('{table}')"))
+        .unwrap();
+    let actual = statement
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
         })
         .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(segments.len(), 2);
-    assert_eq!(segments[0].0, "原始转写文本");
-    assert_eq!(segments[0].1, 0);
-    assert_eq!(segments[0].2, 4200);
-
-    // FTS5 search still works
-    let raw_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM segment_search",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(raw_count, 2, "FTS5 table should contain 2 rows after migration");
-
-    let search_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM segment_search WHERE segment_search MATCH '转写文本'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(search_count, 2);
-}
-
-#[test]
-fn migrate_v1_preserves_chunks() {
-    let conn = create_v0_1_db_with_data();
-    crate::catalog::migrations::migrate(&conn).unwrap();
-
-    // Chunk still readable
-    let (sha256, session_offset_ms, integrity_state): (String, i64, String) = conn
-        .query_row(
-            "SELECT sha256, session_offset_ms, integrity_state FROM chunks WHERE id = 'chk_test'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        sha256,
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    );
-    // New columns have expected defaults for legacy data
-    assert_eq!(session_offset_ms, 0);
-    assert_eq!(integrity_state, "available");
-}
-
-#[test]
-fn migrate_v1_adds_new_columns_to_segments() {
-    let conn = create_v0_1_db_with_data();
-    crate::catalog::migrations::migrate(&conn).unwrap();
-
-    // New segment columns exist and are NULL for legacy data (no chunk
-    // association yet)
-    let (chunk_id, chunk_start_ms, session_start_ms): (
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-    ) = conn
-        .query_row(
-            "SELECT chunk_id, chunk_start_ms, session_start_ms FROM segments WHERE id = 'seg_1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert!(chunk_id.is_none());
-    assert!(chunk_start_ms.is_none());
-    assert!(session_start_ms.is_none());
-}
-
-#[test]
-fn migrate_v1_creates_asr_tables() {
-    let conn = create_v0_1_db_with_data();
-    crate::catalog::migrations::migrate(&conn).unwrap();
-
-    // All new v2 tables exist
-    for table in &[
-        "asr_settings",
-        "model_installations",
-        "model_downloads",
-        "asr_jobs",
-        "provider_receipts",
-        "revision_receipts",
-    ] {
-        let exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
-                [table],
-                |row| row.get(0),
+    let expected = expected
+        .iter()
+        .map(|column| {
+            (
+                column.0.to_owned(),
+                column.1.to_owned(),
+                column.2,
+                column.3.map(str::to_owned),
+                column.4,
             )
-            .unwrap();
-        assert!(exists, "expected table {} to exist after migration", table);
-    }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "column contract changed for {table}");
 }
 
-#[test]
-fn migrate_v1_creates_partial_indexes() {
-    let conn = create_v0_1_db_with_data();
-    crate::catalog::migrations::migrate(&conn).unwrap();
-
-    for index in &[
-        "model_downloads_one_active_model",
-        "asr_jobs_one_active_fingerprint",
-        "asr_jobs_claimable",
-    ] {
-        let exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name=?1",
-                [index],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(
-            exists,
-            "expected index {} to exist after migration",
-            index
-        );
-    }
-}
-
-// ── Migration: rollback on failure ─────────────────────────────────────
-
-#[test]
-fn migration_rolls_back_on_failure() {
-    let conn = create_v0_1_db_with_data();
-
-    // Artificially create a conflict that will cause the migration to fail
-    // mid-way: create a table with the same name that ALTER TABLE will
-    // conflict with.  We do this by creating a table that would block one of
-    // the ALTER TABLE statements.
-    //
-    // Actually, we test this by manually running a partial migration and
-    // verifying that a forced error leaves the database unchanged.  We use a
-    // transaction that we deliberately roll back.
-    conn.execute_batch(
-        "BEGIN IMMEDIATE;
-         ALTER TABLE chunks ADD COLUMN session_offset_ms INTEGER NOT NULL DEFAULT 0;
-         ROLLBACK;",
-    )
-    .unwrap();
-
-    // After rollback, the column should NOT exist
-    let result: rusqlite::Result<String> = conn.query_row(
-        "SELECT session_offset_ms FROM chunks LIMIT 1",
-        [],
-        |row| row.get(0),
-    );
-    assert!(result.is_err(), "column should not exist after rollback");
-
-    // The database should still be classifiable as LegacyV1
-    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::LegacyV1);
-}
-
-// ── Fresh v2 creation ──────────────────────────────────────────────────
-
-#[test]
-fn fresh_database_creates_full_v2_schema() {
-    let conn = Connection::open_in_memory().unwrap();
-    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::Fresh);
-
-    crate::catalog::migrations::migrate(&conn).unwrap();
-
-    let version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
+fn foreign_keys(connection: &Connection, table: &str) -> BTreeSet<ForeignKeyContract> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA foreign_key_list('{table}')"))
         .unwrap();
-    assert_eq!(version, 2);
-
-    // All v1 + v2 tables exist
-    for table in &[
-        "sessions",
-        "revisions",
-        "segments",
-        "chunks",
-        "asr_settings",
-        "model_installations",
-        "model_downloads",
-        "asr_jobs",
-        "provider_receipts",
-        "revision_receipts",
-    ] {
-        let exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
-                [table],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(exists, "expected table {} in fresh v2", table);
-    }
-
-    // FTS5 table exists
-    let fts_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='segment_search'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(fts_exists);
-
-    // New columns exist on legacy tables
-    let has_offset: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('chunks') WHERE name='session_offset_ms'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(has_offset);
-
-    let has_provenance: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('revisions') WHERE name='provenance_status'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(has_provenance);
-}
-
-// ── Idempotent re-open ─────────────────────────────────────────────────
-
-#[test]
-fn already_migrated_v2_database_is_accepted() {
-    let conn = create_v0_1_db_with_data();
-    crate::catalog::migrations::migrate(&conn).unwrap();
-
-    // Second migration should be a no-op (classify returns Fresh since
-    // user_version=2 and fingerprint matches)
-    let kind = classify_schema(&conn).unwrap();
-    assert_eq!(kind, SchemaKind::Fresh);
-
-    // Running migrate again should succeed
-    crate::catalog::migrations::migrate(&conn).unwrap();
-
-    // Data still intact
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM revisions", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(count, 2);
-}
-
-// ── Unknown schema is rejected ─────────────────────────────────────────
-
-#[test]
-fn compatible_newer_database_is_accepted_without_downgrade() {
-    let conn = create_v0_1_db_with_data();
-    crate::catalog::migrations::migrate(&conn).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE future_feature_data (id TEXT PRIMARY KEY, value TEXT NOT NULL);
-         INSERT INTO future_feature_data(id, value) VALUES('future_1', 'preserve me');
-         PRAGMA user_version = 5;",
-    )
-    .unwrap();
-
-    assert_eq!(
-        classify_schema(&conn).unwrap(),
-        SchemaKind::CompatibleNewer
-    );
-
-    crate::catalog::migrations::migrate(&conn).unwrap();
-
-    let version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 5);
-
-    let value: String = conn
-        .query_row(
-            "SELECT value FROM future_feature_data WHERE id = 'future_1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(value, "preserve me");
-}
-
-#[test]
-fn newer_database_missing_required_v2_schema_is_rejected() {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE future_feature_data (id TEXT PRIMARY KEY);
-         PRAGMA user_version = 5;",
-    )
-    .unwrap();
-
-    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::Unknown);
-    assert!(crate::catalog::migrations::migrate(&conn).is_err());
-}
-
-#[test]
-fn unknown_schema_migration_is_rejected() {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE weird (x TEXT);",
-    )
-    .unwrap();
-    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::Unknown);
-
-    let result = crate::catalog::migrations::migrate(&conn);
-    assert!(result.is_err());
-}
-
-// ── Fixture-file migration ─────────────────────────────────────────────
-
-#[test]
-fn migrate_v0_1_fixture_file() {
-    // Locate the fixture relative to the workspace root.
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let fixture_path = manifest_dir
-        .parent()
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get(3)?,
+                row.get(2)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        })
         .unwrap()
-        .join("tests/fixtures/catalog/lifesub-v0.1.sqlite3");
-
-    // Copy the fixture to a temp file so the original stays pristine.
-    let temp_dir = tempfile::tempdir().unwrap();
-    let copy_path = temp_dir.path().join("lifesub-v0.1-copy.sqlite3");
-    std::fs::copy(&fixture_path, &copy_path).unwrap();
-
-    let conn = Connection::open(&copy_path).unwrap();
-
-    assert_eq!(classify_schema(&conn).unwrap(), SchemaKind::LegacyV1);
-
-    crate::catalog::migrations::migrate(&conn).unwrap();
-
-    // Verify user_version is now 2
-    let version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 2);
-
-    // Revisions preserved
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM revisions", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(count, 2);
-
-    // Legacy provenance status
-    let status: String = conn
-        .query_row(
-            "SELECT provenance_status FROM revisions WHERE id = 'rev_fixture_1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(status, "legacy_unverified");
-
-    // FTS5 search still works
-    let search_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM segment_search WHERE segment_search MATCH '原始转写'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(search_count, 1);
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
+
+fn fk(from: &str, table: &str, to: &str) -> ForeignKeyContract {
+    (
+        from.to_owned(),
+        table.to_owned(),
+        to.to_owned(),
+        "NO ACTION".to_owned(),
+        "NO ACTION".to_owned(),
+        "NONE".to_owned(),
+    )
+}
+
+fn unique_contracts(connection: &Connection, table: &str) -> BTreeSet<UniqueContract> {
+    let mut indexes = connection
+        .prepare(&format!("PRAGMA index_list('{table}')"))
+        .unwrap();
+    indexes
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? != 0,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)? != 0,
+            ))
+        })
+        .unwrap()
+        .map(|index| {
+            let (name, unique, origin, partial) = index.unwrap();
+            let mut columns = connection
+                .prepare(&format!("PRAGMA index_info('{name}')"))
+                .unwrap();
+            let columns = columns
+                .query_map([], |row| row.get(2))
+                .unwrap()
+                .collect::<Result<Vec<String>, _>>()
+                .unwrap();
+            (origin, unique && partial, columns)
+        })
+        .filter(|(origin, partial_unique, _)| origin != "c" || *partial_unique)
+        .collect()
+}
+
+fn compact_sql(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect()
+}
+
+fn schema_sql(connection: &Connection, name: &str) -> String {
+    connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn rewrite_schema_literal(connection: &Connection, table: &str, from: &str, to: &str) {
+    connection
+        .pragma_update(None, "writable_schema", true)
+        .unwrap();
+    let changed = connection
+        .execute(
+            "UPDATE sqlite_schema SET sql = replace(sql, ?2, ?3) WHERE name = ?1",
+            [table, from, to],
+        )
+        .unwrap();
+    connection
+        .pragma_update(None, "writable_schema", false)
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+mod classification;
+mod contract;
+mod rollback_concurrency;

@@ -1,39 +1,51 @@
-pub mod acceptance;
+pub mod api;
 pub mod asr;
+pub mod capture;
 pub mod catalog;
+#[cfg(feature = "desktop")]
+pub mod desktop_runtime;
 pub mod domain;
+pub mod llm;
+#[cfg(feature = "desktop")]
+pub mod quick_input;
 pub mod service;
 
 #[cfg(feature = "desktop")]
 mod commands;
-#[cfg(feature = "desktop")]
-mod desktop_api;
 
 #[cfg(feature = "desktop")]
 use tauri::Manager;
 
 #[cfg(test)]
-// mod asr_audio_test;
+mod asr_audio_test;
 #[cfg(test)]
-// mod asr_job_test;
+mod asr_job_snapshot_test;
+#[cfg(test)]
+mod asr_job_test;
 #[cfg(test)]
 mod asr_manifest_test;
 #[cfg(test)]
-// mod asr_model_manager_test;
+mod asr_model_manager_test;
 #[cfg(test)]
-// mod asr_provider_test;
+mod asr_provider_test;
+#[cfg(test)]
+mod asr_runtime_qualifier_test;
 #[cfg(test)]
 mod asr_runtime_test;
 #[cfg(test)]
-// mod asr_service_test;
+mod asr_service_test;
 #[cfg(test)]
 mod asr_settings_test;
+#[cfg(test)]
+mod asr_vad_test;
+#[cfg(test)]
+mod capture_helper_test;
+#[cfg(test)]
+mod capture_protocol_test;
 #[cfg(test)]
 mod catalog_migration_test;
 #[cfg(test)]
 mod catalog_test;
-#[cfg(test)]
-// mod commands_test;
 #[cfg(test)]
 mod domain_test;
 #[cfg(test)]
@@ -43,6 +55,7 @@ mod service_test;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             app.manage(commands::AppState::initialize(app.handle())?);
             Ok(())
@@ -51,19 +64,46 @@ pub fn run() {
             commands::create_capture_session,
             commands::transition_capture_session,
             commands::import_audio_file,
-            commands::append_transcript_revision,
+            commands::import_audio_record,
+            commands::create_manual_revision,
+            commands::list_timeline_records,
             commands::search_transcripts,
             commands::resolve_evidence,
-            commands::get_asr_settings,
-            commands::save_asr_settings,
+            // Task 13.5
+            commands::create_note,
+            commands::list_notes,
+            commands::update_note,
+            commands::delete_note,
+            commands::create_category,
+            commands::list_categories,
+            commands::delete_category,
+            commands::create_entry,
+            commands::list_entries,
+            commands::update_entry,
+            commands::toggle_entry,
+            commands::delete_entry,
+            commands::list_voiceprints,
+            commands::register_voiceprint,
+            commands::rename_voiceprint,
+            commands::delete_voiceprint,
+            commands::link_voiceprint_to_entry,
+            commands::get_stats_snapshot,
+            commands::get_asr_config,
+            commands::set_asr_config,
+            commands::get_recording_config,
+            commands::set_recording_config,
+            commands::get_app_runtime_info,
             commands::list_asr_models,
-            commands::download_asr_model,
-            commands::cancel_model_download,
-            commands::delete_asr_model,
-            commands::list_asr_jobs,
-            commands::cancel_asr_job,
-            commands::retry_asr_job,
-            commands::retranscribe_record,
+            // Phase 2.1 streaming
+            commands::start_streaming_capture,
+            commands::stop_streaming_capture,
+            commands::pause_streaming_capture,
+            commands::resume_streaming_capture,
+            // Phase 3: LLM polish + quick input
+            commands::llm_polish,
+            commands::register_quick_input_hotkey,
+            commands::get_frontmost_app,
+            commands::paste_text_at_cursor,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LifeSub desktop app");

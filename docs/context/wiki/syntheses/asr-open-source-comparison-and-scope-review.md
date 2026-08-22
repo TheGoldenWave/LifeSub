@@ -117,7 +117,7 @@ Agent Contract、Application Contract、Host Event/Control、UDS framing、peer 
 
 ## 来源引用
 
-- [真实 ASR 设计](/Users/goldenwave/.config/superpowers/worktrees/LifeSub/lifesub-real-asr-v0.2/docs/superpowers/specs/2026-08-15-lifesub-real-asr-design.md) — Provider、参考项目、模型、可靠性与 Gate。
-- [实施计划](/Users/goldenwave/.config/superpowers/worktrees/LifeSub/lifesub-real-asr-v0.2/docs/superpowers/plans/2026-08-15-lifesub-real-asr-v0.2.md) — Tasks 1-15、文件和验收范围。
-- [当前进度](/Users/goldenwave/.config/superpowers/worktrees/LifeSub/lifesub-real-asr-v0.2/docs/prd/lifesub-real-asr-v0.2/.artifacts/process.md) — 已实现和待实现状态。
+- [真实 ASR 设计](/Users/goldenwave/Documents/MyProject/LifeSub/docs/superpowers/specs/2026-08-15-lifesub-real-asr-design.md) — Provider、参考项目、模型、可靠性与 Gate。
+- [实施计划](/Users/goldenwave/Documents/MyProject/LifeSub/docs/superpowers/plans/2026-08-15-lifesub-real-asr-v0.2.md) — Tasks 1-15、文件和验收范围。
+- [当前进度](/Users/goldenwave/Documents/MyProject/LifeSub/docs/prd/lifesub-real-asr-v0.2/.artifacts/process.md) — 已实现和待实现状态。
 - [产品发现记录](../../product-initiated/lifesub-real-asr-v0.2/00_discovery/original-idea-20260815.md) — OpenWhispr、TypeWhisper 参考边界。

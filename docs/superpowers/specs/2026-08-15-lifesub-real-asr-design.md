@@ -2,18 +2,19 @@
 
 ## 1. 决策摘要
 
-LifeSub V0.2 将演示 ASR 替换为两个可切换的真实本地 Provider：
+LifeSub V0.2 将演示 ASR 替换为三个可切换的真实本地 Provider：
 
 - 阿里开源模型：SenseVoiceSmall INT8。
 - OpenAI 开源模型：Whisper Tiny、Base、Small。
+- 阿里开源模型：Qwen3-ASR 0.6B INT8 与 Qwen3-ASR 1.7B 高质量档。
 
-两者统一使用 sherpa-onnx 1.13.5 Rust API，并静态链接到 Tauri Core。该方案不依赖 Python，不启动本地 HTTP 服务，不向云端发送音频，也不复制 GPLv3 参考项目代码。
+SenseVoice、Whisper 与 Qwen3-ASR 0.6B 统一使用 sherpa-onnx 1.13.5 Rust API，并静态链接到 Tauri Core。Qwen3-ASR 1.7B 使用 `qwen3-asr` Rust crate 0.2.2、Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`、Candle + Metal；crate 与其直接/传递依赖必须在 `Cargo.lock` 和第三方 notice 中固定。Qwen Provider 因此有两个明确且不可互换的 runtime identity，Factory 必须按 manifest 精确分派，不得将 1.7B 回退到 0.6B、sherpa 或 CPU。V0.2 不引入 Python Sidecar、不启动本地 HTTP 服务、不向云端发送音频，也不复制 GPLv3 参考项目代码。
 
 ## 2. 方案比较
 
 | 方案 | 优点 | 缺点 | 结论 |
 |---|---|---|---|
-| sherpa-onnx 统一运行时 | 同一 Rust API 支持 SenseVoice/Whisper；静态链接；错误与模型管理统一 | Whisper 的平台专项优化可能弱于 whisper.cpp | 采用 |
+| sherpa-onnx + `qwen3-asr` Candle/Metal | sherpa 统一承载 SenseVoice/Whisper/Qwen 0.6B；官方 Rust crate 原生承载 Qwen 1.7B；两条路径均在 Core 内且无需 Sidecar | 两种运行时、构建和 Receipt identity，1.7B 仅支持满足条件的 Apple Silicon | 采用；按模型 manifest 精确分派 |
 | sherpa-onnx + whisper.cpp | 可分别使用每个模型的成熟运行时 | 两套 FFI、构建、模型管理和诊断体系 | 延后到性能证据证明必要时 |
 | FunASR + faster-whisper Python Sidecar | 模型覆盖广，原型快 | 包体、Python 环境、进程恢复、签名复杂 | 不采用 |
 
@@ -37,6 +38,8 @@ LifeSub V0.2 将演示 ASR 替换为两个可切换的真实本地 Provider：
 
 sherpa-onnx 运行时基线为 tag `v1.13.5`、commit `3dc7c569f31ca2cd4a20ed6f7db780327e6714c5`（Apache-2.0）。依赖升级需要重新执行真实模型、构建和打包 Gate。
 
+Qwen3-ASR 1.7B 运行时基线为 `qwen3-asr` crate 0.2.2、Git commit `c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc`（MIT）、Candle Metal backend。该 crate 读取旧/原始模型 config 顶层 `thinker_config`，不能把新版 `-hf` 顶层 `audio_config/text_config` 宣称为可直接执行 config；升级 crate、Candle、Metal feature 或模型 config 形态都必须重新执行兼容性、真实模型和打包 Gate。精确 Cargo Git URL、package key、feature 名、`default-features`、optional wiring 与 Metal dependency closure 必须由 Task 5 直接读取该 commit 的 `Cargo.toml` 和 `cargo metadata/tree` 后冻结；本设计不猜测未验证的 feature 名。shipping build 必须以 contract test 锁定 URL/rev/features/target cfg/lock source/license closure。
+
 ## 4. 组件边界
 
 ```text
@@ -46,26 +49,34 @@ React UI
 ├── AsrJobStatus
 └── RetranscribeCommand
 
-Tauri Commands
+Core Application API
 ├── get/save_asr_settings
 ├── list/download/cancel/delete_asr_model
 ├── enqueue/cancel/retry_asr_job
 └── retranscribe_record
 
+Adapters
+├── Tauri Commands
+└── Versioned Local Tool API / Unix Socket
+
 Rust Core
 ├── asr/settings.rs          设置与校验
 ├── asr/model_registry.rs    固定 manifest
 ├── asr/model_manager.rs     下载、校验、安装、删除
+├── asr/runtime_qualifier.rs qualification 编排、marker/Catalog 原子发布与恢复
 ├── asr/audio.rs             解码、单声道转换、重采样
 ├── asr/vad.rs               语音区间
 ├── asr/provider.rs          Provider 接口与结果类型
 ├── asr/sense_voice.rs       SenseVoice 配置
 ├── asr/whisper.rs           Whisper 配置
+├── asr/qwen3_asr.rs         Qwen3-ASR runtime 精确分派与兼容性 Gate
 ├── asr/job.rs               状态机、取消、恢复
 └── asr/service.rs           事务编排与 revision 发布
 ```
 
-每个模块只有一个责任。UI 不拼装模型文件路径，Tauri Commands 不实现识别逻辑，Provider 不写数据库，Model Manager 不创建 Transcript Revision。
+每个模块只有一个责任。UI 不拼装模型文件路径，Tauri Commands 与 Local Tool API 不实现识别逻辑，Provider 不写数据库，Model Manager 不创建 Transcript Revision。Task 4 已在 `service/runtime_lock.rs` 和 guarded service/command facade 中实现 full-Core ownership：任何 writable Catalog open/migration/reconciliation、导入或受保护 mutation 都先取得同一 lifetime guard。Task 9 的 Job Coordinator 必须消费该既有 guard，不得创建独立 `asr-worker.lock` owner 或旁路 repository。Task 11 将这一既有 owner 抽取/迁移为 primary `CoreRuntime` 并扩展 socket lifecycle；secondary 仅通过 IPC 访问，永不取得 guard 或直接打开 writable Catalog。ModelManager 持有受控 Catalog gateway；RuntimeQualifier 由 ModelManager 调用，编排 provider adapter smoke、qualification marker fsync 与 Catalog CAS。Provider adapter 只初始化/执行 smoke 并返回 runtime identity/result，绝不写 marker、Catalog 或 installation state；适配器不得自行打开 SQLite。
+
+Agent/IPC 边界遵循 `docs/superpowers/specs/2026-08-16-lifesub-local-tool-api-design.md`。当前 V0.2 采用 contract-first 的 C 阶段，未来 `lifesubd` 只替换进程宿主，不改变 Core 或工具语义。
 
 ## 5. 核心领域类型
 
@@ -73,6 +84,7 @@ Rust Core
 enum AsrProviderKind {
     SenseVoice,
     Whisper,
+    Qwen3Asr,
 }
 
 struct AsrSettings {
@@ -88,6 +100,7 @@ struct AsrSettings {
 enum AsrProviderOptions {
     SenseVoice { use_itn: bool },
     Whisper { task: WhisperTask },
+    Qwen3Asr,
 }
 
 enum AsrJobState {
@@ -106,7 +119,7 @@ struct ProviderReceipt {
     provider: AsrProviderKind,
     model_id: String,
     manifest_version: String,
-    archive_sha256: String,
+    archive_sha256: String, // 兼容列：单归档 hash 或 canonical bundle identity
     required_file_hashes_json: String,
     model_source_json: String,
     vad_model_id: Option<String>,
@@ -114,7 +127,7 @@ struct ProviderReceipt {
     vad_archive_sha256: Option<String>,
     vad_required_file_hashes_json: Option<String>,
     runtime_version: String,
-    runtime_build_id: String,
+    runtime_build_id: String, // runtime family/version/git/backend/device 的 canonical identity
     parameters_json: String,
     input_sha256: String,
     started_at: DateTime<Utc>,
@@ -123,6 +136,8 @@ struct ProviderReceipt {
     outcome: ProviderOutcome,
 }
 ```
+
+`archive_sha256` 字段名为既有 v2 schema 兼容保留：单归档模型保存归档 SHA-256，多文件模型保存 canonical manifest SHA-256（即 bundle identity）。`required_file_hashes_json` 保存每个 artifact 的安装路径、大小和 SHA-256；`model_source_json` 保存每个文件的 source/revision/license/provenance 以及混合资产兼容性声明。`runtime_build_id` 对 sherpa 记录 tag/commit/native archive identity，对 1.7B 记录 crate 0.2.2、Git commit、Candle/Metal feature、目标架构与实际 Metal device；不得只写模糊的 `qwen3_asr`。多文件 bundle 的 expected identity 在全部 immutable revisions 已解析前没有合法值；空值、`TODO`、全零 hash 或任何 placeholder 都不能进入 shipping registry。
 
 持久化枚举使用稳定 snake_case 字符串。设置、Job 和 Receipt 不能直接保存 Rust Debug 文本。
 
@@ -143,7 +158,7 @@ v2 的新增表与索引如下；实际 SQL 名称和约束视为 Contract，计
 ```sql
 CREATE TABLE asr_settings (
   singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
-  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper')),
+  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr')),
   model_id TEXT NOT NULL,
   language TEXT NOT NULL,
   num_threads INTEGER NOT NULL CHECK(num_threads >= 1),
@@ -155,7 +170,7 @@ CREATE TABLE asr_settings (
 
 CREATE TABLE model_installations (
   model_id TEXT PRIMARY KEY,
-  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper', 'vad')),
+  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr', 'vad')),
   manifest_version TEXT NOT NULL,
   archive_sha256 TEXT NOT NULL,
   install_dir TEXT NOT NULL UNIQUE,
@@ -188,7 +203,7 @@ CREATE TABLE asr_jobs (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id),
   chunk_id TEXT NOT NULL REFERENCES chunks(id),
-  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper')),
+  provider TEXT NOT NULL CHECK(provider IN ('sense_voice', 'whisper', 'qwen3_asr')),
   model_id TEXT NOT NULL,
   manifest_version TEXT NOT NULL,
   archive_sha256 TEXT NOT NULL,
@@ -254,6 +269,8 @@ CREATE TABLE revision_receipts (
 );
 ```
 
+以上 `ready | corrupt | deleting` 是已完成的 v2 基线 schema；Task 6 必须通过正式 v3 migration 重建为两阶段状态，不能在 v2 原地修改 CHECK。
+
 v2 还需通过 `ALTER TABLE` 增加：
 
 - `chunks.session_offset_ms INTEGER NOT NULL DEFAULT 0`。
@@ -271,6 +288,52 @@ V0.1 revision 不伪造 Receipt，保留原 `provider` 字符串并标记 `legac
 
 Chunk reconciliation 将缺失文件标记 `missing`，hash 不一致或无法读取标记 `corrupted`。非 `available` Chunk 不允许创建或 claim 新 Job，已有 active Job 转 `failed/input_unavailable`。音频 Evidence URI 返回 `corrupted` 状态且拒绝音频读取；既有 Transcript Revision 继续可读，但 provenance 显示来源不可重新验证，不自动删除或改写文本。
 
+### 6.1 Catalog 版本所有权
+
+- Tasks 1-5 保持已完成的 Catalog v2 ASR 基线，不在同一 `user_version = 2` 下追加 DDL。
+- Task 6 独占 v2 -> v3 migration，加入 `model_download_artifacts` 与两阶段安装状态；fresh/v1/v2 均可迁移到完整 v3，fingerprint 必须包含 artifact 表、索引和重建后的 installation CHECK。
+- Task 11 独占 v3 -> v4 migration，加入 Local Tool `tool_requests`、operations/outbox、open-intent ledger 与 cursor/schema epoch。Task 11 不得重复创建或修改 v3 artifact DDL；Local Tool 设计中历史 `Catalog v3` 均由实施时解释并修订为 v4。
+- 禁止在已发布的相同 `user_version` 下漂移 schema。任何 v3 artifact DDL 或 v4 Local Tool DDL 变化都必须改变目标版本、fixture 与 fingerprint。
+
+Task 6 的 v3 增量 Contract：
+
+```sql
+CREATE TABLE model_download_artifacts (
+  download_id TEXT NOT NULL REFERENCES model_downloads(id) ON DELETE CASCADE,
+  artifact_id TEXT NOT NULL,
+  source_repository TEXT NOT NULL,
+  source_model TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  source_revision TEXT NOT NULL,
+  expected_bytes INTEGER NOT NULL CHECK(expected_bytes >= 0),
+  downloaded_bytes INTEGER NOT NULL DEFAULT 0
+    CHECK(downloaded_bytes >= 0 AND downloaded_bytes <= expected_bytes),
+  expected_sha256 TEXT NOT NULL CHECK(length(expected_sha256) = 64),
+  verified_sha256 TEXT CHECK(verified_sha256 IS NULL OR length(verified_sha256) = 64),
+  required_path TEXT NOT NULL,
+  temp_path TEXT,
+  etag TEXT,
+  last_modified TEXT,
+  checkpointed_at TEXT,
+  verified_at TEXT,
+  state TEXT NOT NULL CHECK(state IN
+    ('pending', 'downloading', 'downloaded', 'verifying', 'verified', 'failed', 'cancelled')),
+  error_code TEXT,
+  error_summary TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(download_id, artifact_id),
+  UNIQUE(download_id, required_path)
+);
+
+CREATE INDEX model_download_artifacts_state
+ON model_download_artifacts(download_id, state);
+```
+
+v3 migration 重建 `model_installations`，其 `state` 固定为 `installed_unqualified | runtime_qualified | deleting`，并增加 nullable `runtime_identity_json`、`qualified_at` 与 `last_error_code`。`structural_with_pinned_runtime` 模型在 Task 6 校验精确 sherpa runtime identity 后直接事务发布 `runtime_qualified`；`runtime_smoke_required` 的 1.7B 才先进入 `installed_unqualified`。RuntimeQualifier 持有 ModelManager/Catalog gateway，调用纯 provider adapter smoke；成功时先写临时 qualification marker、`sync_all`、原子 rename、fsync install 目录，再以 `WHERE model_id = ? AND state = 'installed_unqualified' AND archive_sha256 = ?` CAS 更新 `runtime_qualified`、runtime identity 与 `qualified_at`。Provider 不写 DB/marker。runtime smoke 失败使用 `model_runtime_qualification_failed` 或更具体稳定错误码，保持 `installed_unqualified` 供重试，不标记为文件损坏；文件/hash/结构失败则不发布 installation，并使用 `model_integrity_failed | model_structural_incompatible`。
+
+Crash/reconcile：marker publish 前 crash 保持 `installed_unqualified`；marker 已 durable、DB CAS 前 crash 时启动 reconciliation 验证 marker 的 bundle/runtime/device identity 与当前 manifest/设备一致后补做 CAS，否则 quarantine marker 并保持 unqualified；DB 已 qualified 但 marker 缺失/不匹配时 fail closed，降回 `installed_unqualified` 并记录 `model_runtime_qualification_recovery_required`，绝不直接构造 Provider。并发 qualifier 只有 CAS winner 发布 qualified；loser 重新读取相同 qualified identity 可幂等成功，不同 identity 失败。
+
 ## 7. Chunk 来源与时间坐标
 
 一个 ASR Job 只处理一个不可变 Audio Chunk，Receipt 与 Job 一一对应。Revision 可聚合一个或多个成功 Receipt，`revision_receipts` 保存完整输入集合。每个新 Segment 同时保存：
@@ -286,10 +349,21 @@ V0.2 的文件导入 Session 只有一个 Chunk，`session_offset_ms = 0`。未�
 Manifest 作为版本控制下的静态数据，至少包含：
 
 - `model_id`、Provider、显示名和模型版本。
-- 下载 URL、归档大小和 SHA-256。
-- 解压后的必需文件及可选单文件 hash。
-- 支持语言、默认参数和推荐硬件。
-- 上游项目、模型卡、许可证和 notice。
+- 明确的 `availability` 与设备条件；首发 ASR 模型均为 `Installable(ArtifactBundle)`，设备不兼容与资产未安装是独立状态。
+- `ArtifactBundle` 包含一个或多个 `ArtifactFile`。每个文件固定 HTTPS source、source repository/model ID、immutable revision、精确字节大小、SHA-256、required 安装相对路径、是否需要解压、许可证和 provenance。
+- bundle identity 是对不含 identity 自身字段的 manifest payload 进行固定字段顺序、artifact 排序与字符串规范化后所得 canonical bytes 的 SHA-256；它不依赖下载顺序、临时路径或本机目录。
+- `qualification_policy`、runtime identity、支持语言、默认参数、推荐硬件、上游项目、模型卡、许可证和 notice。
+
+```rust
+enum QualificationPolicy {
+    StructuralWithPinnedRuntime,
+    RuntimeSmokeRequired,
+}
+```
+
+SenseVoice、Whisper Tiny/Base/Small、Qwen3-ASR 0.6B 和 Silero VAD 使用 `structural_with_pinned_runtime`：Task 6 必须在 structural Gate 中同时验证 manifest 要求的 sherpa 1.13.5 tag/commit/native archive identity 与当前构建 runtime identity；全部匹配时 structural marker fsync 与 `runtime_qualified` installation publication 在同一事务边界完成，不产生 `installed_unqualified` 中间持久状态。runtime identity 不匹配使用 `model_runtime_identity_mismatch`，不发布 installation，也不把已下载文件标记 corrupt。
+
+仅 Qwen3-ASR 1.7B 使用 `runtime_smoke_required`：Task 6 发布 `installed_unqualified`，Task 8 RuntimeQualifier 执行 Candle/Metal smoke 后才升级。Manifest contract tests必须枚举全部首发模型/VAD并断言 policy 完整，禁止新增模型默认落入无处理分支而永久卡住。
 
 首发条目：
 
@@ -299,33 +373,224 @@ Manifest 作为版本控制下的静态数据，至少包含：
 | `whisper-tiny` | Whisper | 116,204,861 B | 快速验证和低资源 |
 | `whisper-base` | Whisper | 207,557,382 B | 默认 Whisper 平衡档 |
 | `whisper-small` | Whisper | 639,387,718 B | 更高质量、较高资源 |
+| `qwen3-asr-0.6b-int8-2026-03-25` | Qwen3-ASR | 878,702,423 B | 52 种语言/方言覆盖，首发 Qwen 档 |
+| `qwen3-asr-1.7b` | Qwen3-ASR | 4,710,022,180 B | 高质量正式档；官方原始权重/config + 官方 `-hf` tokenizer；Candle/Metal |
+
+Qwen3-ASR 0.6B 使用 sherpa-onnx 发布资产 `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2`，SHA-256 为 `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96`；执行文件至少包含 `conv_frontend.onnx`、`encoder.int8.onnx`、`decoder.int8.onnx` 与完整 `tokenizer/` 目录。
+
+Qwen3-ASR 1.7B 不使用转换后的 ONNX/MLX 资产。shipping manifest version 为 2，RFC 8785 identity 为 `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a`；`manifest_version` 参与 JCS payload，因此不能复用 version 1 identity。`26fea093b01541244dcb170fe3dbc33854d07c770ea60dadcba806bfb0e23ea5` 是 verified endpoint/allowlist 但 manifest version 1 的 rejected post-discovery draft。`source_endpoint` 是 canonical source，不包含 discovery-only query。ModelScope Range discovery 证明 large shard 最终 host 需要同时允许 `cdn-lfs-cn-1.modelscope.cn` 与 `www.modelscope.cn`；更早的 `8279…` pre-discovery draft 因只包含不完整 allowlist 被拒绝。两个旧 identity 都不是可执行/可安装/shipping identity，也不得出现在 Receipt。Hugging Face 查询参数只用于 discovery，canonical tokenizer source endpoint 不含 `?blobs=true` 或其他 query。
+
+| artifact_id | source repo/model | source_endpoint / immutable URL template | revision | bytes / SHA-256 | required_path / required / mode | SPDX | provenance | redirect allowlist |
+|---|---|---|---|---|---|---|---|---|
+| `qwen17-config` | ModelScope `Qwen/Qwen3-ASR-1.7B` | `modelscope_file_api_v1(model_id, revision, path=config.json)` | `d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec` | `6,194` / `2e74a751548b8ad7d7526d29365ad8144c345d8b412b1152d25dc6698452712f` | `config.json` / true / direct | **DISCOVERY_REQUIRED** | official original config; top-level `thinker_config`; conversion none | `[www.modelscope.cn]` |
+| `qwen17-weights-00001` | ModelScope `Qwen/Qwen3-ASR-1.7B` | `modelscope_file_api_v1(model_id, revision, path=model-00001-of-00002.safetensors)` | `d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec` | `4,220,320,824` / `a4cd1f1a04d90b757dc7f7dd26254e69a013b19e80efe590a83c6a3bde8608d6` | `model-00001-of-00002.safetensors` / true / direct | **DISCOVERY_REQUIRED** | official original weight shard 1; conversion none | `[cdn-lfs-cn-1.modelscope.cn,www.modelscope.cn]` |
+| `qwen17-weights-00002` | ModelScope `Qwen/Qwen3-ASR-1.7B` | `modelscope_file_api_v1(model_id, revision, path=model-00002-of-00002.safetensors)` | `d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec` | `478,200,688` / `6e0b9d9e09e2e0238e7ef3cc8a484ab387e91b90f1900bedf88bc92d7929ccfc` | `model-00002-of-00002.safetensors` / true / direct | **DISCOVERY_REQUIRED** | official original weight shard 2; conversion none | `[cdn-lfs-cn-1.modelscope.cn,www.modelscope.cn]` |
+| `qwen17-index` | ModelScope `Qwen/Qwen3-ASR-1.7B` | `modelscope_file_api_v1(model_id, revision, path=model.safetensors.index.json)` | `d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec` | `64,821` / `f994739fe38e5210b9e3e8ce6c6307315e2ceac3cb630e7b7414d69dce520f60` | `model.safetensors.index.json` / true / direct | **DISCOVERY_REQUIRED** | official shard index; conversion none | `[www.modelscope.cn]` |
+| `qwen17-tokenizer` | Hugging Face `Qwen/Qwen3-ASR-1.7B-hf` | immutable `https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf/resolve/{commit}/tokenizer.json` with no query | **DISCOVERY_REQUIRED** | `11,429,653` / `fe1fad59be22a41ee293363fcf95fdedbc7c93f3b49270b1d2e18bd1399a7a05` | `tokenizer.json` / true / direct | **DISCOVERY_REQUIRED** | official `-hf` tokenizer mixed with official original config/weights; conversion none | **DISCOVERY_REQUIRED** including reviewed CDN hosts; no wildcard |
+
+每个 shipping artifact row 必须包含非空 `artifact_id/source_repository/source_model/source_endpoint/resolved_url/revision/bytes/sha256/required_path/license_spdx/provenance/redirect_hosts`，`required = true`，`install_mode = direct`。SPDX 不可用“upstream license”占位；Task 5 必须读取官方模型卡、仓库 license 与 file metadata，冻结准确 SPDX 或经审核的 `LicenseRef-*`，并写入第三方 notice。
+
+### 8.1 Exact install inventory 与资源上限
+
+归档模型不能把归档中的所有 regular file 直接展开到安装目录。下载层先验证归档的精确 bytes/SHA-256；extractor 随后扫描每个 entry，包括最终不会写入的 entry，并对绝对路径、`..`、非 UTF-8、重复 normalized path、symlink、hardlink、device/FIFO 等特殊类型 fail closed。归档允许恰好一个已知顶层模型目录；去掉该前缀后的 normalized path 才与 whitelist 比较。只有下表 required path 可以写入 staging，其他安全 regular file 只读取 header/跳过 payload，不创建文件。由此明确排除 SenseVoice 的 README/LICENSE/export script、Qwen 的 README，以及 Whisper 的可选 `*-encoder.int8.onnx`/`*-decoder.int8.onnx`；Qwen3-ASR 0.6B 的 tokenizer 三件套则全部是 required。
+
+| 模型 | required path | exact bytes | SHA-256 |
+|---|---|---:|---|
+| `SenseVoice` | `model.int8.onnx` | 239233841 | `c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51` |
+| `SenseVoice` | `test_wavs/en.wav` | 228908 | `eb1eb008904465b74c304aad8342e8c7d3c6e61ffe9f66adcaca9cf0f76a93f4` |
+| `SenseVoice` | `test_wavs/ja.wav` | 230444 | `460bd8dccb0d2a5f4e29c628f837be4082d13defc64c3fc21dd1b6bb0e119095` |
+| `SenseVoice` | `test_wavs/ko.wav` | 147500 | `0dc797a5c81ed30fc339d91f3da718ab02854e17ffa37cb93c4c039ac5c6bb9c` |
+| `SenseVoice` | `test_wavs/yue.wav` | 164780 | `0960b2db54ae202071d250e6462fbf74a3c863f0e3e7f01273e4939c996875a0` |
+| `SenseVoice` | `test_wavs/zh.wav` | 178988 | `b77f1794fe374a0ba1ee1dc458bfaf9349496cbbfc32780c50ba3c5a7ad8e373` |
+| `SenseVoice` | `tokens.txt` | 315894 | `f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc` |
+| `Whisper Tiny` | `test_wavs/0.wav` | 212044 | `6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f` |
+| `Whisper Tiny` | `test_wavs/1.wav` | 534924 | `5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a` |
+| `Whisper Tiny` | `test_wavs/8k.wav` | 77244 | `f6f3c8b33e2534cdc154fe773ad2750f1f6a2ca5096179cdf037ae782456613e` |
+| `Whisper Tiny` | `test_wavs/trans.txt` | 449 | `b9ac44e7b794abb1a2d5faf0005e98a665971e7ac2ed15435832cc34edaa9100` |
+| `Whisper Tiny` | `tiny-decoder.onnx` | 114505801 | `e144c07dc6b55cece24392811f2d934b97013811f5e677d1315d341a0a74a25d` |
+| `Whisper Tiny` | `tiny-encoder.onnx` | 37647080 | `42c1d4cbf889632ba21ab6f0d4064c80209755f265ce5cd630db4a6793e7089c` |
+| `Whisper Tiny` | `tiny-tokens.txt` | 816730 | `b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126` |
+| `Whisper Base` | `base-decoder.onnx` | 196548998 | `8a12c3f6ad65bb5b86d7e6eccc302378f20f9fb2df6cb10747c62895da7ac194` |
+| `Whisper Base` | `base-encoder.onnx` | 95087154 | `5a6b87cb313993f6c9fefec9e7027556f6cb30becddf49655bee36c50ecc12d7` |
+| `Whisper Base` | `base-tokens.txt` | 816730 | `b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126` |
+| `Whisper Base` | `test_wavs/0.wav` | 212044 | `6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f` |
+| `Whisper Base` | `test_wavs/1.wav` | 534924 | `5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a` |
+| `Whisper Base` | `test_wavs/8k.wav` | 77244 | `f6f3c8b33e2534cdc154fe773ad2750f1f6a2ca5096179cdf037ae782456613e` |
+| `Whisper Base` | `test_wavs/trans.txt` | 449 | `b9ac44e7b794abb1a2d5faf0005e98a665971e7ac2ed15435832cc34edaa9100` |
+| `Whisper Small` | `small-decoder.onnx` | 559127829 | `a4165cca5c77e381938c0e111032a384901b1e434ae2ad948859035392d21d2c` |
+| `Whisper Small` | `small-encoder.onnx` | 409528992 | `119bd1e8ba0524baee1687f6b22bf0abd2fe539549cd000734edbca81c66751e` |
+| `Whisper Small` | `small-tokens.txt` | 816730 | `b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126` |
+| `Whisper Small` | `test_wavs/0.wav` | 212044 | `6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f` |
+| `Whisper Small` | `test_wavs/1.wav` | 534924 | `5143a6ba93c4b274e2c4ac22deb75c2c48936c853f0519add1de828b6c79cc5a` |
+| `Whisper Small` | `test_wavs/8k.wav` | 77244 | `f6f3c8b33e2534cdc154fe773ad2750f1f6a2ca5096179cdf037ae782456613e` |
+| `Whisper Small` | `test_wavs/trans.txt` | 449 | `b9ac44e7b794abb1a2d5faf0005e98a665971e7ac2ed15435832cc34edaa9100` |
+| `Qwen3-ASR 0.6B` | `conv_frontend.onnx` | 44148281 | `d22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e` |
+| `Qwen3-ASR 0.6B` | `decoder.int8.onnx` | 755914231 | `4f6885be5959ae26af3089d38ee7972c5fafbeeb1cf8d5e76eab6d8b61ca5771` |
+| `Qwen3-ASR 0.6B` | `encoder.int8.onnx` | 182491662 | `60748d3e6744a57c9c91e1b17424a6c2990567e8adceb0783940c03ed98fa9d9` |
+| `Qwen3-ASR 0.6B` | `test_wavs/ar1.wav` | 168044 | `700b3c274f2fedffbb6016f03c574adaad7aa0291acc1a1ba72f07112051073f` |
+| `Qwen3-ASR 0.6B` | `test_wavs/cantonese.wav` | 526444 | `ec832e035c13c670e0cf68dee0ca5dfae38bf2c583aab31e587441cb3eba3f3f` |
+| `Qwen3-ASR 0.6B` | `test_wavs/codeswitch.wav` | 549550 | `2def7fa41004d0a7d148d4afbf4c467c9d112d8b373996123e9a4c43d94957c7` |
+| `Qwen3-ASR 0.6B` | `test_wavs/de.wav` | 215084 | `80bb10c44085a7ce01a17abaf6a2095ed37e1695fca41cc0ea9733f1f24a749c` |
+| `Qwen3-ASR 0.6B` | `test_wavs/es1.wav` | 164844 | `4543f94738445a38306fb80bb0329ef5ca6d81ab1b6c3f15af1de1c3382f4b31` |
+| `Qwen3-ASR 0.6B` | `test_wavs/f1_noise.wav` | 1677606 | `7ae35f5d8f038e518f3abdeda5f78d71cb2f67c9ca29cb9a49a0b4d0702909bd` |
+| `Qwen3-ASR 0.6B` | `test_wavs/fast1.wav` | 1003794 | `b43bbd0bd982c3cc88081f64389bf29fe9e9a01287d44f0b15887bc49c2b352a` |
+| `Qwen3-ASR 0.6B` | `test_wavs/fr1.wav` | 191916 | `c6421b34feccbe7fdfaa8b641b8ecb7bcd7b9f2c237c7b82712c860be524db4e` |
+| `Qwen3-ASR 0.6B` | `test_wavs/ja1.wav` | 448100 | `d926ed0159a2d750d1ae7835e60a5cb5f8737629f7bb3de6cd111a3614d5dc67` |
+| `Qwen3-ASR 0.6B` | `test_wavs/noise1-en.wav` | 2831516 | `3664ef02fa664da93d94a1afc271bda31c0f8d07a9f3c74ac6cd1e5aabe8572c` |
+| `Qwen3-ASR 0.6B` | `test_wavs/noise2.wav` | 741186 | `33f85268f7fbad6b3152b9ab051edab1a85082fde66bccff61d7f5ef7b437e58` |
+| `Qwen3-ASR 0.6B` | `test_wavs/qiqiu1.wav` | 1631150 | `1b69a0fce35936979824c1751a11c285559a635aeb91160d1da3b00118321495` |
+| `Qwen3-ASR 0.6B` | `test_wavs/raokouling.wav` | 1831074 | `3cc59ec494f71135ff5761717e20597f0559b43f793dd72ae4924b86c5e038d8` |
+| `Qwen3-ASR 0.6B` | `test_wavs/rap1.wav` | 935868 | `ac6186d732b59c664776f84238f586d3e6c97adbc8b9f66e939ddcab5773cf3c` |
+| `Qwen3-ASR 0.6B` | `test_wavs/ru1.wav` | 152364 | `e48b22f32d4d1c38f0a94a58acfc43bb8f5b7fc3b0ac01ea49372040ca831acf` |
+| `Qwen3-ASR 0.6B` | `test_wavs/transcript.txt` | 5386 | `9cab82a507e1e5a7743336f2e40fabdaa1eb6181818d7a3768925abc03effd24` |
+| `Qwen3-ASR 0.6B` | `tokenizer/merges.txt` | 1671853 | `8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5` |
+| `Qwen3-ASR 0.6B` | `tokenizer/tokenizer_config.json` | 12487 | `4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c` |
+| `Qwen3-ASR 0.6B` | `tokenizer/vocab.json` | 2776833 | `ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910` |
+
+每个 bundle 还必须携带独立安装约束；archive 行的 `max_scanned_entries` 是验证归档中的全部 file+directory entry 数，written 限额只统计 exact whitelist regular files：
+
+| Bundle | mode | immutable archive/bundle identity | max_scanned_entries | max_written_file_bytes | max_total_written_bytes |
+|---|---|---|---:|---:|---:|
+| SenseVoice | archive | `7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e` | 12 | 239233841 | 240500355 |
+| Whisper Tiny | archive | `c46116994e539aa165266d96b325252728429c12535eb9d8b6a2b10f129e66b1` | 11 | 114505801 | 153794272 |
+| Whisper Base | archive | `911b2083efd7c0dca2ac3b358b75222660dc09fb716d64fbfc417ba6c99ff3de` | 11 | 196548998 | 293277543 |
+| Whisper Small | archive | `486a46afbb7ba798507190ffe02fea2dd726049af212e774537efac6afb210a6` | 11 | 559127829 | 970298212 |
+| Qwen3-ASR 0.6B | archive | `393f8a14e2f5fb96746aaab342997a40641001fbd5bf9592a080a8329178ee96` | 27 | 755914231 | 1000089273 |
+| Qwen3-ASR 1.7B | direct | `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a` | N/A | 4220320824 | 4710022180 |
+| Silero VAD | direct | `9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6` | N/A | 643854 | 643854 |
+
+```rust
+struct RequiredInstallFile {
+    path: &'static str,
+    bytes: u64,
+    sha256: &'static str,
+}
+
+struct ArchiveInstallConstraints {
+    max_scanned_entries: u64,
+    max_written_file_bytes: u64,
+    max_total_written_bytes: u64,
+    required_files: &'static [RequiredInstallFile],
+}
+```
+
+`ArchiveInstallConstraints`、direct bundle 的 max/count summary 和归档 required inventory 是由已冻结 artifact bytes/hash 派生的安装安全元数据，明确排除在 RFC 8785 JCS payload 与 bundle identity 之外；Qwen3-ASR 1.7B 既有 canonical `ArtifactFile` rows（包括 path/bytes/hash）继续属于 JCS content identity。Task 5 增加派生约束时保持现有 manifest version 不变，Qwen3-ASR 1.7B 继续使用 version 2 与 `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a`。validator 必须逐模型/VAD精确比较 path/bytes/hash、entry/max/total；缺失、额外、重排导致歧义或任意数值漂移均失败。未来只有 source revision、artifact bytes/hash/path、runtime/compatibility 等 content identity 字段变化时才发布新 manifest version/identity；纯派生约束修正不得伪造一次 content identity 变化。
+
+### 8.2 Canonical bundle payload v1
+
+bundle identity 使用 RFC 8785 JSON Canonicalization Scheme（JCS）对 UTF-8 JSON payload 计算 SHA-256，payload 顶层固定为：
+
+```json
+{
+  "schema": "lifesub.model-bundle.v1",
+  "model_id": "qwen3-asr-1.7b",
+  "manifest_version": "2",
+  "provider": "qwen3_asr",
+  "runtime_requirement": { "...": "..." },
+  "qualification_policy": "runtime_smoke_required",
+  "device_requirement": { "...": "..." },
+  "compatibility_contract": { "...": "..." },
+  "artifacts": []
+}
+```
+
+规则：identity 字段自身不进入 payload；对象 key 由 JCS 排序；字符串必须是有效 Unicode 且不做额外 NFKC；整数使用无前导零的 JSON integer，禁止 float；禁止 null，可选字段缺失时省略；artifact 按 bytewise UTF-8 `artifact_id` 升序；redirect hosts 按小写 ASCII 升序去重；URL 只允许 `https`，scheme/host 小写、移除默认 `:443`、拒绝 fragment/userinfo、保留 path/query 的 percent-encoding 大小写与语义，不跟随重定向改写 payload；`resolved_url` 必须含 immutable revision 或由 provider API 返回的 immutable content endpoint。SHA-256 输出小写 64 hex。
+
+Task 5 discovery 必须：调用 Hugging Face revision API 将 `Qwen/Qwen3-ASR-1.7B-hf` 解析到 immutable commit，query 仅用于 API discovery；canonical `source_endpoint` 固定为无 query 的 `/resolve/{commit}/tokenizer.json`。ModelScope Range/redirect evidence固定逐 artifact 最小 allowlist：config/index `[www.modelscope.cn]`，两个 large shard `[cdn-lfs-cn-1.modelscope.cn,www.modelscope.cn]`；HTTP 客户端在每一个 redirect hop 都按当前 artifact 校验，禁止用所有 artifact host 的 union。manifest version 2 的 RFC 8785 payload 必须与 `tests/fixtures/models/qwen17-bundle-v2.json` byte-for-byte 一致，expected bundle SHA 必须等于 `8a5c16d08be3c49e638689b6438a9a3be9d5d732e49f904d2c0666d5229c995a`。任何字段/hash/URL/allowlist/version/identity 不符时 registry compile/test 失败。旧 `qwen17-bundle-v1.json` 若因审计需要保留，只能放在 rejected-history fixture 路径，并分别断言 `26fea…` post-discovery v1 与 `8279…` pre-discovery drafts 被拒绝，不能作为 shipping fixture。
+
+Task 6 structural install marker 必须保存每个文件的 source/revision/hash/license/provenance、canonical bundle identity，以及“原始 thinker config + `-hf` tokenizer”的兼容性声明。Structural Gate 验证 config 顶层存在 `thinker_config` 且拒绝仅有 `audio_config/text_config` 的新版 config、index 引用的所有分片存在且 hash 匹配、tokenizer JSON 可解析且静态特殊 token/词表契约匹配；成功后状态仅为 `installed_unqualified`。实际 crate 加载、Metal device 初始化与固定短 fixture 非空输出归 Task 8 runtime qualification；成功才原子发布 qualification marker/state。任一 runtime 检查失败保持 `installed_unqualified`、`executable = false`，Job 与 Provider 构造 fail closed。
+
+```rust
+struct ArtifactBundle {
+    artifacts: &'static [ArtifactFile],
+    canonical_sha256: &'static str,
+}
+
+struct ModelManifest {
+    qualification_policy: QualificationPolicy,
+    runtime_requirement: RuntimeRequirement,
+    bundle: ArtifactBundle,
+}
+
+struct ArtifactFile {
+    artifact_id: &'static str,
+    source_repository: &'static str,
+    source_model: &'static str,
+    source: &'static str,
+    revision: &'static str,
+    bytes: u64,
+    sha256: &'static str,
+    required_path: &'static str,
+    required: bool,
+    install_mode: InstallMode,
+    license_spdx: &'static str,
+    provenance: &'static str,
+    redirect_hosts: &'static [&'static str],
+}
+```
+
+`ModelLookup` 必须分别暴露 `selectable`、`installable` 与 `executable`，并返回稳定 reason code：
+
+| 环境/安装状态 | selectable | installable | executable | reason |
+|---|---:|---:|---:|---|
+| 非 macOS 14+/非 arm64/无 Metal/<24 GB | true | false | false | `model_device_unsupported` 或更具体稳定 code |
+| M4/24GB 兼容、未安装 | true | true | false | `model_not_installed` |
+| `installed_unqualified` | true | true | false | `model_runtime_unqualified` |
+| `runtime_qualified` 且当前 runtime/device identity 匹配 | true | true | true | none |
+
+16 GB 上游 benchmark 只作为研究信息；在 LifeSub 16 GB Gate 完成前，本版本要求 24 GB。保存生效设置、Job 创建和 Provider Factory 都必须独立验证 executable，返回稳定 capability reason；防御性 Provider 校验不得成为唯一控制点。
 
 实现前必须下载每个发布模型归档并冻结 SHA-256。Silero VAD 也作为独立 `provider = vad` 的 manifest 条目管理，包含版本、模型 hash 和运行参数。若上游同名资产发生变化，必须发布新的 manifest version 和 model ID；禁止在原 ID 下替换资产。
 
-Receipt 必须快照 manifest version、归档 hash、所有必需模型文件 hash、模型转换来源和运行时 build ID。旧 Evidence 不依赖当前 manifest 解释模型身份。
+Silero VAD 运行参数以 sherpa-onnx `1.13.5`、commit `3dc7c569f31ca2cd4a20ed6f7db780327e6714c5` 的源码头文件为唯一 canonical provenance：`sherpa-onnx/csrc/silero-vad-model-config.h` 定义 `threshold = 0.5`、`min_silence_duration = 0.5 s`、`min_speech_duration = 0.25 s`、`max_speech_duration = 20 s`、`window_size = 512` samples；`sherpa-onnx/csrc/vad-model-config.h` 定义 `sample_rate = 16000 Hz`、`num_threads = 1`、`provider = "cpu"`。静态 `VadManifest` 必须逐字段保存这些值和上述版本、commit、source header 路径；validator 必须拒绝非有限数、非法范围、空 provenance，以及任何偏离该 manifest version 冻结值的配置。
 
-`model_source_json` 至少固定上游仓库、上游 commit/tag、原始模型 ID、转换工具仓库与 commit、转换参数和下载资产 URL。VAD 开启时，Job 与 Receipt 必须同时快照 VAD model ID、manifest version、archive hash 和必需文件 hash；VAD 关闭时这些字段必须全部为空。
+Rust crate 的 `SileroVadModelConfig` 与 `VadModelConfig` 派生 `Default`，但该 `Default` 产生数值零值和空 provider，并不等于 C++ source defaults。运行时构造必须从已验证的 `VadManifest` 显式填充每个字段，禁止使用 `Default::default()`、struct update default 或零值占位。
+
+Receipt 必须快照 manifest version、单归档 hash 或 canonical bundle identity、所有必需模型文件 hash、逐文件来源/revision/provenance、compatibility Gate 版本和运行时 build ID。旧 Evidence 不依赖当前 manifest 解释模型身份。
+
+`model_source_json` 至少固定每个 artifact 的上游仓库/模型 ID、immutable revision、下载 URL、许可证与 provenance；若存在转换则另存转换工具仓库/commit/参数，未转换的 Qwen3-ASR 1.7B 明确记录 `conversion = none` 与 tokenizer 混合来源。VAD 开启时，Job 与 Receipt 必须同时快照 VAD model ID、manifest version、archive hash 和必需文件 hash；VAD 关闭时这些字段必须全部为空。
 
 ## 9. 模型安装事务
 
 ```text
 检查 manifest
-  -> 检查磁盘空间
-  -> 下载到 downloads/<id>.part
-  -> 计算并验证 SHA-256
-  -> 解压到 models/.staging/<uuid>/
-  -> 验证必需文件
+  -> 以 remaining_part_bytes + peak_additional_assembly_bytes
+     + 536870912 reserve 检查 additional free space
+  -> 为每个 artifact 建立持久 checkpoint，下载到 downloads/<download-id>/<artifact>.part
+  -> 使用 Range/ETag/Last-Modified 条件恢复；source identity 变化则丢弃旧 checkpoint
+  -> 每个 artifact 完成后验证精确大小与 SHA-256
+  -> 解压型 artifact 扫描全部 entry 但只写 exact whitelist，直装型 artifact 复制/rename 到 models/.staging/<uuid>/<required-path>
+  -> 验证全部必需文件、canonical bundle identity 与 structural compatibility Gate
   -> fsync 关键文件与目录
-  -> 写入 immutable install marker
-  -> atomic rename 到 models/asr/<provider>/<id>/<manifest>-<hash>/
-  -> 事务更新 model_installations 的 active install_dir
+  -> 写入包含 exact whitelist path/bytes/hash、逐文件 provenance/runtime requirement 的 immutable structural marker
+  -> atomic rename 到 models/asr/<provider>/<id>/<manifest>-<bundle-identity>/
+  -> qualification_policy?
+       structural_with_pinned_runtime:
+         验证 exact sherpa runtime identity
+         -> 同一发布事务写 runtime_qualified
+       runtime_smoke_required:
+         事务发布 installed_unqualified
+         -> Task 8 RuntimeQualifier 调 adapter smoke
+         -> fsync immutable qualification marker
+         -> Catalog CAS 更新 runtime_qualified
 ```
 
-安装目录版本化且不可原地替换。下载与安装进度写入 `model_downloads`；`model_installations` 只记录已激活安装。失败下载保留 `failed` 状态和稳定错误码，完整性错误使用 `model_integrity_failed`，网络错误使用 `model_download_failed`。
+安装目录版本化且不可原地替换。`model_downloads` 保存 bundle 总进度，artifact checkpoints 保存逐文件来源身份、完成字节数和校验状态；`model_installations` 可记录尚不可执行的 `installed_unqualified`，只有 `runtime_qualified` 才是 active/executable。失败下载保留可恢复 checkpoint、`failed` 状态和稳定错误码，完整性错误使用 `model_integrity_failed`，网络错误使用 `model_download_failed`。取消不得发布安装，但可保留经过验证、仍与 manifest source identity 一致的 artifact 供显式重试。
 
-新目录 rename 成功但 SQLite 更新前崩溃时，启动 reconciliation 根据 install marker 校验并补登记或移入 quarantine；数据库指向缺失目录时标记 corrupt。启动时把旧进程遗留的 active download 转为 `failed/recovery_required`，清理过期 `.part` 与 staging，保留最近一次可用安装直到新版本正式激活。
+新目录 rename 成功但 SQLite publication 前崩溃时，启动 reconciliation 必须重新验证全部 required files、精确大小/hash、canonical bundle identity 与 structural marker，再按 manifest policy 恢复：
 
-归档解压必须拒绝绝对路径、`..`、symlink、hardlink 和越界目标；限制文件数量、单文件大小和总展开大小。空间检查同时覆盖归档、staging 与已安装旧版本。下载只跟随 HTTPS，重定向后的 host 必须位于 manifest allowlist。取消、网络失败、hash 错误或解压失败都不能损坏已安装版本。删除模型使用逻辑锁，等待正在使用该模型的任务释放后再删除。
+- `structural_with_pinned_runtime`：额外验证当前 sherpa runtime identity 与 manifest 固定的 1.13.5 tag/commit/native archive/build identity 完全一致；匹配时在一个事务原子补登记 `runtime_qualified` 与 runtime identity。若不匹配，不登记 installation，记录稳定 `model_runtime_identity_mismatch`，并把该目录移入 quarantine；不得补成 `installed_unqualified` 或误标文件 corrupt。
+- `runtime_smoke_required`：结构验证通过后原子补登记 `installed_unqualified`，等待 Task 8 RuntimeQualifier；reconciliation 不运行 Candle/Metal smoke，也不直接补 `runtime_qualified`。
+
+数据库指向缺失目录时记录稳定 integrity error。qualification marker 与 DB state 不一致时 fail closed 并要求重新 qualification，不误标模型文件 corrupt。启动时必须在持有 canonical process lock 后扫描 download root、全部 `.part`/checkpoint、staging root、最终安装 root 与 Catalog，而不是只 reconciliation 一个调用方传入的 plan；旧进程遗留的 active download 转为 `failed/recovery_required`，过期 `.part` 与 staging 按确定性规则清理，最近一次 `runtime_qualified` 安装保留到新版本正式 qualified。
+
+archive extractor 使用第 8.1 节逐 bundle 的 `ArchiveInstallConstraints`，扫描全部 entry 并在读取 header 时执行 entry-count Gate；任何 entry count、required 单文件声明/实写 bytes 或 required 总实写 bytes 超限立即失败。非 whitelist 的安全 regular file 不写入，包括文档、脚本和 Whisper 可选 INT8；每个 whitelist 文件必须恰好出现一次，按声明 bytes 限流复制并在 staging 中重算 SHA-256。缺失、重复、额外写入、size/hash 漂移都禁止 publication。直装 Qwen3-ASR 1.7B 与 VAD 使用同样的 exact inventory 校验，但没有 archive entry count。
+
+磁盘预检读取模型根目录所在 volume 的 available bytes，并用 checked arithmetic 计算 `required_additional_free = remaining_part_bytes + peak_additional_assembly_bytes + 536870912`。`remaining_part_bytes` 是每个 artifact 的 `expected_bytes - valid_on_disk_part_bytes` 之和；direct artifact 已完整下载并验证时该项为 0。已存在的 verified parts/checkpoints、已完成 direct temporary files 和 retained old installation 都已经占用该 volume、因而已经反映在 available space 中，不得再次相加。
+
+staging 与 final directory 必须位于同一 volume，publication 使用同卷 atomic rename；因此 `peak_additional_assembly_bytes` 对当前 exact-whitelist installer 恰好是一份第 8.1 节 required inventory total。rename 不复制 payload，不再额外加入 final total。任何 metadata 读取失败、跨卷布局、overflow 或空间不足都在创建/继续网络请求前 fail closed。禁止 `compressed_size * 4`、staging+final 双份相加、重复加入旧安装、全局 16 GiB 上限或其他未绑定 manifest 的展开估算。
+
+structural marker 的 payload inventory 必须与 manifest exact whitelist 一致，逐项保存 path、exact bytes 与 SHA-256；final directory 除 marker 外不得存在 whitelist 外 regular file、link 或特殊文件。reconciliation 重新枚举目录并逐文件 hash，marker/manifest/disk 三方任一不一致即 quarantine 或标记 corrupt，不得用 marker 中自报的现场 hash 取代冻结 manifest hash。下载只跟随 HTTPS，重定向后的 host 必须位于每个 artifact allowlist。取消、网络失败、hash 错误、兼容性错误或解压失败都不能损坏已安装版本。删除模型使用逻辑锁，等待正在使用该模型的任务释放后再删除；目录删除与 Catalog 状态恢复必须保持 crash-safe，失败时恢复删除前精确状态而不是统一降级。
 
 ## 10. 不可变音频提交与校验
 
@@ -343,11 +608,19 @@ ASR 开始前重新读取最终文件并计算 SHA-256，与 Chunk metadata 及 
 4. 在 VAD 开启时形成有开始/结束采样位置的语音区间。
 5. 对每个语音区间独立执行识别。
 
-VAD 是两个 Provider 的共同时间轴。SenseVoice 不需要伪造模型 token 时间戳；Transcript Segment 的时间范围来自 VAD 区间。关闭 VAD 时，首个 Segment 覆盖完整音频时长。
+VAD 是三个 Provider 的共同时间轴。SenseVoice 与 Qwen3-ASR 不伪造模型 token 时间戳；Transcript Segment 的时间范围来自 VAD 区间。关闭 VAD 时，首个 Segment 覆盖完整音频时长。
 
 标准工作格式为 16 kHz `f32` 单声道。多声道按每帧算术平均下混，并在写入 Provider 前 clamp 到 `[-1, 1]`。重采样器必须暴露或补偿 delay；时间换算以原始解码 frame 索引为权威，开始时间向下取整、结束时间向上取整，并校验 `0 <= start < end <= duration`。
 
-VAD speech padding 为 200 ms。连续语音区间最大 25 秒；超过时优先在最小能量点切分，否则硬切，所有核心区间单调且不重叠。上下文 padding 不能扩大对外 Evidence 时间范围或产生重复 Segment。Provider 每完成一个最多 25 秒窗口后检查取消；同步 native inference 不宣称支持窗口内抢占。
+LifeSub 在 Task 7 音频分段编排中为检测出的核心语音区间添加 200 ms inference-context padding。`200 ms` padding 和 `25 s` hard split 都不是 Silero model config，不能覆盖 manifest 中的 `max_speech_duration = 20 s`，也不能作为参数传给 sherpa-onnx VAD。Provider 每完成一个最多 25 秒窗口后检查取消；同步 native inference 不宣称支持窗口内抢占。
+
+切分只在标准 16 kHz `f32` 单声道工作样本上执行，并固定以下整数常量：`SAMPLE_RATE = 16_000`、`PADDING = 3_200`、`MAX_PROVIDER_WINDOW = 400_000`、`ENERGY_FRAME = 320`、`ENERGY_HALF_FRAME = 160`、`SPLIT_SEARCH_RADIUS = 32_000` samples。所有范围都是 `u64` 半开区间 `[start, end)`；验证 `0 <= start < end <= total_samples` 后才允许转换为平台索引。加减、毫秒换算和索引转换使用 checked arithmetic；任何 overflow、越界或不能表示为 `usize` 都返回稳定音频准备错误，禁止 wrap、截断或用饱和运算掩盖无效输入。
+
+编排前必须整体验证 detector core 集合：集合至少包含一个 core；每个 core 满足 `0 <= start < end <= total_samples`；输入顺序按 `start` 严格递增；相邻项满足 `previous.end <= next.start`。乱序、空 core、越界或 overlap 返回稳定音频准备错误。`previous.end < next.start` 的 gap 合法；`previous.end == next.start` 的相邻 detector cores 也不合并，两者分别形成独立 Evidence utterance。验证通过后，对每个 VAD core 独立执行以下循环。令本轮 `cursor` 初始为 `core.start`，`inference_start = max(0, cursor - PADDING)`，`padded_core_end = min(total_samples, core.end + PADDING)`。若 `padded_core_end - inference_start <= MAX_PROVIDER_WINDOW`，发出尾段 core `[cursor, core.end)` 和 inference `[inference_start, padded_core_end)` 后结束该 core。否则最晚安全边界精确定义为 `latest_safe = inference_start + MAX_PROVIDER_WINDOW - PADDING`；这些运算必须 checked，并断言 `cursor < latest_safe < core.end`。
+
+非尾段以 `latest_safe` 作为目标 boundary。概念搜索区间为目标前后各 `SPLIT_SEARCH_RADIUS`，随后与 `(cursor, latest_safe]`、当前 core，以及完整 320-sample energy frame 可读取的范围求交；安全裁剪会自然去掉目标右侧所有超限候选。候选 boundary 必须位于绝对工作样本网格 `candidate % ENERGY_FRAME == 0`，能量 frame 为 `[candidate - ENERGY_HALF_FRAME, candidate + ENERGY_HALF_FRAME)`。按样本顺序用 `f64` 累加 320 个 `f32` 样本平方并除以 320 得到 mean-square energy；纯 boundary selector 从已过滤候选中选择数值最低者，bitwise-equal 值取 sample index 最小者，空候选输入则返回 `latest_safe` 作为硬切 fallback。选定 `boundary` 后发出 core `[cursor, boundary)` 与 inference `[inference_start, boundary + PADDING)`，验证 inference 长度 `<= 400_000`，再令 `cursor = boundary`；`boundary > cursor` 的前置断言保证每轮严格进度。重复直到尾段发出。
+
+同一长 core 的输出 core ranges 因 cursor 传递而严格相邻、无空段、无间隙、无重叠，并精确覆盖原 core；左右 padding 允许 Provider 输入互相重叠，但不得改变对外 Evidence core range 或生成重复 Segment。VAD 关闭时只构造一个 Evidence core `[0, total_samples)`；同一循环可产生多个内部 Provider windows，但 revision 对外仍发布覆盖完整音频的单一 utterance，不把内部 window 当作新的 Evidence 边界。
 
 音频解码优先使用纯 Rust、可打包方案。实现计划必须先用所有声明格式的 fixture 验证解码库覆盖率；不支持的格式从 UI allowlist 移除，不能继续宣称支持后在 ASR 阶段失败。
 
@@ -368,7 +641,16 @@ trait AsrProvider {
 
 Provider 只接收已经解码的音频切片和验证后的请求。它不读取全局设置、不选择 fallback、不写 Catalog、不更新 UI，也不决定 revision 编号。
 
-Provider Factory 根据 Job 的设置快照和已安装 manifest 构建实例。未知 Provider、模型不属于 Provider 或模型损坏时 fail closed。
+Provider Factory 根据 Job 的设置快照和已安装 manifest 构建实例。Qwen 0.6B 只能分派到 sherpa `OfflineQwen3ASRModelConfig`，Qwen 1.7B 只能分派到固定 `qwen3-asr` crate 的 Candle/Metal adapter；Factory 不重复承担 Task 6 structural install 或 Task 8 qualification，而是在加载权重前验证 model ID、runtime family、bundle identity、`runtime_qualified` state、不可变 qualification marker、当前 M4/24GB Metal device 与 marker identity 一致。未知 Provider、模型不属于 Provider、qualification/runtime identity 不匹配或模型文件后来损坏时 fail closed，且 Receipt 记录实际分派结果以证明没有 fallback。
+
+语言参数是 Provider request contract，不是通用 metadata：
+
+- SenseVoice 将 `auto | zh | en | ja | ko | yue` 映射到 `OfflineSenseVoiceModelConfig.language`。
+- Whisper 将 `auto` 映射为 runtime 自动检测，将 manifest 声明的具体语言代码映射到 `OfflineWhisperModelConfig.language`；`multilingual` 只能描述模型能力，不是 runtime language，禁止出现在设置、Job snapshot 或 Receipt parameters 中。
+- sherpa 1.13.5 的 `OfflineQwen3ASRModelConfig` 没有 language 字段。Qwen 0.6B 因此只接受 `auto`；任何显式语言都必须在 Settings/Core 边界返回 `invalid_provider_parameter`，不能塞入该 config 的 `hotwords`，也不能作为未生效的 runtime metadata 写入 Receipt。
+- Qwen 1.7B 的 `auto` 映射为 `TranscribeOptions.language = None`；显式代码按 manifest 固定映射为 crate prompt 名称：`zh=Chinese`、`en=English`、`yue=Cantonese`、`ar=Arabic`、`de=German`、`fr=French`、`es=Spanish`、`pt=Portuguese`、`id=Indonesian`、`it=Italian`、`ko=Korean`、`ru=Russian`、`th=Thai`、`vi=Vietnamese`、`ja=Japanese`、`tr=Turkish`、`hi=Hindi`、`ms=Malay`、`nl=Dutch`、`sv=Swedish`、`da=Danish`、`fi=Finnish`、`pl=Polish`、`cs=Czech`、`fil=Filipino`、`fa=Persian`、`el=Greek`、`hu=Hungarian`、`mk=Macedonian`、`ro=Romanian`。未知值 fail closed 为 `invalid_provider_parameter`。
+
+Qwen 1.7B adapter 禁止调用 `qwen3_asr::best_device()`，因为该 helper 的合同是在 Metal 初始化失败后返回 CPU。LifeSub 必须持有直接 optional dependency `candle-core = "=0.9.2"`（Metal feature），显式调用 `candle_core::Device::new_metal(0)`，随后以 `Device::is_metal()` 和 runtime identity/qualification marker 验证 backend/device；构造失败或实际设备不是 Metal 时返回 capability/initialization error，不加载模型且绝不 fallback。
 
 ## 13. Job、租约与事务
 
@@ -380,7 +662,7 @@ Audio Chunk committed
   -> VAD
   -> transcribe slices
   -> assemble non-empty segments
-  -> transaction:
+  -> Task 10 transaction:
        insert provider_receipt
        insert transcript_revision
        insert transcript_segments
@@ -388,30 +670,37 @@ Audio Chunk committed
        mark job succeeded
 ```
 
-ASR Worker 在恢复或 claim 之前，必须取得应用数据目录中的进程级 OS advisory file lock `asr-worker.lock`，并持有到进程退出。未取得锁的第二个应用实例可以读取状态，但不得执行 recovery、claim、模型安装或 reconciliation。只有持锁实例可以把其他 boot ID 视为 stale，从而避免并行实例互相接管。
+ASR Worker 在恢复或 claim 之前，必须由 Task 4 已取得 canonical parent full-Core lifetime guard 的 primary owner 启动并持有该 guard 到有序关闭。Task 9 不创建独立 `asr-worker.lock`。未持有 full-Core guard 的实例不得执行 recovery、claim、模型安装或 reconciliation；Task 11 的 secondary 只能经 primary socket 读取/请求操作。只有 primary guard owner 可以把其他 boot ID 视为 stale，从而避免并行实例互相接管。
 
-Worker 使用 compare-and-swap claim：仅当 Job 为 `queued`、`cancel_requested_at IS NULL`、`available_at <= now` 且 lease 为空或已过期时，单条 `UPDATE ... WHERE ...` 同时设置 `state = 'preparing'`、`claimed_by`、`lease_expires_at`，并增加 `attempt_count` 与 `claim_generation`；受影响行数必须为 1。不存在“已 claim 但仍为 queued”的中间状态。Worker 保存本次返回的 `claim_generation` 作为 fencing token。`claimed_by` 包含每次进程启动生成的 `boot_id` 与 worker ID，lease 时长 30 秒，worker 每 5 秒或每个阶段边界续租。
+Task 9 不新增或迁移 Job schema：`asr_jobs` 所需状态、attempt、generation、available/lease/cancel 字段已经由 Catalog v2 表达；Task 6 的 v3 只拥有 model artifact/install DDL，Task 11 的 v4 才拥有 Local Tool/operation DDL。Task 9 的缺口是 Job repository/API 与状态转换，不是“Catalog 无法表达”或新的 `user_version`。
+
+Worker 使用 compare-and-swap claim：仅当 Job 为 `queued`、`cancel_requested_at IS NULL`、`available_at <= now`、lease 为空或已过期，且关联 Chunk 当前 `integrity_state = 'available'` 时，单条 ownership-fenced transaction/update 同时设置 `state = 'preparing'`、`claimed_by`、`lease_expires_at`，并增加 `attempt_count` 与 `claim_generation`；受影响行数必须为 1。不存在“已 claim 但仍为 queued”的中间状态。Worker 保存本次返回的 `claim_generation` 作为 fencing token。`claimed_by` 包含每次进程启动生成的 `boot_id` 与 worker ID，lease 时长 30 秒，worker 每 5 秒或每个阶段边界续租。Job Coordinator 必须持有 Task 4 已实现的 full-Core lifetime ownership guard；Task 9 只消费并向下传递该 guard，不能新建锁文件、第二 owner 或无 guard 的 public claim/recovery 入口。Task 11 后续只迁移 guard 的宿主与 socket/secondary 路由，不改变该前置条件。
+
+`available_at`、`lease_expires_at`、`created_at`、`updated_at` 与取消时间统一序列化为 UTC RFC 3339 毫秒格式 `YYYY-MM-DDTHH:MM:SS.sssZ`。所有写入先规范化，测试使用受控 UTC clock；不得依赖本地时区、SQLite 隐式日期转换或不同精度字符串的偶然词法顺序。
 
 所有续租、`preparing -> transcribing`、失败、取消和恢复转换都必须使用 `WHERE id = ? AND claimed_by = ? AND claim_generation = ?`；影响行数不是 1 时，当前 Worker 已失去所有权，必须停止并丢弃内存结果。续租还要求当前 lease 未过期，禁止旧 Worker 在被接管后复活。
 
-启动时，任何 `claimed_by.boot_id` 不等于当前 boot ID 的 `preparing/transcribing` Job 立即视为 stale，不等待旧 lease 到期；同一进程内只在 lease 过期后接管。若收到取消请求则转 `cancelled`；否则当 `attempt_count < max_attempts` 时回到 `queued`。`max_attempts = 3` 表示总共最多 3 次 claim：第 1 次失败后退避 5 秒，第 2 次失败后退避 30 秒，第 3 次失败后直接转 `failed/recovery_retry_exhausted`。
+启动时，任何 `claimed_by.boot_id` 不等于当前 boot ID 的 `preparing/transcribing` Job 立即视为 stale，不等待旧 lease 到期；同一进程内只在 lease 过期后接管。若收到取消请求则转 `cancelled`；否则当 `attempt_count < max_attempts` 时回到 `queued`。`max_attempts = 3` 表示每个手动 execution generation 总共最多 3 次 claim：第 1 次失败后退避 5 秒，第 2 次失败后退避 30 秒，第 3 次失败后直接转 `failed/recovery_retry_exhausted`。`recovery_retry_exhausted` 必须加入稳定 `AsrErrorCode` serde contract，不能只存在于内部 error_summary。
 
-取消 sweeper 将尚未 claim 的 `queued/blocked_model` Job 直接转 `cancelled`。模型安装完成时，只有 `cancel_requested_at IS NULL` 的 `blocked_model` Job 才转 `queued`。不存在 `failed_recoverable` 状态。
+取消 sweeper 将尚未 claim 的 `queued/blocked_model` Job 直接转 `cancelled`。模型安装或 runtime qualification 完成时，`blocked_model` Job 保持 `blocked_model`，只在 read model/API projection 中呈现 ready-to-retry；系统不得自动转 `queued`。用户确认后的 Application `retry_asr_job` 才能对 `blocked_model` 或 `failed` 执行 CAS：复用同一 Job ID 与不可变参数快照，递增 `claim_generation` 形成新的手动 execution generation，重置 `attempt_count = 0`，清空 ownership/lease/cancel marker 与 active error 后转 `queued`。`cancelled` 不允许 retry，需显式 enqueue/retranscribe。该设计不创建第二 active fingerprint；Task 11 的 operation/replay row 持久记录旧终态、新 generation 与同一 Job ID，保证幂等和审计。不存在 `failed_recoverable` 状态。
 
-取消请求先写 `cancel_requested_at` 并立即反馈 UI。成功发布使用 `BEGIN IMMEDIATE`：先以 `id + claimed_by + claim_generation + state = transcribing + cancel_requested_at IS NULL` 条件确认 fencing token，再插入 Receipt、Revision、Segment 和 FTS，最后以相同 token 将 Job 更新为 `succeeded`；任一条件更新影响行数不是 1 时整体回滚并丢弃结果。事务提交前已存在取消请求则转 `cancelled` 且不发布 revision；成功事务提交后到达的取消请求不回滚 Evidence，Job 保持 `succeeded`。任何事务前错误只更新 Job 失败状态。事务内错误整体回滚，不发布部分 revision。
+Task 9 只拥有 claim、renew、`preparing -> transcribing`、fail、cancel、manual-retry generation 与 recovery token；不提供 `complete()` 或任何可独立写 `succeeded` 的 repository API。取消请求先写 `cancel_requested_at` 并立即反馈 UI。Task 10 的成功发布使用 `BEGIN IMMEDIATE`：先以 `id + claimed_by + claim_generation + state = transcribing + cancel_requested_at IS NULL` 条件确认 fencing token，再插入 Receipt、Revision、Segment 和 FTS，最后以相同 token 将 Job 更新为 `succeeded`；任一条件更新影响行数不是 1 时整体回滚并丢弃结果。事务提交前已存在取消请求则转 `cancelled` 且不发布 revision；成功事务提交后到达的取消请求不回滚 Evidence，Job 保持 `succeeded`。任何事务前错误只更新 Job 失败状态。事务内错误整体回滚，不发布部分 revision。
 
 默认只有一个 ASR Worker，避免同时驻留多个大模型。后续性能数据证明有收益后再增加并发。
+
+Qwen3-ASR 1.7B 的本版发布 Gate 固定支持 macOS 14+、M4/24GB、arm64 与 Metal；上游 M4/16GB 的 avg RTF 0.319、live memory 4.6 GB 只作为预算参考，不能替代 LifeSub 证据或扩展支持范围。使用同一中文、英文和中英混合 fixture 时，中文 CER 与英文 WER 均不得超过 20%，混合关键短语召回率必须为 100%，且三项质量不得劣于 0.6B 对应结果；300 秒 fixture 的 RTF 必须 `<= 1.0`，进程峰值 RSS 必须 `<= 6 GiB`，UI heartbeat 与取消阈值沿用发布 Gate。0.6B 在同一 M4/24GB、同一 300 秒 fixture 上也必须 RTF `<= 1.0`、峰值 RSS `<= 4 GiB`。证据必须记录芯片型号、内存、macOS、arm64、Metal device、crate/version/git/Candle backend、canonical bundle identity、逐文件模型/fixture hashes、峰值 RSS、RTF，以及 Receipt runtime identity；任一条件缺失都阻断发布。16 GB 只有未来同协议 LifeSub Gate 通过后才能纳入正式支持。
 
 ## 14. 设置体验
 
 设置页使用适合选项切换的控件，而不是静态说明行：
 
-- Provider：SenseVoice / Whisper 分段控件。
+- Provider：SenseVoice / Whisper / Qwen3-ASR 分段控件。
 - Model Cards：名称、说明、大小、许可、推荐标识、安装/下载/错误状态和操作图标。
 - Language：Provider 支持语言菜单。
 - Threads：数值步进器。
 - VAD、自动转写、SenseVoice ITN：开关。
 - Whisper task：transcribe / translate 分段控件。
+- Qwen3-ASR：展示模型档位、语言覆盖、预计内存和 runtime；M4/24GB 兼容设备上的 1.7B 显示下载/暂停/继续/重装动作与逐文件总进度，structural install 后显示“正在验证运行时/尚未就绪”，Task 8 runtime qualification 成功后才显示就绪。16 GB 或其他不兼容设备不显示下载动作，并明确列出当前需要 M4/24GB、macOS 14+、arm64、Metal。
 - Advanced：模型目录、运行时版本、最近错误。
 
 下载过程中卡片尺寸固定，进度、错误和长模型名不能推动布局跳动。移动端宽度下设置项改为单列，按钮保持可触达尺寸。所有颜色、间距和字体使用现有 Design Token。
@@ -438,6 +727,7 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 - `transcription_failed`
 - `cancelled`
 - `recovery_required`
+- `recovery_retry_exhausted`
 
 用户文案与错误码分离。日志允许保存诊断上下文，但不保存音频内容，不在 UI 展示完整用户路径。
 
@@ -458,7 +748,7 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 
 - 本地 HTTP fixture 模拟下载中断、错误 hash 和重试。
 - 各声明音频格式的解码和重采样。
-- 长连续语音的 25 秒切窗、时间单调性和边界校验。
+- detector core 集合验证与长连续语音/VAD-off 长音频的确定性切窗：乱序、空 core、越界和 overlap 拒绝；gap 允许；相邻 detector cores 不合并且各自形成 Evidence utterance；精确常量、padded Provider window `<= 400,000` samples、20 ms 绝对候选网格、320-sample mean-square、最低能量、同值取最早、boundary selector 空候选硬切、长 core 子区间精确覆盖、尾段边界裁剪、checked overflow 和循环严格进度。
 - 使用真实 SenseVoice 模型转写固定中文 WAV。
 - 使用真实 Whisper 模型转写固定英文或中英混合 WAV。
 - 同一 Audio Chunk 使用两个 Provider 生成两个 revision。
@@ -475,7 +765,7 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 
 ### 量化验收 fixture
 
-发布仓库保存小型、可再分发的固定 WAV fixture 及 manifest，manifest 固定文件 SHA-256、人工 transcript、语言、标注语音区间、关键短语和许可。至少包含 20 至 40 秒普通话、英语和中英混合各一条。
+发布仓库保存小型、可再分发的固定 WAV fixture 及 manifest，manifest 固定文件 SHA-256、人工 transcript、语言、标注语音区间、关键短语和许可。至少包含 20 至 40 秒普通话、英语和中英混合各一条。性能 Gate 另包含确定性生成并提交 hash 的 5 分钟 WAV：按 `zh.wav -> en.wav -> zh-en.wav -> 500 ms 16 kHz mono silence` 顺序循环拼接，达到 300 秒后在 frame 边界截断；生成器版本、源 fixture hash 和结果 hash 全部写入 manifest。
 
 指标计算协议固定如下：
 
@@ -488,10 +778,12 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 
 - SenseVoice 普通话 fixture 的归一化 CER 不高于 20%。
 - Whisper 英语 fixture 的归一化 WER 不高于 20%；中英混合关键短语召回率为 100%。
+- Qwen3-ASR 0.6B 必须运行 `qwen3-0.6b-zh`、`qwen3-0.6b-en`、`qwen3-0.6b-zh-en`，普通话 CER 与英语 WER 均不高于 20%，混合关键短语召回率为 100%。
+- Qwen3-ASR 1.7B 必须运行 `qwen3-1.7b-zh`、`qwen3-1.7b-en`、`qwen3-1.7b-zh-en` 与 `qwen3-1.7b-perf-300s`；质量阈值与 0.6B 相同且不得更差，性能 RTF `<= 1.0`、峰值 RSS `<= 6 GiB`，Receipt 必须证明实际使用固定 Candle/Metal runtime 且无 fallback。
 - Segment 起止相对人工标注的中位误差不高于 500 ms，最大误差不高于 1.5 秒。
 - enqueue 命令在 Audio Chunk 提交后 500 ms 内返回 Job；ASR 在独立 blocking worker 执行。
 - Playwright 运行 ASR 时 100 ms UI heartbeat 的 P95 漂移不高于 250 ms。
-- 取消请求 500 ms 内显示 `cancelling`，基线模型任务在 30 秒内进入 `cancelled`。
+- 取消请求 500 ms 内显示 `cancelling`。同步 native inference 只在调用前后和 Task 7 最多 25 秒窗口之间观察 token，故最大合同为当前单个 25 秒窗口加边界开销；不宣称窗口内抢占，也不得另写 30 秒终态阈值。
 - 进程终止后重新启动，基于新 boot ID 在 5 秒内完成 stale claim 的确定性恢复。
 
 ### 构建与打包
@@ -500,23 +792,25 @@ Job 使用提交时的设置快照。用户在任务运行期间修改设置，�
 - `cargo check --features desktop`
 - 前端单测、生产构建和 Playwright。
 - 采用 sherpa-onnx crate 的 `static` feature；`otool -L` 不得出现未打包的 sherpa-onnx/onnxruntime 动态库。
-- 启动时调用运行时版本 API，版本与 Receipt 中的 `runtime_version/runtime_build_id` 一致。
-- bundle 签名、DMG 重打包和镜像内运行验证。
+- 固定 `qwen3-asr` crate 0.2.2 Git source、Candle Metal features 与 `Cargo.lock`；构建产物验证 Metal/Candle symbols 和 arm64 target，不依赖开发机动态路径。
+- 启动时调用/构造精确运行时身份，版本与 Receipt 中的 `runtime_version/runtime_build_id` 一致。
+- bundle 签名、DMG 重打包和镜像内运行验证必须真实执行 Qwen 0.6B 与 1.7B；模型权重不进入 repo 或 `.app`，smoke 从隔离用户模型目录解析已安装固定 bundle。
 
 ## 18. 发布 Gate
 
 V0.2 只有在以下证据全部存在时才完成：
 
-1. SenseVoice 与 Whisper 均通过固定 fixture 的 CER/WER、关键短语和时间误差阈值，不能仅以非空文本通过。
-2. 两种结果都包含稳定时间范围、来源和 Provider Receipt。
+1. SenseVoice、Whisper、Qwen3-ASR 0.6B 与 Qwen3-ASR 1.7B 均通过固定 fixture 的 CER/WER、关键短语和时间误差阈值，两档 Qwen 的固定 scenario ID 均不得缺失，不能仅以非空文本通过。
+2. 三种 Provider 结果都包含稳定时间范围、来源和 Provider Receipt。
 3. 设置切换实际改变后续 Job 的 Provider 和模型。
 4. 重转写创建新 revision，旧 revision 未被覆盖。
 5. 下载、hash 错误、模型缺失、音频损坏、取消和重启恢复均通过测试。
 6. 所有声明支持的音频格式均有真实解码 fixture；否则同步收窄 UI allowlist 和文档。
-7. macOS Apple Silicon bundle 可在无开发环境的情况下运行静态 ASR runtime；`otool -L`、运行时版本和签名证据齐全。
+7. macOS Apple Silicon bundle 可在无开发环境的情况下运行静态 sherpa runtime 与 Candle/Metal 1.7B runtime；`otool -L`、Metal/Candle symbols、资产解析、两档 Qwen Receipt runtime identity、签名与 DMG smoke 证据齐全。
 8. 第三方许可证、模型来源和 hash 在应用与发布材料中可查。
 9. v1 Catalog 迁移 fixture 通过，旧 revision 保持可读且明确标记 `legacy_unverified`。
 10. Chunk、Job、Receipt、Revision 和 Segment 的来源关系可以从任一新 Segment 完整追溯到输入音频 hash。
+11. 仓库、Git 历史检查范围和发布源码包不包含任何模型权重；所有模型均由 manifest 安装。
 
 ## 19. 明确延后
 

@@ -6,5 +6,9 @@
   <false/>
   <key>NSQuitAlwaysKeepsWindows</key>
   <false/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>LifeSub needs microphone access to create local audio records and transcripts.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>LifeSub needs screen recording access to capture system audio for local transcription.</string>
 </dict>
 </plist>

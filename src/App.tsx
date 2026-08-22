@@ -1,72 +1,125 @@
-import { Archive, AudioLines, Settings } from 'lucide-react'
-import { useMemo, useState } from 'react'
-import { RecordList } from './components/RecordList'
-import { RecorderBar } from './components/RecorderBar'
-import { TranscriptView } from './components/TranscriptView'
-import { SettingsView } from './components/SettingsView'
+import { useEffect, useState } from 'react'
+import { open } from '@tauri-apps/plugin-dialog'
+import { Sidebar, type PageId } from './components/Sidebar'
+import { LiveCapture } from './components/LiveCapture'
+import { TimelineView } from './components/TimelineView'
+import { DictionaryView } from './components/DictionaryView'
+import { SettingsModal } from './components/SettingsModal'
 import { demoRecords } from './data/demo'
-import type { CaptureState, EvidenceRecord, TranscriptRevision } from './domain'
-import { createCapture, isTauriRuntime, transitionCapture, type CoreCaptureSession } from './services/lifesub'
+import { importAudioRecord, loadTimelineRecords } from './data/adapter'
+import { getAcceptanceScenario, recordHeartbeat } from './acceptance'
+import { isTauriRuntime } from './services/lifesub'
+import type { EvidenceRecord } from './domain'
 
 export default function App() {
-  const [captureState, setCaptureState] = useState<CaptureState>('idle')
-  const [records, setRecords] = useState<EvidenceRecord[]>(demoRecords)
-  const [selectedId, setSelectedId] = useState(records[0].id)
-  const [query, setQuery] = useState('')
-  const [coreSession, setCoreSession] = useState<CoreCaptureSession | null>(null)
+  const [activePage, setActivePage] = useState<PageId>('live')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [records, setRecords] = useState<EvidenceRecord[]>(() => demoModeValue() ? demoRecords : [])
   const [notice, setNotice] = useState('')
-  const [view, setView] = useState<'timeline' | 'settings'>('timeline')
-  const selectedRecord = useMemo(() => records.find((record) => record.id === selectedId) ?? records[0], [records, selectedId])
+  const [isImporting, setIsImporting] = useState(false)
+  const [timelineLoading, setTimelineLoading] = useState(!demoModeValue())
+  const [timelineError, setTimelineError] = useState('')
+  const demoMode = !isTauriRuntime()
 
-  const updateRevision = async (revision: TranscriptRevision) => {
-    setRecords((current) => current.map((record) => record.id === selectedId ? { ...record, revision } : record))
-  }
+  useEffect(() => {
+    const scenario = getAcceptanceScenario()
+    if (scenario) {
+      recordHeartbeat(scenario)
+    }
+  }, [])
 
-  const changeCaptureState = async (target: CaptureState) => {
-    const previousState = captureState
-    setCaptureState(target)
-    if (!isTauriRuntime()) return
+  const refreshTimeline = async () => {
+    if (demoMode) return
+    setTimelineLoading(true)
+    setTimelineError('')
     try {
-      let session = coreSession
-      if ((!session || session.state === 'stopped') && target === 'recording') {
-        session = await createCapture(`记录 ${new Date().toLocaleString('zh-CN')}`)
-      }
-      if (session) {
-        const transitioned = await transitionCapture(session, target)
-        setCoreSession(transitioned)
-      }
+      setRecords(await loadTimelineRecords())
     } catch (error) {
-      setCaptureState(previousState)
-      setNotice(`录音状态未能保存：${String(error)}`)
+      setRecords([])
+      setTimelineError(error instanceof Error ? error.message : '时间线加载失败')
+    } finally {
+      setTimelineLoading(false)
     }
   }
 
-  const handleRetranscribe = async (recordId: string) => {
-    if (!isTauriRuntime()) {
-      setNotice('浏览器预览不支持重新转写；在桌面版中可使用本地 ASR 重新处理。')
+  useEffect(() => {
+    void refreshTimeline()
+  }, [demoMode])
+
+  const handleImportAudio = async () => {
+    if (demoMode) {
+      setActivePage('timeline')
+      setNotice('浏览器演示模式仅支持示例数据，请在桌面版中导入真实音频。')
       return
     }
+    if (isImporting) return
+
+    setIsImporting(true)
     try {
-      setNotice(`已为记录 ${recordId} 提交重新转写请求。`)
-      // In the full implementation, this calls retranscribe() from lifesub.ts
-      // and polls for the new job completion
+      const selected = await open({
+        multiple: false,
+        filters: [{
+          name: 'Audio',
+          extensions: ['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg'],
+        }],
+      })
+      if (typeof selected !== 'string' || !selected) return
+      const title = selected.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || '导入音频'
+      const outcome = await importAudioRecord(selected, title)
+      await refreshTimeline()
+      setActivePage('timeline')
+      setNotice(outcome?.asr_warning
+        ? `音频已保存；自动转写未启动：${outcome.asr_warning}`
+        : '已导入音频，记录已写入 Catalog。')
     } catch (error) {
-      setNotice(`重新转写请求失败：${String(error)}`)
+      const message = error instanceof Error ? error.message : '未知错误'
+      setNotice(`导入失败：${message}`)
+    } finally {
+      setIsImporting(false)
     }
   }
 
   return (
     <div className="app-shell">
-      <nav className="sidebar" aria-label="主导航">
-        <div className="brand"><span className="brand__mark"><AudioLines /></span><span><strong>LifeSub</strong><small>旁白</small></span></div>
-        <div className="nav-items"><button className={`nav-item ${view === 'timeline' ? 'nav-item--active' : ''}`} onClick={() => setView('timeline')}><Archive size={18} />时间线</button></div>
-        <button className={`nav-item nav-item--settings ${view === 'settings' ? 'nav-item--active' : ''}`} onClick={() => setView('settings')}><Settings size={18} />设置</button>
-      </nav>
+      <Sidebar
+        activePage={activePage}
+        onNavigate={setActivePage}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
       <section className="workspace">
-        {view === 'timeline' && <RecorderBar state={captureState} onStateChange={changeCaptureState} />}
-        {notice && <div className="notice" role="status">{notice}<button aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div>}
-{view === 'timeline' ? <div className="workspace__content"><RecordList records={records} selectedId={selectedId} query={query} onQueryChange={setQuery} onSelect={setSelectedId} /><TranscriptView record={selectedRecord} query={query} onRevisionChange={updateRevision} onNotice={setNotice} onRetranscribe={handleRetranscribe} allRevisions={selectedRecord.allRevisions} /></div> : <SettingsView />}
+        {demoMode && (
+          <div className="notice" role="status">
+            浏览器演示模式
+          </div>
+        )}
+        {notice && (
+          <div className="notice" role="status">
+            {notice}
+            <button aria-label="关闭提示" onClick={() => setNotice('')}>×</button>
+          </div>
+        )}
+        {activePage === 'live' && <LiveCapture onNotice={setNotice} />}
+        {activePage === 'timeline' && (
+          <TimelineView
+            records={records}
+            onRecordsChange={setRecords}
+            onNotice={setNotice}
+            onImportAudio={() => void handleImportAudio()}
+            loading={timelineLoading}
+            error={timelineError}
+            onRetry={() => void refreshTimeline()}
+          />
+        )}
+        {activePage === 'dictionary' && <DictionaryView onNotice={setNotice} />}
       </section>
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   )
+}
+
+function demoModeValue() {
+  return !isTauriRuntime()
 }

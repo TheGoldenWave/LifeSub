@@ -1,26 +1,43 @@
 # LifeSub Workspace Status
 
-Last verified: 2026-08-21
+Last verified: 2026-08-22
 
-## Canonical source for the currently installed app
+## Current consolidation state
 
-- Worktree: `/Users/goldenwave/.config/superpowers/worktrees/LifeSub/lifesub-real-asr-v0.2`
-- Branch: `codex/lifesub-real-asr-v0.2`
-- Committed base: `cce0320`
-- State: contains substantial uncommitted UI, Catalog, worker, safety, and verification work. Do not delete, reset, or treat it as disposable.
+- The divergent worktrees have been consolidated through a reviewed merge workflow. The final canonical branch is `main` in the primary project path.
+- The integrated source imported through the merge is `652abf720e67765b53de56714a14965fb4cfbcf0` from `codex/lifesub-real-asr-v0.2`.
+- Tasks 1--6 of the approved native-capture plan are implemented, reviewed and committed.
+- Task 7 production Catalog v6/atomic sealing remains unfinished. Continue from the integrated process records, not from the old external-worktree path.
+- Do not package, install or replace `/Applications/LifeSub.app` until Tasks 7--12 and hardware acceptance pass.
+
+## Integrated release source contract
+
+- Release source worktree: `/Users/goldenwave/Documents/MyProject/LifeSub`
+- Release source branch: `main`
+- Release version: `0.2.1`
+- Verification: run `npm run verify:release-source`. Until native capture and native ASR are production-selected, local planning audits may use `LIFESUB_RELEASE_ALLOW_PLANNED=1 npm run verify:release-source`; that mode is explicitly not release evidence.
+
+## Canonical integrated development and release source
+
+- Worktree: `/Users/goldenwave/Documents/MyProject/LifeSub`
+- Branch: `main`
+- Merge inputs: preserved main workspace `dc62d5b` plus integrated source `652abf7`.
+- Current milestone: workspace consolidation complete; native-capture Tasks 1--6 complete; Task 7 remains the next implementation milestone.
+
+## Currently installed app
+
 - Installed bundle: `/Applications/LifeSub.app`
 - Bundle version: `0.2.1`
 - Executable SHA-256: `6b8b7e17f4f509a95434560141b05793f31503530405dc242e8b1b7e620d8f8c`
 
-This is the most functionally complete runnable workspace currently available, but it is not a clean release branch.
+The installed app predates the Task 1--6 native-capture integration commits. It is not evidence that ScreenCaptureKit/AVAudioEngine capture or authenticated helper supervision works in the installed product. Do not use the installed bundle as the source for further development.
 
-## Other retained workspace
+## Retained rollback workspace
 
-- Worktree: `/Users/goldenwave/Documents/MyProject/LifeSub`
-- Branch: `main`
-- Committed base: `03f49eb`
-- State: divergent V0.2.1 ASR implementation plus local startup-fix changes.
-- Do not use it as the release source without integration. Its current desktop wiring still contains production stubs (`job: None`, model management/retry/retranscribe stubs, and disabled test modules).
+- Worktree: `/Users/goldenwave/.config/superpowers/worktrees/LifeSub/lifesub-real-asr-v0.2`
+- Branch: `codex/lifesub-real-asr-v0.2`
+- Frozen integrated source: `652abf7`.
+- Purpose: rollback and patch comparison only. Do not continue product development or build releases there after consolidation.
 
 ## Removed worktree directories
 
@@ -39,10 +56,16 @@ They can be recreated if patch-level comparison is needed. Do not delete the bra
 | Catalog v5 and durable UI CRUD | Implemented |
 | ASR schemas, manifests, model manager, job fencing, receipts, providers, quality Gate infrastructure | Implemented at module/test level |
 | Imported-audio production ASR executor | Not release-verified; canonical worker currently uses `FailClosedEngine` |
-| Real-time microphone/system audio capture | Not implemented; no ScreenCaptureKit/AVAudioEngine production adapter is wired |
+| Versioned Rust/Swift capture protocol | Implemented and reviewed; shared fixture, bounds, replay/sequence and PCM validation pass |
+| ScreenCaptureKit system-audio helper | Implemented and reviewed; not yet connected to production coordinator |
+| AVAudioEngine microphone helper | Implemented and reviewed; not yet connected to production coordinator |
+| Helper build/bundle/signing | Implemented and reviewed; arm64 sidecar uses fixed identifier and compile-time SHA attestation |
+| Helper authentication/supervision | Implemented and reviewed; inherited-FD nonce, UID/PID/path/file identity, replay and timeout gates pass |
+| Catalog v6 capture timing and atomic chunk sealing | Not implemented; Task 7 is paused at a failing migration test |
+| Production NativeCaptureCoordinator | Not implemented; current production capture path remains fail closed |
 | Demo fallback in desktop production | Intentionally blocked |
 
-The statement "V0.2.1 15 tasks are complete on main" describes a task implementation report, not the current integrated product state. It must not be used as release evidence without checking production command wiring and packaged behavior.
+After the 2026-08-22 consolidation, `main` at the primary project path is the only development/release source. Semantic version strings, old DMGs, `/Applications/LifeSub.app`, or the retained rollback worktree must not override this contract.
 
 ## Required pre-build check
 

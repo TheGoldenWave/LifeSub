@@ -1,62 +1,74 @@
-#!/usr/bin/env bash
-#
-# fetch-sherpa-runtime.sh
-#
-# Downloads and verifies the sherpa-onnx v1.13.5 macOS ARM64 static library
-# archive. The archive is written outside the repository tree to a cache
-# directory and its path is printed to stdout so it can be consumed by
-# `SHERPA_ONNX_ARCHIVE_DIR`.
-#
-# Usage:
-#   SHERPA_ONNX_ARCHIVE_DIR="$(scripts/fetch-sherpa-runtime.sh)"
-#   export SHERPA_ONNX_ARCHIVE_DIR
-#
-# The archive is downloaded only once; subsequent invocations verify the
-# cached copy and re-download only if the hash mismatches.
+#!/bin/sh
+set -eu
 
-set -euo pipefail
+readonly RUNTIME_VERSION="1.13.5"
+readonly ARCHIVE_NAME="sherpa-onnx-v${RUNTIME_VERSION}-osx-arm64-static-lib.tar.bz2"
+readonly ARCHIVE_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${RUNTIME_VERSION}/${ARCHIVE_NAME}"
+readonly ARCHIVE_SIZE="19862746"
+readonly ARCHIVE_SHA256="339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44"
+readonly RUNTIME_GIT_COMMIT="3dc7c569f31ca2cd4a20ed6f7db780327e6714c5"
+readonly BUILD_ID="sherpa-onnx-v1.13.5-osx-arm64-static-lib"
+readonly CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/Library/Caches}/lifesub/sherpa-onnx/v${RUNTIME_VERSION}"
+readonly ARCHIVE_PATH="${CACHE_ROOT}/${ARCHIVE_NAME}"
+readonly ATTESTATION_PATH="${CACHE_ROOT}/.lifesub-sherpa-runtime-attestation-v1"
 
-ARCHIVE_NAME="sherpa-onnx-v1.13.5-osx-arm64-static-lib.tar.bz2"
-ARCHIVE_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.5/${ARCHIVE_NAME}"
-EXPECTED_SIZE=19862746
-EXPECTED_SHA256="339c8fc19bb4b26e118c80792bbc4546eb263040fac36ef0cc027ec29c756b44"
+archive_size() {
+    /usr/bin/stat -f '%z' "$1"
+}
 
-CACHE_DIR="${HOME}/.cache/lifesub/sherpa-onnx"
-mkdir -p "${CACHE_DIR}"
+archive_sha256() {
+    /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{ print $1 }'
+}
 
-ARCHIVE_PATH="${CACHE_DIR}/${ARCHIVE_NAME}"
+archive_is_valid() {
+    [ ! -L "$1" ] \
+        && [ -f "$1" ] \
+        && [ "$(archive_size "$1")" = "$ARCHIVE_SIZE" ] \
+        && [ "$(archive_sha256 "$1")" = "$ARCHIVE_SHA256" ]
+}
 
-# Download if the archive is not present.
-if [[ ! -f "${ARCHIVE_PATH}" ]]; then
-    echo "==> Downloading ${ARCHIVE_URL}" >&2
-    curl -fSL --progress-bar -o "${ARCHIVE_PATH}.tmp" "${ARCHIVE_URL}"
-    mv "${ARCHIVE_PATH}.tmp" "${ARCHIVE_PATH}"
+attestation_payload() {
+    /usr/bin/printf '%s\n' \
+        'schema=lifesub.sherpa-runtime-attestation.v1' \
+        "version=${RUNTIME_VERSION}" \
+        "git_commit=${RUNTIME_GIT_COMMIT}" \
+        "archive_name=${ARCHIVE_NAME}" \
+        "archive_size=${ARCHIVE_SIZE}" \
+        "archive_sha256=${ARCHIVE_SHA256}" \
+        "build_id=${BUILD_ID}"
+}
+
+attestation_is_valid() {
+    [ ! -L "$ATTESTATION_PATH" ] \
+        && [ -f "$ATTESTATION_PATH" ] \
+        && [ "$(/bin/cat "$ATTESTATION_PATH")" = "$(attestation_payload)" ]
+}
+
+/bin/mkdir -p "$CACHE_ROOT"
+
+if ! archive_is_valid "$ARCHIVE_PATH"; then
+    temporary_archive="$(/usr/bin/mktemp "${CACHE_ROOT}/.${ARCHIVE_NAME}.XXXXXX")"
+    trap '/bin/rm -f "$temporary_archive"' EXIT HUP INT TERM
+
+    >&2 /bin/echo "Downloading sherpa-onnx ${RUNTIME_VERSION} static runtime"
+    /usr/bin/curl --fail --location --silent --show-error \
+        --output "$temporary_archive" "$ARCHIVE_URL"
+
+    if ! archive_is_valid "$temporary_archive"; then
+        >&2 /bin/echo "Downloaded sherpa-onnx archive failed size or SHA-256 verification"
+        exit 1
+    fi
+
+    /bin/mv -f "$temporary_archive" "$ARCHIVE_PATH"
+    trap - EXIT HUP INT TERM
 fi
 
-# Verify size.
-actual_size=$(wc -c < "${ARCHIVE_PATH}" | tr -d ' ')
-if [[ "${actual_size}" -ne "${EXPECTED_SIZE}" ]]; then
-    echo "ERROR: size mismatch: expected ${EXPECTED_SIZE}, got ${actual_size}" >&2
-    echo "       removing cached archive; re-run to re-download." >&2
-    rm -f "${ARCHIVE_PATH}"
-    exit 1
+if ! attestation_is_valid; then
+    temporary_attestation="$(/usr/bin/mktemp "${CACHE_ROOT}/.lifesub-sherpa-runtime-attestation-v1.XXXXXX")"
+    trap '/bin/rm -f "$temporary_attestation"' EXIT HUP INT TERM
+    attestation_payload >"$temporary_attestation"
+    /bin/mv -f "$temporary_attestation" "$ATTESTATION_PATH"
+    trap - EXIT HUP INT TERM
 fi
 
-# Verify SHA-256.
-if command -v shasum >/dev/null 2>&1; then
-    actual_sha256=$(shasum -a 256 "${ARCHIVE_PATH}" | awk '{print $1}')
-else
-    actual_sha256=$(sha256sum "${ARCHIVE_PATH}" | awk '{print $1}')
-fi
-
-if [[ "${actual_sha256}" != "${EXPECTED_SHA256}" ]]; then
-    echo "ERROR: SHA-256 mismatch: expected ${EXPECTED_SHA256}, got ${actual_sha256}" >&2
-    echo "       removing cached archive; re-run to re-download." >&2
-    rm -f "${ARCHIVE_PATH}"
-    exit 1
-fi
-
-echo "==> Verified ${ARCHIVE_NAME} (${actual_size} bytes, SHA-256 ok)" >&2
-
-# Print the cache directory so the caller can set SHERPA_ONNX_ARCHIVE_DIR.
-echo "${CACHE_DIR}"
+/bin/echo "$CACHE_ROOT"

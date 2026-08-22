@@ -1,71 +1,77 @@
-# LifeSub 阶段路线图
+# 阶段路线图
 
-> 2026-08-20 更新：遗留生产能力按“真实 ASR → 原生采集 → 匿名说话人 → 授权声纹”拆成独立版本。完整工作与验收要求见[遗留能力总实施计划](superpowers/plans/2026-08-20-lifesub-remaining-capabilities-roadmap.md)。
+## 当前进度（2026-08-21）
 
-## 当前基础：V0.1 Evidence Core
+> 唯一开发/发布源：`/Users/goldenwave/Documents/MyProject/LifeSub` / `main`。外部 worktree 已降级为回滚来源。下一个产品实现里程碑是 Task 7。
 
-已完成 Tauri/React 桌面壳、本地 SQLite Evidence Core、音频导入与 hash、append-only Transcript Revision、中文搜索、Evidence URI、Markdown 导出和显式 fail-closed 桌面路径。
+| 里程碑 | 状态 | 说明 |
+|---|---|---|
+| V0.1 Evidence Core | 已完成 | SQLite Catalog、导入/hash、revision、搜索、Evidence URI、Markdown 导出 |
+| V0.2 UI/Catalog 安全闭环 | 已完成 | 桌面真实 Catalog、durable Job、精确 model_id、manual provenance、多 Chunk 回放、设置/词典/笔记持久化 |
+| V0.2 UI 走查整改 | 已完成 | 35 项问题收口；Critical/Important 独立复审均清零 |
+| V0.2 arm64 重新打包与安装 | 已完成 | DMG 校验、bundle 签名验证、替换 `/Applications/LifeSub.app` 并启动确认 |
+| 原生采集协议/Swift helper/签名/认证 | 已完成 | Task 3--6 已实现并通过最终复审 |
+| Catalog v6 + atomic chunk sealing | 进行中（暂停） | Task 7 只有已观察的 migration RED，尚无生产实现 |
+| production 真实实时双路采集 | 未完成 | Task 8 coordinator 未实现，当前生产采集路径继续 fail closed |
+| native ASR production executor | 未完成 | coordinator/lease/recovery/cancel/shutdown 已完成；执行器当前 fail closed |
+| Diarization / CAM++ | 未完成 | UI/CRUD 基础已有，模型推理未接通 |
 
-## V0.2.1：真实本地 ASR
+当前下一里程碑：从 Task 7 RED 完成 Catalog v6 capture timing 和 atomic chunk sealing，再依次完成 Task 8 production coordinator、Task 9 NativeAsrEngine、Task 10 persisted UI events 与 Task 11/12 真机/安装包验收。
 
-用户价值：导入音频后，可通过真实本地模型获得可追溯转写。
+## Phase 0：设计与验证准备
 
-核心工作：
+- 完成产品、架构、隐私和插件规格。
+- 确认 macOS 音频采集可行性与系统权限边界。
+- 建立 ASR 与摘要评测样本。
+- 定义记忆数据模型和 Agent 工具契约。
+- 明确 Malow 插件接口。
 
-- 接通 native ASR production executor 和已完成的 Job worker 生命周期。
-- 通过 sherpa-onnx 支持 SenseVoiceSmall 与 Whisper，不引入 Python Sidecar。
-- 完成解码、16 kHz 单声道重采样、VAD、Segment、Receipt 和原子 Revision 发布。
-- 将模型下载、取消、校验、安装、切换和删除后端能力接入 UI。
-- 保留 fail closed、无静默回退、不可变音频和 append-only Revision。
+退出条件：正式设计规格和实施计划获得批准。
 
-退出条件：中文与英文/混合真实 fixture、重转写历史保护、失败无半条 Evidence，以及签名安装包内的双模型 smoke 全部通过。
+## Phase 1：软件记忆闭环
 
-## V0.2.2：真实桌面采集
+- macOS 菜单栏开始、暂停和停止录制。
+- 系统音频与麦克风双路采集。
+- 音频文件导入。
+- 本地 ASR 默认 Provider，以及一个云端 ASR 通路。
+- 结构化摘要、记忆和时间戳证据。
+- 本地时间线、搜索和记忆详情。
 
-用户价值：可直接录制麦克风或系统音频，并自动进入 V0.2.1 转写链路。
+当前状态：数据与导入闭环已完成；真实双路采集、native 自动转写和摘要仍未完成，因此尚未达到 Phase 1 退出条件。
 
-核心工作：
+退出条件：用户可以在安装版完成一次真实会议记录，并在退出重启后准确检索、播放、导出决定和原文；验收数据不得来自 Demo/Mock。
 
-- AVAudioEngine 麦克风采集与 ScreenCaptureKit 系统音频采集。
-- 权限、设备断开、来源移除、背压、磁盘保护和崩溃恢复。
-- 双路来源分别保存为可追溯 Physical Audio Chunk。
-- 统一 Opus 16 kHz Mono、16 kbps VBR + DTX 编码。
-- 移除生产路径的 mock source，界面只展示真实可诊断状态。
+## Phase 2：Agent 生态
 
-退出条件：麦克风、系统音频、双路、权限拒绝、设备丢失、重启恢复、8 小时 soak 和签名安装包实机验收通过。
+- LifeSub MCP Server 与 Codex 插件。
+- DeepSeek Harness 原生插件。
+- Malow 原生插件。
+- 统一权限、错误与审计行为。
 
-## V0.3：匿名说话人分离
+退出条件：三个宿主对同一查询返回一致的记忆与来源。
 
-用户价值：在转写时间线中看到匿名的“谁在什么时候说了什么”。
+## Phase 3：隐私同步
 
-核心工作：
+- 独立 GitHub 私有记忆库初始化。
+- 普通摘要的可读同步。
+- 敏感记忆的客户端加密同步。
+- 多设备拉取、冲突和恢复流程。
+- 删除与 Git 历史风险提示。
 
-- Diarization runtime、匿名 speaker turn、重叠和置信度。
-- 说话人时间段与 ASR Segment 的确定性对齐。
-- 原始结果和人工合并、拆分、改派均保存为 append-only revision。
-- Speaker 信息进入搜索、Evidence 解析和 Markdown 投影。
+退出条件：在第二台设备恢复可检索记忆，且 GitHub 不出现未授权原文或音频。
 
-退出条件：固定多人语音集达到冻结的 DER/JER 阈值，人工修订不覆盖原始结果，Diarization 失败不影响既有 ASR Evidence。
+## Phase 4：随身采集
 
-## V0.3.1：CAM++ 声纹身份
+- 手机伴侣或现有录音设备导入。
+- 评估可穿戴硬件原型。
+- 验证续航、收音、佩戴、提示和同步。
 
-用户价值：用户明确授权后，可将匿名说话人与本地 Speaker Profile 匹配。
+退出条件：明确自研硬件是否具备相对现成设备的真实优势。
 
-核心工作：
+## 明确延后
 
-- CAM++ embedding、多样本注册、质量检查和版本化。
-- 本地加密 Speaker Profile、匹配阈值、拒识和未知说话人状态。
-- 注册、重命名、撤回和删除交互。
-- 保存模型版本、阈值、分数和来源 Diarization Revision。
-
-退出条件：已知识别、未知说话人误认和拒识率达到冻结阈值；未授权不能创建 Profile；删除 Profile 后解除实名关联但保留匿名历史 Evidence。
-
-## 后续重新排期
-
-- 多设备时间校准、重复消除、ASR 冲突标注和合并 Revision。历史 V0.3 规划保留为研究输入，但实施前必须重新编号。
-- 日历提醒、会议检测、确认式自动开始和全天候录音。
-- Windows/Linux Capture Adapter、稳定公开 Contract、CLI 与更多 Evidence consumer。
-- Qwen3-ASR、云端 ASR Provider 和第二套 ASR runtime。
-- 移动 companion、外部录音设备和加密对象同步。
-
-GitHub 不作为全天音频与转写的主存储或同步通道。
+- 全天候自动录音。
+- 公网个人记忆服务。
+- 团队与企业版本。
+- Agent 实时上下文注入。
+- Agent 远程控制录音。

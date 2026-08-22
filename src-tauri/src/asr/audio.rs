@@ -1,379 +1,501 @@
-//! Audio decoding, downmix, resampling, and time conversion.
-//!
-//! Decodes supported formats (WAV, MP3, M4A, AAC, FLAC, OGG) via Symphonia 0.6,
-//! downmixes multi-channel audio to f32 mono using arithmetic mean,
-//! resamples to 16 kHz with Rubato 5, and provides authoritative frame-index
-//! to millisecond time conversion.
+use std::fs::File;
+use std::path::Path;
 
 use rubato::audioadapter_buffers::owned::InterleavedOwned;
 use rubato::{Fft, FixedSync, Resampler};
-use symphonia::core::audio::sample::Sample;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
-use symphonia::core::errors::Error;
+use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+pub const WORK_SAMPLE_RATE_HZ: u32 = 16_000;
+// Whole-file in-memory preparation needs a safety bound; this is not an import policy.
+pub const MAX_DECODED_AUDIO_DURATION_SECONDS: u64 = 24 * 60 * 60;
 
-/// Standard ASR working sample rate (Hz).
-const TARGET_SAMPLE_RATE: usize = 16_000;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SampleRange {
+    pub start: u64,
+    pub end: u64,
+}
 
-/// Resampler chunk size — process audio in blocks of this many input frames.
-const RESAMPLER_CHUNK_SIZE: usize = 1024;
+impl SampleRange {
+    pub fn new(start: u64, end: u64) -> Result<Self, AudioPreparationError> {
+        if start >= end {
+            return Err(AudioPreparationError::InvalidRange);
+        }
+        Ok(Self { start, end })
+    }
 
-/// Maximum number of audio channels we accept before rejecting.
-const MAX_CHANNELS: usize = 16;
+    pub fn checked_len(self) -> Result<u64, AudioPreparationError> {
+        let length = self
+            .end
+            .checked_sub(self.start)
+            .ok_or(AudioPreparationError::InvalidRange)?;
+        if length == 0 {
+            return Err(AudioPreparationError::InvalidRange);
+        }
+        Ok(length)
+    }
+}
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MillisecondRange {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
 
-/// Decoded audio ready for ASR processing.
-///
-/// Always 16 kHz f32 mono, clamped to [-1, 1].
 #[derive(Clone, Debug, PartialEq)]
-pub struct DecodedAudio {
-    /// f32 mono samples at 16 kHz.
+pub struct WorkingAudio {
     pub samples: Vec<f32>,
-    /// Always 16_000 after decode + resample.
-    pub sample_rate: u32,
-    /// Total duration in milliseconds, derived from original frame count.
+    pub sample_rate_hz: u32,
+    pub source_sample_rate_hz: u32,
+    pub source_channels: usize,
+    pub source_frames: u64,
     pub duration_ms: u64,
-    /// Human-readable description of the original format.
-    pub original_format: String,
 }
 
-/// Errors that can occur during audio decoding or processing.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AudioError {
-    /// The input format is not supported by any registered Symphonia codec.
-    UnsupportedFormat,
-    /// The codec reported an error during decode.
-    DecodeFailed(String),
-    /// The resampler could not be created or failed during processing.
-    ResampleFailed(String),
-    /// The audio has more channels than supported.
-    TooManyChannels(usize),
-    /// The input is empty.
-    EmptyInput,
-    /// The audio stream ended without producing any samples.
-    NoAudioData,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioPreparationError {
+    UnsupportedOrCorruptAudio,
+    InvalidSampleRate,
+    InvalidRange,
+    InvalidDetectorCores,
+    ArithmeticOverflow,
+    IndexOutOfRange,
+    ResampleFailed,
+    DetectorFailed,
+    InvalidVadConfig,
+    ResourceLimitExceeded,
+    AllocationFailed,
 }
 
-impl std::fmt::Display for AudioError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl AudioPreparationError {
+    pub const fn code(self) -> &'static str {
         match self {
-            Self::UnsupportedFormat => write!(f, "unsupported audio format"),
-            Self::DecodeFailed(msg) => write!(f, "decode failed: {msg}"),
-            Self::ResampleFailed(msg) => write!(f, "resample failed: {msg}"),
-            Self::TooManyChannels(n) => write!(f, "too many channels: {n}"),
-            Self::EmptyInput => write!(f, "empty input"),
-            Self::NoAudioData => write!(f, "no audio data in stream"),
+            Self::UnsupportedOrCorruptAudio => "unsupported_or_corrupt_audio",
+            Self::InvalidSampleRate => "invalid_sample_rate",
+            Self::InvalidRange => "invalid_audio_range",
+            Self::InvalidDetectorCores => "invalid_detector_cores",
+            Self::ArithmeticOverflow => "audio_arithmetic_overflow",
+            Self::IndexOutOfRange => "audio_index_out_of_range",
+            Self::ResampleFailed => "audio_resample_failed",
+            Self::DetectorFailed => "vad_detector_failed",
+            Self::InvalidVadConfig => "invalid_vad_runtime_config",
+            Self::ResourceLimitExceeded => "audio_resource_limit_exceeded",
+            Self::AllocationFailed => "audio_allocation_failed",
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DecodeResourceBudget {
+    channels: usize,
+    max_source_frames: u64,
+    max_interleaved_samples: usize,
+    source_frames: u64,
+    interleaved_samples: usize,
+}
 
-/// Decode an audio buffer into 16 kHz f32 mono PCM.
-///
-/// Format is auto-detected from the byte stream. Multi-channel audio is
-/// downmixed to mono via arithmetic mean. The output is resampled to 16 kHz
-/// and clamped to [-1, 1].
-pub fn decode_audio(data: &[u8]) -> Result<DecodedAudio, AudioError> {
-    if data.is_empty() {
-        return Err(AudioError::EmptyInput);
+impl DecodeResourceBudget {
+    pub(crate) fn new(sample_rate_hz: u32, channels: usize) -> Result<Self, AudioPreparationError> {
+        if sample_rate_hz == 0 {
+            return Err(AudioPreparationError::InvalidSampleRate);
+        }
+        if channels == 0 {
+            return Err(AudioPreparationError::UnsupportedOrCorruptAudio);
+        }
+        let max_source_frames = max_source_frames(sample_rate_hz)?;
+        let max_interleaved_samples = checked_interleaved_samples(max_source_frames, channels)?;
+        Ok(Self {
+            channels,
+            max_source_frames,
+            max_interleaved_samples,
+            source_frames: 0,
+            interleaved_samples: 0,
+        })
     }
 
-    let mss = MediaSourceStream::new(
-        Box::new(std::io::Cursor::new(data.to_vec())),
-        Default::default(),
-    );
+    pub(crate) fn accept_packet(
+        &mut self,
+        packet_frames: u64,
+        packet_samples: usize,
+    ) -> Result<(), AudioPreparationError> {
+        if packet_frames == 0 || packet_samples == 0 {
+            return Err(AudioPreparationError::UnsupportedOrCorruptAudio);
+        }
+        let expected_samples = checked_interleaved_samples(packet_frames, self.channels)?;
+        if packet_samples != expected_samples {
+            return Err(AudioPreparationError::UnsupportedOrCorruptAudio);
+        }
+        let source_frames = self
+            .source_frames
+            .checked_add(packet_frames)
+            .ok_or(AudioPreparationError::ResourceLimitExceeded)?;
+        let interleaved_samples = self
+            .interleaved_samples
+            .checked_add(packet_samples)
+            .ok_or(AudioPreparationError::ResourceLimitExceeded)?;
+        if source_frames > self.max_source_frames
+            || interleaved_samples > self.max_interleaved_samples
+        {
+            return Err(AudioPreparationError::ResourceLimitExceeded);
+        }
+        self.source_frames = source_frames;
+        self.interleaved_samples = interleaved_samples;
+        Ok(())
+    }
+}
 
-    let hint = Hint::new();
-    let fmt_opts: FormatOptions = Default::default();
-    let meta_opts: MetadataOptions = Default::default();
-    let dec_opts: AudioDecoderOptions = Default::default();
+pub(crate) fn validate_declared_source_frames(
+    declared_frames: Option<u64>,
+    sample_rate_hz: u32,
+) -> Result<(), AudioPreparationError> {
+    let max_frames = max_source_frames(sample_rate_hz)?;
+    if declared_frames.is_some_and(|frames| frames > max_frames) {
+        return Err(AudioPreparationError::ResourceLimitExceeded);
+    }
+    Ok(())
+}
 
+pub fn decode_to_working_audio(path: &Path) -> Result<WorkingAudio, AudioPreparationError> {
+    let source = File::open(path).map_err(|_| AudioPreparationError::UnsupportedOrCorruptAudio)?;
+    let extension = path.extension().and_then(|value| value.to_str());
+    decode_from_file(source, extension)
+}
+
+pub fn decode_to_working_audio_from_file(
+    file: File,
+    extension_hint: Option<&str>,
+) -> Result<WorkingAudio, AudioPreparationError> {
+    decode_from_file(file, extension_hint)
+}
+
+fn decode_from_file(
+    source: File,
+    extension_hint: Option<&str>,
+) -> Result<WorkingAudio, AudioPreparationError> {
+    let stream = MediaSourceStream::new(Box::new(source), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = extension_hint {
+        hint.with_extension(extension);
+    }
     let mut format = symphonia::default::get_probe()
-        .probe(&hint, mss, fmt_opts, meta_opts)
-        .map_err(|_| AudioError::UnsupportedFormat)?;
-
+        .probe(
+            &hint,
+            stream,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|_| AudioPreparationError::UnsupportedOrCorruptAudio)?;
     let track = format
         .default_track(TrackType::Audio)
-        .ok_or(AudioError::UnsupportedFormat)?;
-
-    let track_id = track.id;
+        .ok_or(AudioPreparationError::UnsupportedOrCorruptAudio)?;
     let codec_params = track
         .codec_params
         .as_ref()
-        .and_then(|p| p.audio())
-        .ok_or(AudioError::UnsupportedFormat)?;
-
-    let sample_rate = codec_params.sample_rate.unwrap_or(0);
-    if sample_rate == 0 {
-        return Err(AudioError::DecodeFailed(
-            "unknown sample rate".to_string(),
-        ));
+        .and_then(|params| params.audio())
+        .ok_or(AudioPreparationError::UnsupportedOrCorruptAudio)?;
+    if let Some(sample_rate_hz) = codec_params.sample_rate {
+        validate_declared_source_frames(track.num_frames, sample_rate_hz)?;
     }
-
-    let channels = codec_params.channels.clone().map(|c| c.count()).unwrap_or(1);
-    if channels > MAX_CHANNELS {
-        return Err(AudioError::TooManyChannels(channels));
-    }
-
-    let original_format = format!(
-        "{} {}Hz {}ch",
-        codec_params.codec, sample_rate, channels
-    );
-
     let mut decoder = symphonia::default::get_codecs()
-        .make_audio_decoder(codec_params, &dec_opts)
-        .map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
-
-    let mut raw_samples: Vec<f32> = Vec::new();
-    let mut total_frames: u64 = 0;
+        .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
+        .map_err(|_| AudioPreparationError::UnsupportedOrCorruptAudio)?;
+    let track_id = track.id;
+    let mut source_rate = None;
+    let mut source_channels = None;
+    let mut source_frames = 0_u64;
+    let mut interleaved = Vec::new();
+    let mut resource_budget = None;
 
     loop {
         let packet = match format.next_packet() {
             Ok(Some(packet)) => packet,
             Ok(None) => break,
-            Err(Error::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(AudioError::DecodeFailed(e.to_string())),
+            Err(_) => return Err(AudioPreparationError::UnsupportedOrCorruptAudio),
         };
-
         if packet.track_id != track_id {
             continue;
         }
-
-        let audio_buf = match decoder.decode(&packet) {
-            Ok(buf) => buf,
-            Err(Error::DecodeError(_)) => continue,
-            Err(e) => return Err(AudioError::DecodeFailed(e.to_string())),
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) => {
+                return Err(AudioPreparationError::UnsupportedOrCorruptAudio);
+            }
+            Err(_) => return Err(AudioPreparationError::UnsupportedOrCorruptAudio),
         };
-
-        let num_frames = audio_buf.frames();
-        total_frames += num_frames as u64;
-
-        let sample_count = audio_buf.samples_interleaved();
-        let start = raw_samples.len();
-        raw_samples.resize(start + sample_count, f32::MID);
-        audio_buf.copy_to_slice_interleaved(&mut raw_samples[start..]);
+        let rate = decoded.spec().rate();
+        let channels = decoded.spec().channels().count();
+        if rate == 0 || channels == 0 {
+            return Err(AudioPreparationError::UnsupportedOrCorruptAudio);
+        }
+        if source_rate.is_some_and(|expected| expected != rate)
+            || source_channels.is_some_and(|expected| expected != channels)
+        {
+            return Err(AudioPreparationError::UnsupportedOrCorruptAudio);
+        }
+        source_rate = Some(rate);
+        source_channels = Some(channels);
+        if decoded.frames() == 0 {
+            if decoded.samples_interleaved() != 0 {
+                return Err(AudioPreparationError::UnsupportedOrCorruptAudio);
+            }
+            continue;
+        }
+        let packet_frames = u64::try_from(decoded.frames())
+            .map_err(|_| AudioPreparationError::ResourceLimitExceeded)?;
+        let packet_samples = decoded
+            .frames()
+            .checked_mul(channels)
+            .ok_or(AudioPreparationError::ResourceLimitExceeded)?;
+        let budget = match resource_budget.as_mut() {
+            Some(budget) => budget,
+            None => resource_budget.insert(DecodeResourceBudget::new(rate, channels)?),
+        };
+        budget.accept_packet(packet_frames, packet_samples)?;
+        source_frames = budget.source_frames;
+        let old_len = interleaved.len();
+        reserve_f32_capacity(&mut interleaved, packet_samples)?;
+        interleaved.resize(old_len + packet_samples, 0.0);
+        decoded.copy_to_slice_interleaved(&mut interleaved[old_len..]);
     }
 
-    if raw_samples.is_empty() {
-        return Err(AudioError::NoAudioData);
+    let source_sample_rate_hz =
+        source_rate.ok_or(AudioPreparationError::UnsupportedOrCorruptAudio)?;
+    let source_channels =
+        source_channels.ok_or(AudioPreparationError::UnsupportedOrCorruptAudio)?;
+    if source_frames == 0 {
+        return Err(AudioPreparationError::UnsupportedOrCorruptAudio);
     }
+    let mono = sanitize_and_downmix(&interleaved, source_channels)?;
+    let samples = resample_mono(&mono, source_sample_rate_hz)?;
+    let duration_ms = checked_ceil_ratio(source_frames, 1_000, u64::from(source_sample_rate_hz))?;
 
-    // Downmix to mono (arithmetic mean)
-    let mono_samples = downmix_to_mono(&raw_samples, channels as usize);
-
-    // Resample to 16 kHz
-    let resampled =
-        resample_to_target(&mono_samples, sample_rate as usize, TARGET_SAMPLE_RATE)
-            .map_err(AudioError::ResampleFailed)?;
-
-    // Clamp to [-1, 1]
-    let clamped: Vec<f32> = resampled.into_iter().map(|s| s.clamp(-1.0, 1.0)).collect();
-
-    // Duration from original frame count at original sample rate
-    let duration_ms = (total_frames * 1000) / sample_rate as u64;
-
-    Ok(DecodedAudio {
-        samples: clamped,
-        sample_rate: TARGET_SAMPLE_RATE as u32,
+    Ok(WorkingAudio {
+        samples,
+        sample_rate_hz: WORK_SAMPLE_RATE_HZ,
+        source_sample_rate_hz,
+        source_channels,
+        source_frames,
         duration_ms,
-        original_format,
     })
 }
 
-/// Convert a frame index at the given sample rate to milliseconds (floor).
-pub fn frame_index_to_ms(frame_index: usize, sample_rate: u32) -> u64 {
-    (frame_index as u64 * 1000) / sample_rate as u64
-}
-
-/// Convert milliseconds to the nearest frame index at the given sample rate.
-pub fn ms_to_frame_index(ms: u64, sample_rate: u32) -> usize {
-    ((ms as u64 * sample_rate as u64) / 1000) as usize
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Downmix interleaved multi-channel samples to mono via arithmetic mean.
-fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
-    if channels == 1 {
-        return interleaved.to_vec();
+pub(crate) fn sanitize_and_downmix(
+    interleaved: &[f32],
+    channels: usize,
+) -> Result<Vec<f32>, AudioPreparationError> {
+    if channels == 0 || interleaved.is_empty() || !interleaved.len().is_multiple_of(channels) {
+        return Err(AudioPreparationError::UnsupportedOrCorruptAudio);
     }
-
-    let num_frames = interleaved.len() / channels;
-    let mut mono = Vec::with_capacity(num_frames);
-
-    for frame_idx in 0..num_frames {
-        let start = frame_idx * channels;
-        let sum: f32 = interleaved[start..start + channels].iter().sum();
-        mono.push(sum / channels as f32);
+    let divisor = channels as f64;
+    let mut mono = Vec::new();
+    reserve_f32_capacity(&mut mono, interleaved.len() / channels)?;
+    for frame in interleaved.chunks_exact(channels) {
+        let sum = frame.iter().fold(0.0_f64, |sum, sample| {
+            sum + if sample.is_finite() {
+                f64::from(*sample)
+            } else {
+                0.0
+            }
+        });
+        mono.push((sum / divisor).clamp(-1.0, 1.0) as f32);
     }
-
-    mono
+    Ok(mono)
 }
 
-/// Resample f32 mono audio from `input_rate` to `output_rate` Hz.
-///
-/// Uses Rubato 5 `Fft` synchronous resampler with fixed input size.
-/// Resampler delay is compensated so the output timing aligns with the input.
-fn resample_to_target(
+pub(crate) fn resample_mono(
     samples: &[f32],
-    input_rate: usize,
-    output_rate: usize,
-) -> Result<Vec<f32>, String> {
-    if input_rate == output_rate {
-        return Ok(samples.to_vec());
+    source_rate_hz: u32,
+) -> Result<Vec<f32>, AudioPreparationError> {
+    if source_rate_hz == 0 {
+        return Err(AudioPreparationError::InvalidSampleRate);
     }
-
-    let chunk_size = RESAMPLER_CHUNK_SIZE;
-
+    if samples.is_empty() {
+        return Err(AudioPreparationError::UnsupportedOrCorruptAudio);
+    }
+    let expected_output_frames = resampled_frame_count(
+        u64::try_from(samples.len()).map_err(|_| AudioPreparationError::ResourceLimitExceeded)?,
+        source_rate_hz,
+    )?;
+    if source_rate_hz == WORK_SAMPLE_RATE_HZ {
+        return copy_f32_samples(samples);
+    }
+    let input = InterleavedOwned::new_from(copy_f32_samples(samples)?, 1, samples.len())
+        .map_err(|_| AudioPreparationError::ResampleFailed)?;
+    let chunk_size = samples.len().clamp(1, 1_024);
     let mut resampler = Fft::<f32>::new(
-        input_rate,
-        output_rate,
+        usize::try_from(source_rate_hz).map_err(|_| AudioPreparationError::ResampleFailed)?,
+        WORK_SAMPLE_RATE_HZ as usize,
         chunk_size,
-        1, // single channel
+        1,
         FixedSync::Input,
     )
-    .map_err(|e| format!("failed to create resampler: {e}"))?;
-
-    let mut output = Vec::with_capacity(
-        (samples.len() as f64 * output_rate as f64 / input_rate as f64).ceil() as usize,
-    );
-
-    let mut input_offset = 0;
-
-    while input_offset < samples.len() {
-        let remaining = samples.len() - input_offset;
-        let take = chunk_size.min(remaining);
-
-        let chunk: Vec<f32> = if take == chunk_size {
-            samples[input_offset..input_offset + take].to_vec()
+    .map_err(|_| AudioPreparationError::ResampleFailed)?;
+    let needed_output_frames = resampler.process_all_needed_output_len(samples.len());
+    let mut output_samples = Vec::new();
+    reserve_f32_capacity(&mut output_samples, needed_output_frames)?;
+    output_samples.resize(needed_output_frames, 0.0);
+    let mut output = InterleavedOwned::new_from(output_samples, 1, needed_output_frames)
+        .map_err(|_| AudioPreparationError::ResampleFailed)?;
+    let (_, produced) = resampler
+        .process_all_into_buffer(&input, &mut output, samples.len(), None)
+        .map_err(|_| AudioPreparationError::ResampleFailed)?;
+    if produced != expected_output_frames {
+        return Err(AudioPreparationError::ResampleFailed);
+    }
+    let mut output = output.take_data();
+    output.truncate(produced);
+    for sample in &mut output {
+        *sample = if sample.is_finite() {
+            sample.clamp(-1.0, 1.0)
         } else {
-            let mut padded = vec![0.0f32; chunk_size];
-            padded[..take].copy_from_slice(&samples[input_offset..input_offset + take]);
-            padded
+            0.0
         };
-
-        let chunk_len = chunk.len();
-        let input_buffer = InterleavedOwned::new_from(chunk, 1, chunk_len)
-            .map_err(|e| format!("failed to create input buffer: {e:?}"))?;
-
-        let result = resampler
-            .process(&input_buffer, None)
-            .map_err(|e| format!("resampling error: {e}"))?;
-
-        output.extend_from_slice(&result.take_data());
-        input_offset += take;
     }
-
-    // Flush the resampler's internal buffer
-    let flush_input = vec![0.0f32; chunk_size];
-    let flush_len = flush_input.len();
-    let flush_buffer = InterleavedOwned::new_from(flush_input, 1, flush_len)
-        .map_err(|e| format!("failed to create flush buffer: {e:?}"))?;
-
-    let flush_output = resampler
-        .process(&flush_buffer, None)
-        .map_err(|e| format!("resampling flush error: {e}"))?;
-
-    output.extend_from_slice(&flush_output.take_data());
-
-    // Compensate for resampler delay: skip startup ramp, keep tail
-    let delay = resampler.output_delay();
-    if delay > 0 && output.len() > delay {
-        output.drain(..delay);
-    }
-
-    // Trim trailing near-silence from padding/flush
-    while output.len() > delay
-        && output.last().map_or(false, |&s| s.abs() < 1e-7)
-    {
-        output.pop();
-    }
-
     Ok(output)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn frame_index_to_ms_basics() {
-        assert_eq!(frame_index_to_ms(0, 16_000), 0);
-        assert_eq!(frame_index_to_ms(16_000, 16_000), 1000);
-        assert_eq!(frame_index_to_ms(8_000, 16_000), 500);
+pub(crate) fn resampled_frame_count(
+    source_frames: u64,
+    source_rate_hz: u32,
+) -> Result<usize, AudioPreparationError> {
+    if source_rate_hz == 0 {
+        return Err(AudioPreparationError::InvalidSampleRate);
     }
-
-    #[test]
-    fn ms_to_frame_index_basics() {
-        assert_eq!(ms_to_frame_index(0, 16_000), 0);
-        assert_eq!(ms_to_frame_index(1000, 16_000), 16_000);
-        assert_eq!(ms_to_frame_index(500, 16_000), 8_000);
+    if source_frames > max_source_frames(source_rate_hz)? {
+        return Err(AudioPreparationError::ResourceLimitExceeded);
     }
-
-    #[test]
-    fn downmix_stereo_is_arithmetic_mean() {
-        let interleaved = vec![
-            1.0, 0.0,  // frame 0
-            0.5, 0.5,  // frame 1
-            -1.0, 0.0, // frame 2
-        ];
-        let mono = downmix_to_mono(&interleaved, 2);
-        assert_eq!(mono.len(), 3);
-        assert!((mono[0] - 0.5).abs() < 1e-6);
-        assert!((mono[1] - 0.5).abs() < 1e-6);
-        assert!((mono[2] - (-0.5)).abs() < 1e-6);
+    let output_frames = checked_ceil_ratio(
+        source_frames,
+        u64::from(WORK_SAMPLE_RATE_HZ),
+        u64::from(source_rate_hz),
+    )?;
+    let max_work_frames = u64::from(WORK_SAMPLE_RATE_HZ)
+        .checked_mul(MAX_DECODED_AUDIO_DURATION_SECONDS)
+        .ok_or(AudioPreparationError::ResourceLimitExceeded)?;
+    if output_frames > max_work_frames {
+        return Err(AudioPreparationError::ResourceLimitExceeded);
     }
+    usize::try_from(output_frames).map_err(|_| AudioPreparationError::ResourceLimitExceeded)
+}
 
-    #[test]
-    fn downmix_mono_is_identity() {
-        let interleaved = vec![0.5, -0.3, 0.8];
-        let mono = downmix_to_mono(&interleaved, 1);
-        assert_eq!(mono, interleaved);
-    }
+pub(crate) fn reserve_f32_capacity(
+    samples: &mut Vec<f32>,
+    additional: usize,
+) -> Result<(), AudioPreparationError> {
+    samples
+        .try_reserve(additional)
+        .map_err(|_| AudioPreparationError::AllocationFailed)
+}
 
-    #[test]
-    fn resample_passthrough() {
-        let samples: Vec<f32> = (0..1024).map(|i| (i as f32 * 0.01).sin()).collect();
-        let result = resample_to_target(&samples, 16_000, 16_000).unwrap();
-        assert_eq!(result.len(), samples.len());
+pub fn sample_range_to_millis(
+    range: SampleRange,
+    sample_rate_hz: u32,
+    total_frames: u64,
+) -> Result<MillisecondRange, AudioPreparationError> {
+    validate_range(range, total_frames)?;
+    if sample_rate_hz == 0 {
+        return Err(AudioPreparationError::InvalidSampleRate);
     }
+    let denominator = u64::from(sample_rate_hz);
+    let start_ms = range
+        .start
+        .checked_mul(1_000)
+        .ok_or(AudioPreparationError::ArithmeticOverflow)?
+        / denominator;
+    let end_ms = checked_ceil_ratio(range.end, 1_000, denominator)?;
+    if start_ms >= end_ms {
+        return Err(AudioPreparationError::InvalidRange);
+    }
+    Ok(MillisecondRange { start_ms, end_ms })
+}
 
-    #[test]
-    fn resample_downsample_length() {
-        let samples: Vec<f32> = (0..48_000).map(|i| (i as f32 * 0.001).sin()).collect();
-        let result = resample_to_target(&samples, 48_000, 16_000).unwrap();
-        let expected = samples.len() * 16_000 / 48_000;
-        let diff = (result.len() as i64 - expected as i64).unsigned_abs();
-        assert!(diff < 1000);
+pub fn work_range_to_original_frames(
+    range: SampleRange,
+    source_rate_hz: u32,
+    source_frames: u64,
+) -> Result<SampleRange, AudioPreparationError> {
+    if source_rate_hz == 0 {
+        return Err(AudioPreparationError::InvalidSampleRate);
     }
+    let source_rate = u64::from(source_rate_hz);
+    let work_rate = u64::from(WORK_SAMPLE_RATE_HZ);
+    let start = range
+        .start
+        .checked_mul(source_rate)
+        .ok_or(AudioPreparationError::ArithmeticOverflow)?
+        / work_rate;
+    let end = checked_ceil_ratio(range.end, source_rate, work_rate)?.min(source_frames);
+    let mapped = SampleRange::new(start, end)?;
+    validate_range(mapped, source_frames)?;
+    Ok(mapped)
+}
 
-    #[test]
-    fn decode_empty_errors() {
-        assert_eq!(decode_audio(&[]), Err(AudioError::EmptyInput));
+pub(crate) fn checked_sample_index(
+    index: u64,
+    sample_count: usize,
+) -> Result<usize, AudioPreparationError> {
+    let index = usize::try_from(index).map_err(|_| AudioPreparationError::IndexOutOfRange)?;
+    if index >= sample_count {
+        return Err(AudioPreparationError::IndexOutOfRange);
     }
+    Ok(index)
+}
 
-    #[test]
-    fn decode_garbage_errors() {
-        let result = decode_audio(&[0xDE, 0xAD, 0xBE, 0xEF]);
-        assert!(result.is_err());
+fn validate_range(range: SampleRange, total_frames: u64) -> Result<(), AudioPreparationError> {
+    if range.start >= range.end || range.end > total_frames {
+        return Err(AudioPreparationError::InvalidRange);
     }
+    Ok(())
+}
+
+fn checked_ceil_ratio(
+    value: u64,
+    multiplier: u64,
+    denominator: u64,
+) -> Result<u64, AudioPreparationError> {
+    if denominator == 0 {
+        return Err(AudioPreparationError::InvalidSampleRate);
+    }
+    let numerator = value
+        .checked_mul(multiplier)
+        .ok_or(AudioPreparationError::ArithmeticOverflow)?;
+    let adjustment = denominator
+        .checked_sub(1)
+        .ok_or(AudioPreparationError::ArithmeticOverflow)?;
+    numerator
+        .checked_add(adjustment)
+        .ok_or(AudioPreparationError::ArithmeticOverflow)
+        .map(|adjusted| adjusted / denominator)
+}
+
+fn max_source_frames(sample_rate_hz: u32) -> Result<u64, AudioPreparationError> {
+    if sample_rate_hz == 0 {
+        return Err(AudioPreparationError::InvalidSampleRate);
+    }
+    u64::from(sample_rate_hz)
+        .checked_mul(MAX_DECODED_AUDIO_DURATION_SECONDS)
+        .ok_or(AudioPreparationError::ResourceLimitExceeded)
+}
+
+fn checked_interleaved_samples(
+    frames: u64,
+    channels: usize,
+) -> Result<usize, AudioPreparationError> {
+    let channels =
+        u64::try_from(channels).map_err(|_| AudioPreparationError::ResourceLimitExceeded)?;
+    let samples = frames
+        .checked_mul(channels)
+        .ok_or(AudioPreparationError::ResourceLimitExceeded)?;
+    usize::try_from(samples).map_err(|_| AudioPreparationError::ResourceLimitExceeded)
+}
+
+fn copy_f32_samples(samples: &[f32]) -> Result<Vec<f32>, AudioPreparationError> {
+    let mut copied = Vec::new();
+    reserve_f32_capacity(&mut copied, samples.len())?;
+    copied.extend_from_slice(samples);
+    Ok(copied)
 }

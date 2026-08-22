@@ -9,6 +9,7 @@
 # Local LifeSub data
 .lifesub/
 data/
+!src/data/
 recordings/
 
 # Design scratch space
@@ -30,19 +31,14 @@ coverage/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
-test-results/
-.playwright-cli/
-target/
-src-tauri/gen/schemas/
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/gen/
+docs/design/lifesub-logo-concepts/
 
 # Logs
 *.log
 
-
-# Git worktrees
-.worktrees/
-
-# Agentic Engineering: MCP configs may contain API keys
-.claude/mcp-servers.json
-.sources/.converted/
-.codex/config.toml
+# Test artifacts
+output/
+test-results/

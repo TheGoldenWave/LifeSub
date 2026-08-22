@@ -34,7 +34,7 @@ source: codex-safe-worktree-merge
 
 - 当前安装包来源为本 worktree 当前 dirty tree，不是 `main`；bundle 版本已统一为 `0.2.1`。
 - 安装二进制 SHA-256：`6b8b7e17f4f509a95434560141b05793f31503530405dc242e8b1b7e620d8f8c`；签名验证通过，Finder 正常启动且无新崩溃。
-- 本 worktree 是当前 UI/Catalog/安全收口最完整的可运行基线，但仍有大量未提交改动，需要与 `main` 明确集成后才能形成唯一发布分支。
+- 这是 2026-08-21 审计时的历史状态；外部 worktree 的集成已在 2026-08-22 完成，现在唯一发布源为主路径 `main`。
 - `main` 的“15 Task 完成”报告不能作为安装包功能证据；其生产命令仍有 stub 且关键测试模块被注释。
 - 实时麦克风/系统音频采集未完成；当前没有 ScreenCaptureKit/AVAudioEngine production adapter，界面“未接通”提示是正确的 fail-closed 状态。
 - native ASR production executor 仍未接通；当前桌面 worker 使用 `FailClosedEngine`。

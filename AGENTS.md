@@ -19,6 +19,7 @@
 
 - **🧠 记忆与经验库** → `docs/context/`
   - 遇到未知错误或架构决策前，**必须**先查阅 `docs/context/INDEX.md` 和 `docs/context/project/experience/`。
+  - 研究长期采集、跨设备、视觉、硬件或 Evidence 上层流转前，先读 `docs/product-open-questions.zh-CN.md`，不得把开放问题提前当作当前范围。
 - **🧑‍💼 业务与需求 (PM 视窗)** → `docs/prd/{feature_id}/`
   - 开发新需求前，必须阅读对应的 `PRD.md`（可通过双击 `预览PRD-macOS.command` / `预览PRD-Windows.bat` 启动双视窗预览）。
   - **文档规范：** PRD 必须采用 Markdown 格式。业务流程请使用 ` ```mermaid `，时序图/架构图请优先使用 ` ```plantuml `。

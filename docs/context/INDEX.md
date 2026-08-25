@@ -11,6 +11,7 @@
 | 日期 | 来源 | 摘要 | 详情 |
 |------|------|------|------|
 | 2026-08-16 | lifesub-real-asr-v0.2 | ASR 证据链优势明显，但 V0.2 范围过重，建议拆期 | [综合分析](wiki/syntheses/asr-open-source-comparison-and-scope-review.md) |
+| 2026-08-25 | personal-ai-open-questions | 音频覆盖率、全天候采集、跨设备、Review、视觉硬件与隐私待验证 | [开放问题](../product-open-questions.zh-CN.md) |
 | <!-- 示例: 2025-04-10 --> | <!-- 1.0.0-用户登录-202504 --> | <!-- 选用 PostgreSQL 而非 MongoDB，因为需要事务一致性 --> | <!-- docs/context/project/experience/db-choice.md --> |
 
 ## 🐛 Bug 模式 (Bug Patterns)

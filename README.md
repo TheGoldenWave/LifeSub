@@ -103,6 +103,7 @@ Malow 可以作为 LifeSub ASR 结果的主要处理层，但不是必经层：�
 - [Agent 插件与工具](docs/integrations.md)
 - [隐私、权限与 GitHub 同步](docs/privacy-and-sync.md)
 - [市场与技术参考](docs/research.md)
+- [产品开放问题与验证议程](docs/product-open-questions.zh-CN.md)
 - [阶段路线图](docs/roadmap.md)
 - [决策记录](docs/decisions.md)
 - [后端模块设计 (Task 13.5)](docs/superpowers/plans/2026-08-18-lifesub-backend-tasklist.md)

@@ -2,15 +2,25 @@
 
 ## 一句话定位
 
-LifeSub（旁白）是一个本地优先的长时音频与 ASR 证据管理系统：可靠记录和分片个人声音资料，将 ASR 结果保存为可修订、可定位、可导出的 Markdown 与 Evidence，并交由 Malow 和 GoldenWave 完成后续理解与治理。
+LifeSub（旁白）当前是一个本地优先的长时音频与 ASR 证据管理系统：可靠记录和分片个人声音资料，将 ASR 结果保存为可修订、可定位、可导出的 Markdown 与 Evidence，并交由 Malow 和 GoldenWave 完成后续理解与治理。长期上，LifeSub 演进为跨设备、跨模态的全领域个人 Evidence 基础设施。
 
 ## 核心问题
 
-LifeSub 只回答：
+LifeSub 当前音频楔子只回答：
 
 > **谁在什么时候说了什么，原始音频和对应文本在哪里？**
 
 “这些内容对当前项目意味着什么”由 Malow 回答；“哪些内容值得成为长期事实、知识或人格上下文”由 GoldenWave 治理。
+
+长期的全领域 Evidence Fabric 进一步回答：人经历了什么、设备感知到了什么、外部系统记录了什么，以及对应原件、来源和派生版本在哪里。
+
+## 当前楔子与长期方向
+
+- **当前实现楔子**：macOS 长时音频、声纹、ASR、Transcript Revision、Catalog 和 Evidence Ref。
+- **长期产品方向**：统一接入声音、图片、视频、屏幕、智能硬件、健康传感器、环境传感器和数字活动等 Evidence。
+- **不变边界**：LifeSub 记录 Observation 与可追溯 Derived Evidence；Malow 负责 Decision / Action；GoldenWave 负责正式长期 Memory。
+
+长期架构和演进 Gate 见 `docs/full-spectrum-personal-evidence-strategy.zh-CN.md`。该方向不改变 V0.1/V0.2 的音频与 ASR 交付范围。
 
 ## 背景
 
@@ -33,7 +43,7 @@ LifeSub 最终由四部分组成：
 - 管理界面：时间线、录音状态、转写修订、导出、存储、隐私和 Provider 设置。
 - Evidence Contract：向 Malow、Codex 和其他获得授权的消费者提供稳定引用与证据解析。
 
-LifeSub 不建设平行的个人记忆、Project 或知识治理体系。它是上层系统可以信赖的声音资料与证据底座。
+LifeSub 不建设平行的个人记忆、Project 或知识治理体系。当前它是上层系统可以信赖的声音资料与证据底座；长期由 Source Adapter 将多模态与传感器来源接入同一个 Evidence Core。
 
 ## V0.1 目标
 

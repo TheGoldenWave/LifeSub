@@ -87,3 +87,21 @@ LifeSub 可以保存“测到了什么”和“如何派生”，但不负责医
 6. 每种新来源独立通过隐私、保留、删除、来源真实性和下游撤回 Gate。
 
 新来源接入不得以“模型能理解”为完成标准，必须先证明 Evidence Contract、原件可追溯和权限可预测。
+
+## 8. Desktop Host 与媒体访问实现
+
+参考 Boujoy Harness 的本地 Gateway、原生宿主和媒体预览实现，LifeSub Desktop 采用宿主拥有进程生命周期、Core 拥有 Evidence 语义的结构：
+
+```text
+LifeSub Desktop Host
+  → Capture / ASR / Gateway Process Supervisor
+  → Health / Restart / Shutdown
+  → LifeSub Core / Evidence Contract
+```
+
+- Desktop Host 统一启动 Capture Helper、ASR Worker 和本地 Gateway，使用健康检查确认就绪；
+- Worker 记录 owner PID 与运行身份，宿主退出后自动清理遗留进程；
+- Agent 发起的重启请求先返回受理结果，再由宿主执行受控重启并重新检查健康状态；
+- 图片、音频和视频访问通过 Evidence Ref 解析到允许范围，视频支持 HTTP Range，所有路径执行根目录、类型和权限校验；
+- 便携与正式安装共用路径归一化和 `doctor` 检查，明确运行时、模型、存储目录和权限状态；
+- 对启动、重连、重启、Range 读取、路径逃逸和父进程异常退出建立无模型依赖的隔离回归。

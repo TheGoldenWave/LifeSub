@@ -14,7 +14,8 @@ source: codex-v0.2.2-development
 - 新候选 DMG checksum、只读挂载、包内和外部 .app 三个二进制 byte equality、arm64、版本 0.2.2、nested strict signature 和 audio-input entitlement 均通过。签名为 ad hoc，缺少 notarization 身份，不作为对外分发包。
 - 新候选 Gate 在同一 `c49bf64c…` 身份下两次完成 SenseVoice/Whisper 固定 fixture 真实推理，RTF 均小于 1；报告见 `output/asr-v0.2/0.2.2-gate-run1.json` 与 `0.2.2-gate-run2.json`，量化边界见 [性能基线](../../../performance/lifesub-0.2.2-baseline.md)。高文件数诊断完整快照 4000 文件冷/热约 21ms。
 - 旧 `verify-desktop-asr.sh dmg` 会误取旧 target 并调用未接线的 `--acceptance-scenario packaged-smoke`，实际启动 GUI 且无法产生有效 smoke。已按 RED/GREEN 改为精确版本 DMG 的只读静态验证；真实新包与 4 种错误/正确夹具均通过。旧 `target` 模式现在显式 fail closed，要求使用 real-model Gate 和 native reports。
-- **未发布**：0.2.2 仍缺候选身份下 20 个原生采集场景及真实启动/首帧/取消计时，需要权限切换、外接输入和真实睡眠唤醒配合；安装版仍为 0.2.1。不得把旧报告改写为新候选，也不得提前覆盖 `/Applications/LifeSub.app`。
+- 在隔离 HOME 下新增可复测的 macOS 窗口启动基线，最终 App SHA 对应的 3 次启动至可见窗口为 `488.704 / 314.803 / 303.810ms`，每次均有独立数据目录和可见窗口；这是窗口出现时间，不声称 UI 已可交互。
+- **未发布**：0.2.2 仍缺候选身份下 20 个原生采集场景及真实首帧/取消计时，需要权限切换、外接输入和真实睡眠唤醒配合；安装版仍为 0.2.1。不得把旧报告改写为新候选，也不得提前覆盖 `/Applications/LifeSub.app`。
 
 ## 2026-10-13 启动 0.2.2 稳定化
 

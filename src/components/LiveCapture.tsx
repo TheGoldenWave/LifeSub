@@ -929,7 +929,7 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
             {segments.map((seg) => (
               <article key={seg.id} className="live-segment">
                 <div className="live-segment__header">
-                  {editingSpeakerId === seg.id ? (
+                  {!desktopRuntime && editingSpeakerId === seg.id ? (
                     <div className="live-segment__speaker-editor">
                       <input
                         aria-label="说话人名称"
@@ -940,7 +940,7 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
                       <button className="text-button" disabled={!speakerDraft.trim()} onClick={() => renameSpeaker(seg.id, speakerDraft.trim())}>确认</button>
                       <button className="text-button" onClick={() => { setEditingSpeakerId(null); setSpeakerDraft('') }}>取消</button>
                     </div>
-                  ) : seg.speaker.source === 'unknown' || seg.speaker.source === 'dictionary' ? (
+                  ) : !desktopRuntime && (seg.speaker.source === 'unknown' || seg.speaker.source === 'dictionary') ? (
                     <button
                       className={`live-segment__speaker live-segment__speaker--${seg.speaker.source}`}
                       title={seg.speaker.source === 'unknown' ? '点击重命名说话人' : '来自词典（点击确认）'}
@@ -954,7 +954,7 @@ export function LiveCapture({ onNotice }: LiveCaptureProps) {
                   ) : (
                     <span
                       className={`live-segment__speaker live-segment__speaker--${seg.speaker.source}`}
-                      title={seg.speaker.source === 'voiceprint' ? '来自声纹库' : '手动标注'}
+                      title={desktopRuntime ? '录音来源标注；说话人识别尚未接入' : seg.speaker.source === 'voiceprint' ? '来自声纹库' : '手动标注'}
                     >
                       {seg.speaker.label}
                     </span>

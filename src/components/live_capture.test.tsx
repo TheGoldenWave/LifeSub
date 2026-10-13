@@ -980,6 +980,25 @@ describe('LiveCapture safety flows', () => {
     expect(screen.queryByRole('button', { name: '查看原始' })).not.toBeInTheDocument()
   })
 
+  it('keeps source labels read-only in desktop until speaker edits can be persisted', async () => {
+    const { LiveCapture } = await import('./LiveCapture')
+    const user = userEvent.setup()
+    render(<LiveCapture onNotice={vi.fn()} />)
+    await user.click(screen.getByRole('button', { name: '开始记录' }))
+    emitEvent('asr-publication-committed', {
+      revision_id: 'revision-speaker', session_id: 'session-1', revision_number: 1,
+      provider: 'sense_voice', created_at: '2026-08-25T06:00:00Z',
+      segments: [{
+        segment_id: 'seg-speaker', chunk_id: 'chunk-1', capture_source_id: 'source-mic',
+        start_ms: 1200, end_ms: 2200, source: 'microphone', text: '原始内容',
+      }],
+    })
+
+    expect(await screen.findByText('原始内容')).toBeInTheDocument()
+    expect(screen.queryByTitle('点击重命名说话人')).not.toBeInTheDocument()
+    expect(document.querySelector('.live-segment__speaker')?.tagName).toBe('SPAN')
+  })
+
   it('rejects fallback text instead of presenting it as a successful local LLM result', async () => {
     const onNotice = vi.fn()
     llmPolish.mockResolvedValue({

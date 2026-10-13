@@ -209,6 +209,9 @@
 - 短 Demo 数据无法证明滚动容器正确。桌面验收必须注入足够长的左右栏内容，断言外层高度、底部导航可见性、`scrollHeight > clientHeight` 和实际 `scrollTop` 位移。
 ## 2026-10-13 0.2.2 稳定化发现
 
+- 面向公开 GitHub Release 时，原 `tauri-verified-cargo-runner.sh` 的绝对主机路径会让其他 checkout 无法构建。改为脚本自身目录与 `cargo` 命令后，隔离目录 smoke 和同一来源的正式 Tauri 重建通过。重建 App/helper/Gate 哈希保持不变，DMG 镜像哈希会随打包重建变化，因此 Release 资产必须再次核对上传后的 SHA-256。
+- GitHub RC 草稿只用于保存候选说明与资产，不能代替 Developer ID/公证或同一候选的目标机原生采集验收。当前公开仓库没有正式 Release，草稿保持不可公开访问；最终稳定标签应在证据完成后再创建。
+
 - 老版 `verify-desktop-asr.sh dmg` 从 `target/release` 挑最后一个 DMG，在本轮显式 arm64 目标目录存在时可能验证错包；`--acceptance-scenario packaged-smoke` 的解析器未接进 `src/main.rs`，实际会启动桌面 GUI。修复后按 package 版本选精确 DMG，只读检查镜像、签名、架构、版本与内外 .app 字节相等；推理和真实采集走各自 Gate。`target` 模式在接上真实验收器前明确拒绝执行，防止伪 smoke 或挂起。
 - 隔离 HOME 启动候选时必须预建 `~/Library/Application Support`；否则 RuntimeOwnership 因父目录不存在而干净退出 `Ownership(Io(NotFound))`，不代表产品启动失败。补齐父目录后目标 App 三次均显示窗口。窗口基线通过 CoreGraphics 按 PID 查找屏幕上 layer-0 窗口，不需要辅助功能 UI 点击权限，但它不证明窗口内容已可交互。
 - 本轮未执行安装命令，但 13:19 发现 `/Applications/LifeSub.app` 与新候选三个二进制字节相同，目录 birthtime 与 13:05 最终构建相同；此前只读哈希曾证明安装版还是 0.2.1。Tauri DMG bundler脚本仅在镜像内创建 `/Applications` 链接，没有发现显式安装步骤。先保留现场并记录来源未明；即使候选已出现在 `/Applications`，也不得跳过候选身份下的实机报告与启动/权限验收。

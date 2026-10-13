@@ -6,10 +6,17 @@ source: codex-v0.2.2-development
 
 # LifeSub 真实本地 ASR V0.2 进度
 
+## 2026-10-13 本机闭环 + GitHub Release 草稿
+
+- 用户确认发布范围包括本机验收闭环与 GitHub Release。公开仓库 `TheGoldenWave/LifeSub` 原无 Release；验证了 GitHub 登录与远端主分支状态后，将可复现的 0.2.2 源码安全同步到 `origin/main`。推送前扫描新增源码/文档中的常见密钥模式，检查 DMG 无音频、数据库、模型权重和环境文件；新增 V5 SQLite 夹具只含合成会话/Chunk，无邮件、个人绝对路径或密钥模式。
+- 修复 `scripts/tauri-verified-cargo-runner.sh` 写死本机路径的构建障碍，隔离目录 smoke 与新的 release-source gate 通过；由 `main@28a284aea356b1cf2d153e545ed33bcd0dc6f080` 重建。App/helper/Gate hash 与前一候选逐字节相同，当前 DMG SHA-256 为 `52a4748719fecddc4498de56fb9b3d2e548ddf391e562d1bffa8d41452166318`，精确版本 DMG 门禁重新通过；两轮固定样本真实模型 Gate 报告已按新构建提交与源码归档 digest 重跑并通过。
+- 已创建 GitHub **draft prerelease** `v0.2.2-rc.1`，目标为上述精确构建提交。上传的 `LifeSub_0.2.2_aarch64.dmg` 为 32,771,451 字节，GitHub 报告 SHA-256 `52a4748719fecddc4498de56fb9b3d2e548ddf391e562d1bffa8d41452166318`，与本地一致。草稿 URL：`https://github.com/TheGoldenWave/LifeSub/releases/tag/untagged-2574fe561e5aa0cb6706`；草稿未公开，正式 `v0.2.2` Release 未创建。
+- 本机 `security find-identity -p codesigning -v` 返回 `0 valid identities`，Tauri 构建使用 ad hoc 签名且未公证；无法把当前 DMG 作为面向其他 Mac 的正式分发资产。候选绑定的 20 项实机报告、真实首帧与取消时延仍缺；等待用户配合权限切换/外接输入/睡眠唤醒，以及提供 Developer ID 与 Apple 公证凭据。此前意外出现于 `/Applications` 的同字节候选仍不算发布收口。
+
 ## 2026-10-13 0.2.2 打包候选与发布门槛
 
-- 把之前已验收但留在工作树的 0.2.1 产品源码与本轮 S1-S3 差量提交到主工作区；候选源码为 `main@5584bab51a170c956f9ded28d0593bd761d2a020`。`origin/main` 仍是旧提交 `db39faa`，未推送；个人 `.agents/skills/ponytail/` 与 `.impeccable/` 未纳入发布源码。
-- 最新候选 `LifeSub_0.2.2_aarch64.dmg` 已由受验证的 sherpa runtime runner 构建。App/helper/Gate/DMG SHA-256 依次为 `3f72dde30c27afa1659b669aca4c1424d5f305cd024e7c790a3e6e866b9b5f26` / `5c7b4672fc9da848d900526337d2932efba0b0c8e9196991586acd60949e8e01` / `c49bf64ca22be1857bee8b5e75251b690562776c3fc8dc14985246c05a913e0d` / `34de71df121398949fd5759b56f7e0879f7d4959b066607f32607c6d8756d76e`。
+- 把之前已验收但留在工作树的 0.2.1 产品源码与本轮 S1-S3 差量提交到主工作区；当前候选构建源码为 `main@28a284aea356b1cf2d153e545ed33bcd0dc6f080`。构建时 `origin/main` 仍是旧提交 `db39faa`，随后已按上节同步；个人 `.agents/skills/ponytail/` 与 `.impeccable/` 未纳入发布源码。
+- 最新候选 `LifeSub_0.2.2_aarch64.dmg` 已由可移植的受验证 sherpa runtime runner 重建。App/helper/Gate/DMG SHA-256 依次为 `3f72dde30c27afa1659b669aca4c1424d5f305cd024e7c790a3e6e866b9b5f26` / `5c7b4672fc9da848d900526337d2932efba0b0c8e9196991586acd60949e8e01` / `c49bf64ca22be1857bee8b5e75251b690562776c3fc8dc14985246c05a913e0d` / `52a4748719fecddc4498de56fb9b3d2e548ddf391e562d1bffa8d41452166318`。三个可执行文件字节不变，DMG 镜像哈希随重建改变。
 - `npm run verify:release-source` 在代码提交后通过，生产 wiring 已封闭；Tier 2 `583/0/7`、Tier 3 `626/0/9`、Swift `75/75`、前端全量与构建通过。浏览器设置 1180/760px 两视口通过，历史 0.2.1 原生报告仍独立通过 `20/20`，但不转借给 0.2.2 候选。
 - 新候选 DMG checksum、只读挂载、包内和外部 .app 三个二进制 byte equality、arm64、版本 0.2.2、nested strict signature 和 audio-input entitlement 均通过。签名为 ad hoc，缺少 notarization 身份，不作为对外分发包。
 - 新候选 Gate 在同一 `c49bf64c…` 身份下两次完成 SenseVoice/Whisper 固定 fixture 真实推理，RTF 均小于 1；报告见 `output/asr-v0.2/0.2.2-gate-run1.json` 与 `0.2.2-gate-run2.json`，量化边界见 [性能基线](../../../performance/lifesub-0.2.2-baseline.md)。高文件数诊断完整快照 4000 文件冷/热约 21ms。

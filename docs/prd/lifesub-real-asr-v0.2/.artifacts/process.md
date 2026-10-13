@@ -6,6 +6,16 @@ source: codex-v0.2.2-development
 
 # LifeSub 真实本地 ASR V0.2 进度
 
+## 2026-10-13 0.2.2 打包候选与发布门槛
+
+- 把之前已验收但留在工作树的 0.2.1 产品源码与本轮 S1-S3 差量提交到主工作区；候选源码为 `main@5584bab51a170c956f9ded28d0593bd761d2a020`。`origin/main` 仍是旧提交 `db39faa`，未推送；个人 `.agents/skills/ponytail/` 与 `.impeccable/` 未纳入发布源码。
+- 最新候选 `LifeSub_0.2.2_aarch64.dmg` 已由受验证的 sherpa runtime runner 构建。App/helper/Gate/DMG SHA-256 依次为 `3f72dde30c27afa1659b669aca4c1424d5f305cd024e7c790a3e6e866b9b5f26` / `5c7b4672fc9da848d900526337d2932efba0b0c8e9196991586acd60949e8e01` / `c49bf64ca22be1857bee8b5e75251b690562776c3fc8dc14985246c05a913e0d` / `34de71df121398949fd5759b56f7e0879f7d4959b066607f32607c6d8756d76e`。
+- `npm run verify:release-source` 在代码提交后通过，生产 wiring 已封闭；Tier 2 `583/0/7`、Tier 3 `626/0/9`、Swift `75/75`、前端全量与构建通过。浏览器设置 1180/760px 两视口通过，历史 0.2.1 原生报告仍独立通过 `20/20`，但不转借给 0.2.2 候选。
+- 新候选 DMG checksum、只读挂载、包内和外部 .app 三个二进制 byte equality、arm64、版本 0.2.2、nested strict signature 和 audio-input entitlement 均通过。签名为 ad hoc，缺少 notarization 身份，不作为对外分发包。
+- 新候选 Gate 在同一 `c49bf64c…` 身份下两次完成 SenseVoice/Whisper 固定 fixture 真实推理，RTF 均小于 1；报告见 `output/asr-v0.2/0.2.2-gate-run1.json` 与 `0.2.2-gate-run2.json`，量化边界见 [性能基线](../../../performance/lifesub-0.2.2-baseline.md)。高文件数诊断完整快照 4000 文件冷/热约 21ms。
+- 旧 `verify-desktop-asr.sh dmg` 会误取旧 target 并调用未接线的 `--acceptance-scenario packaged-smoke`，实际启动 GUI 且无法产生有效 smoke。已按 RED/GREEN 改为精确版本 DMG 的只读静态验证；真实新包与 4 种错误/正确夹具均通过。旧 `target` 模式现在显式 fail closed，要求使用 real-model Gate 和 native reports。
+- **未发布**：0.2.2 仍缺候选身份下 20 个原生采集场景及真实启动/首帧/取消计时，需要权限切换、外接输入和真实睡眠唤醒配合；安装版仍为 0.2.1。不得把旧报告改写为新候选，也不得提前覆盖 `/Applications/LifeSub.app`。
+
 ## 2026-10-13 启动 0.2.2 稳定化
 
 - 用户要求继续开发并发布当前版本；按既定路线启动 0.2.2 S1-S4，延后 Task 6、9-16。唯一工作区仍为 main，保留先前 0.2.1 未提交产品源码与全部原有文件。

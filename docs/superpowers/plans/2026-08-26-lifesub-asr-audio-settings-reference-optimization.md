@@ -438,10 +438,10 @@ Treat `0.2.2` as complete when the four bounded tasks below land together and no
 - Modify: `src/settings.css`
 - Modify: `src/styles.css`
 
-- [ ] Reorder the settings surface into `Capture`, `ASR & Models`, and `Diagnostics`.
-- [ ] Add compact readiness summaries sourced only from existing capability/diagnostic DTOs.
-- [ ] Keep unsupported controls hidden or read-only; do not add new persisted settings.
-- [ ] Verify with focused UI tests and desktop plus 760px screenshots.
+- [x] Reorder the settings surface into `Capture`, `ASR & Models`, and `Diagnostics`.
+- [x] Add compact readiness summaries sourced only from existing capability/diagnostic DTOs.
+- [x] Keep unsupported controls hidden or read-only; do not add new persisted settings.
+- [x] Verify with focused UI tests and 1180px desktop plus 760px browser screenshots.
 
 ### Task S2: Existing State Clarity For Probe, Recovery, Model, And Job
 
@@ -459,11 +459,11 @@ Treat `0.2.2` as complete when the four bounded tasks below land together and no
 - Modify: `src/components/ModelManager.test.tsx`
 - Modify: `src/components/live_capture.test.tsx`
 
-- [ ] Show probe age, transport/readiness explanation, and an explicit re-test affordance using the existing probe snapshot.
-- [ ] Reword same-UID recovery states from raw lifecycle language into user-actionable status text without inventing new states.
-- [ ] Show model operation progression with clearer `downloaded` / `verified` / `installed` / `runtime-qualified` wording.
-- [ ] Surface `queued` / `preparing` / `transcribing` / `publishing` only where those states are already durable.
-- [ ] Do not add live preview, hot switching, provider fusion, or new helper events.
+- [x] Show probe age, transport/readiness explanation, and an explicit re-test affordance using the existing probe snapshot.
+- [ ] Reword same-UID recovery states from raw lifecycle language into user-actionable status text without inventing new states. These states are internal to the capture coordinator and have no frontend-readable fact; this item needs a separate contract decision outside the no-new-helper-event cap.
+- [x] Show model operation progression with clearer `downloaded` / `verified` / `installed` / `runtime-qualified` wording.
+- [x] Surface `queued` / `preparing` / `transcribing` / `publishing` only where those states are already durable. `publishing` is not durable and is not shown.
+- [x] Do not add live preview, hot switching, provider fusion, or new helper events.
 
 ### Task S3: Diagnostics Operator Affordances Over Existing Facts
 
@@ -479,10 +479,10 @@ Treat `0.2.2` as complete when the four bounded tasks below land together and no
 - Modify: `src-tauri/src/diagnostics.rs`
 - Modify: `src-tauri/src/diagnostics_test.rs`
 
-- [ ] Make stable error codes, candidate hashes, selected-device facts, and anchored data paths easy to copy.
-- [ ] Add bounded open/copy/re-test actions only when they operate on already-anchored paths or existing commands.
-- [ ] If recent-attempt history is shown, derive it from current stable errors or in-memory facts only; do not add new storage.
-- [ ] Keep exports redacted; do not add raw logs, transcript bodies, model install absolute paths, or telemetry streaming.
+- [x] Make stable error codes, candidate hashes, selected-device facts, and anchored data paths easy to copy.
+- [x] Add bounded open/copy/re-test actions only when they operate on already-anchored paths or existing commands. Copy and exact-UID re-test are shipped; Finder open is omitted because a snapshot path is not a live anchor.
+- [x] If recent-attempt history is shown, derive it from current stable errors or in-memory facts only; do not add new storage. No history is shown.
+- [x] Keep exports redacted; do not add raw logs, transcript bodies, model install absolute paths, or telemetry streaming.
 
 ### Task S4: Baseline Report Pack For The Proven Local Path
 
@@ -498,9 +498,9 @@ Treat `0.2.2` as complete when the four bounded tasks below land together and no
 
 - [ ] Freeze fixture and target-machine measurement commands for startup, first-frame, packaged RTF, peak RSS, and cancel settle latency.
 - [ ] Measure diagnostics refresh with many Chunk/model files and compare cold versus warm model load on the same frozen machine/build. Record failures, incomplete measurements, and elapsed time explicitly; open a separate bounded-scan or process-isolation design only if the evidence warrants it.
-- [ ] Save the baseline as reports and notes, not as new runtime state or new release-marker semantics.
-- [ ] Only open implementation work when the measured result reveals regression in an already-approved contract.
-- [ ] Do not start batch decode, warm cache, codec migration, Qwen streaming, or new acceptance-matrix categories from this task.
+- [x] Save the available baseline as reports and notes, not as new runtime state or new release-marker semantics; missing target-machine measurements remain explicitly open.
+- [x] Only open implementation work when the measured result reveals regression in an already-approved contract.
+- [x] Do not start batch decode, warm cache, codec migration, Qwen streaming, or new acceptance-matrix categories from this task.
 
 #### 0.2.2 exclusion gate
 

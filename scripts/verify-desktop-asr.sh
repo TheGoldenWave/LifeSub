@@ -5,10 +5,10 @@
 #   scripts/verify-desktop-asr.sh [target|dmg|native-reports <dir>|--verify-existing]
 #
 # Modes:
-#   target       Build the app and run acceptance scenarios against the
-#                development binary with an isolated HOME.
-#   dmg          Locate the produced DMG, mount it, verify the contained
-#                .app signature, run packaged-smoke, then detach.
+#   target       Disabled until the old acceptance-scenario CLI is replaced
+#                by a real production-wired target-machine harness.
+#   dmg          Verify the exact versioned DMG, mounted app signature,
+#                architecture, and byte equality with the built app.
 #   native-reports <dir>  Validate structured native capture reports.
 #   --verify-existing  Read-only: validate committed report JSON without
 #                      executing models or rewriting results.
@@ -243,72 +243,37 @@ run_target_scenarios() {
 run_dmg_verification() {
   green "=== verify-desktop-asr.sh dmg ==="
 
-  local dmg_path
-  dmg_path="$(find "$PROJECT_DIR/src-tauri/target/release/bundle/dmg" -name '*.dmg' 2>/dev/null | sort | tail -1)"
+  local version bundle_root dmg_path source_bundle app_bundle actual_version
+  version="$(node -e 'const fs=require("fs"); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).version)' "$PROJECT_DIR/package.json")"
+  bundle_root="$PROJECT_DIR/src-tauri/target/aarch64-apple-darwin/release/bundle"
+  dmg_path="$bundle_root/dmg/LifeSub_${version}_aarch64.dmg"
+  source_bundle="$bundle_root/macos/LifeSub.app"
+  [ -f "$dmg_path" ] || die "exact versioned DMG missing: $dmg_path"
+  [ -d "$source_bundle" ] || die "matching built app missing: $source_bundle"
 
-  if [ -z "$dmg_path" ]; then
-    die "no DMG found in target/release/bundle/dmg/"
-  fi
+  hdiutil verify "$dmg_path" || die "DMG checksum verification failed"
+  LIFESUB_DMG_VERIFY_MOUNT="$(mktemp -d)"
+  trap 'hdiutil detach "$LIFESUB_DMG_VERIFY_MOUNT" >/dev/null 2>&1 || true; rmdir "$LIFESUB_DMG_VERIFY_MOUNT" 2>/dev/null || true' EXIT
+  hdiutil attach -readonly -nobrowse -mountpoint "$LIFESUB_DMG_VERIFY_MOUNT" "$dmg_path" || die "failed to mount DMG"
+  app_bundle="$LIFESUB_DMG_VERIFY_MOUNT/LifeSub.app"
+  [ -d "$app_bundle" ] || die "LifeSub.app missing from DMG"
+  codesign --verify --deep --strict "$app_bundle" || die "app bundle signature is invalid"
+  actual_version="$(plutil -extract CFBundleShortVersionString raw "$app_bundle/Contents/Info.plist")"
+  [ "$actual_version" = "$version" ] || die "bundle version mismatch: $actual_version"
 
-  green "1. found DMG: $dmg_path"
-
-  # Mount the DMG
-  green "2. mounting DMG..."
-  local mount_point
-  mount_point="$(mktemp -d)"
-  hdiutil attach -readonly -mountpoint "$mount_point" "$dmg_path" 2>&1 || {
-    rm -rf "$mount_point"
-    die "failed to mount DMG"
-  }
-  trap "hdiutil detach '$mount_point' 2>/dev/null; rm -rf '$mount_point'" EXIT
-  green "   mounted at $mount_point"
-
-  # Find the .app bundle
-  local app_bundle
-  app_bundle="$(find "$mount_point" -name '*.app' -maxdepth 2 -type d | head -1)"
-  if [ -z "$app_bundle" ]; then
-    die "no .app bundle found in DMG"
-  fi
-  green "3. app bundle: $app_bundle"
-
-  # Verify the .app signature
-  green "4. verifying code signature..."
-  codesign --verify --deep --strict --verbose=2 "$app_bundle" 2>&1 || \
-    die "app bundle signature is invalid"
-  green "   signature: VALID"
-
-  # Run packaged-smoke from the mounted DMG
-  green "5. running packaged-smoke from DMG..."
-  local isolated_home
-  isolated_home="$(mktemp -d)"
-  trap "hdiutil detach '$mount_point' 2>/dev/null; rm -rf '$isolated_home' '$mount_point'" EXIT
-
-  local acceptance_dir="$isolated_home/acceptance"
-  mkdir -p "$acceptance_dir" "$isolated_home/Library/Application Support" "$REPORT_DIR"
-
-  local app_executable="$app_bundle/Contents/MacOS/lifesub"
-  if [ ! -f "$app_executable" ]; then
-    die "executable not found at $app_executable"
-  fi
-
-  HOME="$isolated_home" \
-  LIFESUB_ACCEPTANCE_DIR="$acceptance_dir" \
-  LIFESUB_ACCEPTANCE_DATA_DIR="$isolated_home/Library/Application Support/com.goldenwave.lifesub" \
-  "$app_executable" --acceptance-scenario packaged-smoke 2>&1 || \
-    die "packaged-smoke from DMG failed"
-
-  local smoke_report="$acceptance_dir/acceptance-packaged-smoke.json"
-  if [ ! -f "$smoke_report" ]; then
-    die "packaged-smoke did not create its acceptance report"
-  fi
-  require_passing_report "$smoke_report" "packaged-smoke"
-  cp "$smoke_report" "$REPORT_DIR/acceptance-dmg-packaged-smoke.json"
-  green "   report saved"
-
-  # Detach DMG
-  green "6. detaching DMG..."
-  hdiutil detach "$mount_point" 2>/dev/null || true
-  green "   detached"
+  local executable
+  for executable in lifesub lifesub-capture-helper lifesub-asr-gate; do
+    [ -f "$app_bundle/Contents/MacOS/$executable" ] || die "missing bundled executable: $executable"
+    [ "$(lipo -archs "$app_bundle/Contents/MacOS/$executable")" = arm64 ] || die "non-arm64 executable: $executable"
+    codesign --verify --strict "$app_bundle/Contents/MacOS/$executable" || die "invalid executable signature: $executable"
+    cmp "$app_bundle/Contents/MacOS/$executable" "$source_bundle/Contents/MacOS/$executable" || die "bundle binary mismatch: $executable"
+  done
+  hdiutil detach "$LIFESUB_DMG_VERIFY_MOUNT" || die "failed to detach DMG"
+  rmdir "$LIFESUB_DMG_VERIFY_MOUNT"
+  trap - EXIT
+  green "exact DMG version, signatures, arm64 binaries and byte equality: passed"
+  shasum -a 256 "$dmg_path"
+  green "runtime ASR and native capture use their separate real-model and hardware gates"
 
   green "=== dmg verification complete ==="
 }
@@ -319,7 +284,7 @@ run_dmg_verification() {
 
 case "${1:-target}" in
   target)
-    run_target_scenarios
+    die "legacy target acceptance scenarios are not wired into the desktop executable; use real-model Gate and native-reports instead"
     ;;
   dmg)
     run_dmg_verification

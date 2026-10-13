@@ -7,8 +7,10 @@ Last verified: 2026-10-13
 - Release source worktree: `/Users/goldenwave/Documents/MyProject/LifeSub`
 - Release source branch: `main`
 - Release version: `0.2.2`
-- This section identifies the in-progress 0.2.2 source. The installed app remains 0.2.1 until the new candidate passes its gates and is explicitly replaced. The 0.2.1 hashes below are historical and must not be presented as 0.2.2 evidence.
-- S1-S3 UI and diagnostic projections are under development; S4 measurement and release validation are in progress. The current working tree still contains the reviewed but previously uncommitted 0.2.1 source. Recheck branch, commit, dirty digest and production wiring before packaging.
+- The installed app remains 0.2.1. The current 0.2.2 bundle was built from `main@5584bab51a170c956f9ded28d0593bd761d2a020`; the old 0.2.1 source plus S1-S3 product changes were committed, so future worktrees may branch from local `main`. `origin/main` still points to historical `db39faa` until an authorized sync; the 2026-10-13 branch cleanup section below describes the pre-development state.
+- New candidate SHA-256: App `3f72dde30c27afa1659b669aca4c1424d5f305cd024e7c790a3e6e866b9b5f26`, helper `5c7b4672fc9da848d900526337d2932efba0b0c8e9196991586acd60949e8e01`, Gate `c49bf64ca22be1857bee8b5e75251b690562776c3fc8dc14985246c05a913e0d`, DMG `34de71df121398949fd5759b56f7e0879f7d4959b066607f32607c6d8756d76e` at `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/LifeSub_0.2.2_aarch64.dmg`.
+- Release-source production wiring, Tier 2 `583/0/7`, Tier 3 `626/0/9`, Swift `75/75`, frontend tests and build, browser Settings screenshots, DMG checksum/mount/arm64/nested strict signature and bundle binary equality passed. Packaged SenseVoice/Whisper real-model Gate passed twice against fixed fixtures under this exact Gate identity. Details and limitations: `docs/performance/lifesub-0.2.2-baseline.md`.
+- This build uses ad hoc signing and was not notarized; it is a local candidate, not a public macOS distribution artifact. It is **not installed or released** yet. The 0.2.2 real startup/first-frame/cancel timings and 20 new candidate-bound native capture reports are missing; the valid 0.2.1 reports cannot be relabeled as this build.
 
 ## 2026-10-13 branch and worktree cleanup
 
@@ -22,7 +24,7 @@ Last verified: 2026-10-13
 ## Authoritative current progress
 
 - `0.2.1` remains release-closed for backend scope. A frontend-only UI refresh was packaged and installed on 2026-09-03 without changing Tauri/Rust/Swift, Catalog, service contracts or business state machines.
-- `0.2.2` stabilization is planned but has not started. Its approved cap is S1-S4 from `docs/superpowers/plans/2026-08-26-lifesub-asr-audio-settings-reference-optimization.md`.
+- `0.2.2` stabilization is in development/acceptance within S1-S4 from `docs/superpowers/plans/2026-08-26-lifesub-asr-audio-settings-reference-optimization.md`.
 - Task 6 and Task 9-16 remain deferred. They are not current blockers and must not be inferred as unfinished `0.2.1` work.
 - The obsolete clean rollback worktree was removed on 2026-09-02 after confirming `652abf7` is an ancestor of `main` with no branch-only commits. Its remaining branch pointer was removed in the 2026-10-13 cleanup above.
 - Sections below the release-closure entry are chronological history. Where an older entry says acceptance was blocked or incomplete, the newer release-closure entry supersedes it.

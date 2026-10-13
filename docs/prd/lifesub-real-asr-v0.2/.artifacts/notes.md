@@ -209,6 +209,8 @@
 - 短 Demo 数据无法证明滚动容器正确。桌面验收必须注入足够长的左右栏内容，断言外层高度、底部导航可见性、`scrollHeight > clientHeight` 和实际 `scrollTop` 位移。
 ## 2026-10-13 0.2.2 稳定化发现
 
+- 老版 `verify-desktop-asr.sh dmg` 从 `target/release` 挑最后一个 DMG，在本轮显式 arm64 目标目录存在时可能验证错包；`--acceptance-scenario packaged-smoke` 的解析器未接进 `src/main.rs`，实际会启动桌面 GUI。修复后按 package 版本选精确 DMG，只读检查镜像、签名、架构、版本与内外 .app 字节相等；推理和真实采集走各自 Gate。`target` 模式在接上真实验收器前明确拒绝执行，防止伪 smoke 或挂起。
+
 - 诊断快照列出全部模型，但其中多数是可选候选；不能把 `state != runtime_qualified` 直接累计为必修故障。权限/设备也依赖当前录制模式，摘要使用“需核对”并保留原始事实。
 - 麦克风 probe 是会话内缓存的首帧事实，设备断开或选择变化后应失效；时间标记不进入持久化合同。现有按钮改为清晰的重新测试动作。
 - Catalog Job 仅持久化 `queued/preparing/transcribing` 等阶段；`publishing` 和原生 helper 的恢复中/已恢复状态目前未作为可读前端事实暴露。0.2.2 不应为状态文案新增 helper 事件或假造进度。

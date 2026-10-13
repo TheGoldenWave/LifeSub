@@ -1,79 +1,98 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HARNESS="$PROJECT_ROOT/scripts/verify-desktop-asr.sh"
 
 run_dmg_case() {
-  local codesign_exit="$1"
-  local smoke_exit="$2"
-  local expected_exit="$3"
+  local signature_exit="$1"
+  local image_exit="$2"
+  local mismatch="$3"
+  local expected_exit="$4"
   local temp_root
   temp_root="$(mktemp -d)"
   trap 'rm -rf "$temp_root"' RETURN
 
-  mkdir -p \
-    "$temp_root/project/scripts" \
-    "$temp_root/project/src-tauri/target/release/bundle/dmg" \
-    "$temp_root/bin"
-  cp "$HARNESS" "$temp_root/project/scripts/verify-desktop-asr.sh"
-  touch "$temp_root/project/src-tauri/target/release/bundle/dmg/LifeSub_0.2.1_aarch64.dmg"
+  local project="$temp_root/project"
+  local bundle="$project/src-tauri/target/aarch64-apple-darwin/release/bundle"
+  mkdir -p "$project/scripts" "$bundle/dmg" "$bundle/macos/LifeSub.app/Contents/MacOS" "$temp_root/bin"
+  cp "$HARNESS" "$project/scripts/verify-desktop-asr.sh"
+  printf '{"version":"0.2.2"}\n' > "$project/package.json"
+  touch "$bundle/dmg/LifeSub_0.2.2_aarch64.dmg"
+  mkdir -p "$project/src-tauri/target/release/bundle/dmg"
+  touch "$project/src-tauri/target/release/bundle/dmg/LifeSub_0.2.1_aarch64.dmg"
+  for binary in lifesub lifesub-capture-helper lifesub-asr-gate; do
+    printf '%s\n' "$binary" > "$bundle/macos/LifeSub.app/Contents/MacOS/$binary"
+  done
 
   cat > "$temp_root/bin/hdiutil" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "$1" == "attach" ]]; then
-  while [[ $# -gt 0 ]]; do
-    if [[ "$1" == "-mountpoint" ]]; then
-      shift
-      mount_point="$1"
-      mkdir -p "$mount_point/LifeSub.app/Contents/MacOS"
-      cat > "$mount_point/LifeSub.app/Contents/MacOS/lifesub" <<'APP'
-#!/usr/bin/env bash
-if [[ ! -d "$(dirname "${LIFESUB_ACCEPTANCE_DATA_DIR:?}")" ]]; then
-  exit 74
-fi
-if [[ "${SMOKE_EXIT:?}" -eq 0 ]]; then
-  mkdir -p "${LIFESUB_ACCEPTANCE_DIR:?}"
-  printf '{"scenario":"packaged-smoke","passed":true}\n' \
-    > "$LIFESUB_ACCEPTANCE_DIR/acceptance-packaged-smoke.json"
-fi
-exit "${SMOKE_EXIT:?}"
-APP
-      chmod +x "$mount_point/LifeSub.app/Contents/MacOS/lifesub"
-      exit 0
-    fi
-    shift
-  done
-fi
-exit 0
+case "$1" in
+  verify) exit "$IMAGE_EXIT" ;;
+  attach)
+    args=("$@")
+    mount_point=''
+    for ((index=0; index<${#args[@]}; index++)); do
+      if [[ "${args[index]}" == '-mountpoint' ]]; then mount_point="${args[index+1]}"; fi
+    done
+    [[ -n "$mount_point" ]]
+    last_arg_index=$((${#args[@]} - 1))
+    printf '%s\n' "${args[last_arg_index]}" > "$TEST_ROOT/selected-dmg"
+    mkdir -p "$mount_point/LifeSub.app/Contents/MacOS"
+    cp "$SOURCE_BUNDLE/Contents/MacOS/"* "$mount_point/LifeSub.app/Contents/MacOS/"
+    if [[ "$BUNDLE_MISMATCH" == 1 ]]; then printf 'changed\n' > "$mount_point/LifeSub.app/Contents/MacOS/lifesub-capture-helper"; fi
+    ;;
+  detach) rm -rf "$2/LifeSub.app" ;;
+esac
 EOF
   chmod +x "$temp_root/bin/hdiutil"
 
   cat > "$temp_root/bin/codesign" <<'EOF'
 #!/usr/bin/env bash
-exit "${CODESIGN_EXIT:?}"
+exit "$SIGNATURE_EXIT"
 EOF
-  chmod +x "$temp_root/bin/codesign"
+  cat > "$temp_root/bin/plutil" <<'EOF'
+#!/usr/bin/env bash
+printf '0.2.2\n'
+EOF
+  cat > "$temp_root/bin/lipo" <<'EOF'
+#!/usr/bin/env bash
+printf 'arm64\n'
+EOF
+  chmod +x "$temp_root/bin/codesign" "$temp_root/bin/plutil" "$temp_root/bin/lipo"
 
+  local actual_exit
   set +e
-  PATH="$temp_root/bin:$PATH" \
-    CODESIGN_EXIT="$codesign_exit" \
-    SMOKE_EXIT="$smoke_exit" \
-    "$temp_root/project/scripts/verify-desktop-asr.sh" dmg >/dev/null 2>&1
-  local actual_exit=$?
+  PATH="$temp_root/bin:$PATH" TEST_ROOT="$temp_root" SOURCE_BUNDLE="$bundle/macos/LifeSub.app" \
+    SIGNATURE_EXIT="$signature_exit" IMAGE_EXIT="$image_exit" BUNDLE_MISMATCH="$mismatch" \
+    "$project/scripts/verify-desktop-asr.sh" dmg > "$temp_root/output" 2>&1
+  actual_exit=$?
   set -e
 
   if [[ "$actual_exit" -ne "$expected_exit" ]]; then
-    printf 'expected exit %s, got %s (codesign=%s smoke=%s)\n' \
-      "$expected_exit" "$actual_exit" "$codesign_exit" "$smoke_exit" >&2
+    cat "$temp_root/output" >&2
+    printf 'expected exit %s, got %s\n' "$expected_exit" "$actual_exit" >&2
     return 1
+  fi
+  if [[ "$expected_exit" == 0 ]]; then
+    [[ "$(cat "$temp_root/selected-dmg")" == "$bundle/dmg/LifeSub_0.2.2_aarch64.dmg" ]]
   fi
 }
 
-run_dmg_case 1 0 1
-run_dmg_case 0 1 1
-run_dmg_case 0 0 0
+run_dmg_case 1 0 0 1
+run_dmg_case 0 1 0 1
+run_dmg_case 0 0 1 1
+run_dmg_case 0 0 0 0
 
-printf 'verify-desktop-asr shell tests passed\n'
+legacy_root="$(mktemp -d)"
+trap 'rm -rf "$legacy_root"' EXIT
+mkdir -p "$legacy_root/scripts"
+cp "$HARNESS" "$legacy_root/scripts/verify-desktop-asr.sh"
+legacy_output="$($legacy_root/scripts/verify-desktop-asr.sh target 2>&1 || true)"
+if [[ "$legacy_output" != *'not wired into the desktop executable'* ]]; then
+  printf 'legacy target mode did not fail closed with a wiring explanation\n' >&2
+  exit 1
+fi
+
+printf 'verify-desktop-asr DMG contract tests passed\n'

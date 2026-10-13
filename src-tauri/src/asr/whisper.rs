@@ -41,7 +41,11 @@ pub(crate) fn native_request(
             request.install_dir.join(format!("{prefix}-decoder.onnx")),
             request.install_dir.join(format!("{prefix}-tokens.txt")),
         ],
-        language: Some(request.language.clone()),
+        language: Some(if request.language == "auto" {
+            String::new()
+        } else {
+            request.language.clone()
+        }),
         use_itn: None,
         whisper_task: Some(
             match task {
@@ -68,11 +72,18 @@ pub(crate) fn sherpa_config(request: &NativeRequest) -> sherpa_onnx::OfflineReco
             .required_files
             .get(1)
             .map(|path| path.to_string_lossy().into_owned()),
-        language: request.language.clone(),
+        language: Some(
+            request
+                .language
+                .as_deref()
+                .filter(|language| !language.is_empty())
+                .unwrap_or("")
+                .to_owned(),
+        ),
         task: request.whisper_task.clone(),
         tail_paddings: -1,
-        enable_token_timestamps: true,
-        enable_segment_timestamps: true,
+        enable_token_timestamps: false,
+        enable_segment_timestamps: false,
     };
     config.model_config.tokens = request
         .required_files

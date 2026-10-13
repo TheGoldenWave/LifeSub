@@ -110,7 +110,7 @@ impl Catalog {
         receipt: &ProviderReceipt,
         segments: &[TranscriptSegmentPublication],
         now: chrono::DateTime<Utc>,
-    ) -> Result<TranscriptRevision, PublicationError> {
+    ) -> Result<Option<TranscriptRevision>, PublicationError> {
         validate_segments(segments)?;
         let receipt: ReceiptRow = serde_json::from_value(
             serde_json::to_value(receipt)
@@ -168,6 +168,13 @@ impl Catalog {
             )
             .map_err(catalog_error)?;
         self.fail_if_requested(PublicationFailurePoint::Receipt)?;
+
+        if segments.is_empty() {
+            mark_job_succeeded(&transaction, token, &now_text)?;
+            self.fail_if_requested(PublicationFailurePoint::Succeed)?;
+            transaction.commit().map_err(catalog_error)?;
+            return Ok(None);
+        }
 
         let revision_id = format!("tr_{}", uuid::Uuid::new_v4().simple());
         let number = transaction
@@ -258,35 +265,17 @@ impl Catalog {
             });
         }
 
-        let changed = transaction
-            .execute(
-                "UPDATE asr_jobs
-                 SET state = 'succeeded', claimed_by = NULL, lease_expires_at = NULL,
-                     error_code = NULL, error_summary = NULL, updated_at = ?4
-                 WHERE id = ?1 AND claimed_by = ?2 AND claim_generation = ?3
-                   AND state = 'transcribing'
-                   AND cancel_requested_at IS NULL AND lease_expires_at > ?4",
-                params![
-                    token.job_id,
-                    token.claimed_by,
-                    token.claim_generation,
-                    now_text,
-                ],
-            )
-            .map_err(catalog_error)?;
-        if changed != 1 {
-            return Err(PublicationError::OwnershipLost);
-        }
+        mark_job_succeeded(&transaction, token, &now_text)?;
         self.fail_if_requested(PublicationFailurePoint::Succeed)?;
         transaction.commit().map_err(catalog_error)?;
-        Ok(TranscriptRevision {
+        Ok(Some(TranscriptRevision {
             id: revision_id,
             session_id: context.session_id,
             number,
             provider: context.provider,
             created_at,
             segments: published_segments,
-        })
+        }))
     }
 
     #[cfg(test)]
@@ -380,9 +369,6 @@ fn publication_context(
 }
 
 fn validate_segments(segments: &[TranscriptSegmentPublication]) -> Result<(), PublicationError> {
-    if segments.is_empty() {
-        return Err(PublicationError::InvalidResult("empty transcript"));
-    }
     if segments.iter().any(|segment| {
         segment.id.trim().is_empty()
             || segment.text.trim().is_empty()
@@ -390,6 +376,28 @@ fn validate_segments(segments: &[TranscriptSegmentPublication]) -> Result<(), Pu
             || segment.chunk_end_ms <= segment.chunk_start_ms
     }) {
         return Err(PublicationError::InvalidResult("invalid segment"));
+    }
+    Ok(())
+}
+
+fn mark_job_succeeded(
+    transaction: &Transaction<'_>,
+    token: &ClaimToken,
+    now: &str,
+) -> Result<(), PublicationError> {
+    let changed = transaction
+        .execute(
+            "UPDATE asr_jobs
+             SET state = 'succeeded', claimed_by = NULL, lease_expires_at = NULL,
+                 error_code = NULL, error_summary = NULL, updated_at = ?4
+             WHERE id = ?1 AND claimed_by = ?2 AND claim_generation = ?3
+               AND state = 'transcribing'
+               AND cancel_requested_at IS NULL AND lease_expires_at > ?4",
+            params![token.job_id, token.claimed_by, token.claim_generation, now,],
+        )
+        .map_err(catalog_error)?;
+    if changed != 1 {
+        return Err(PublicationError::OwnershipLost);
     }
     Ok(())
 }

@@ -126,6 +126,14 @@ impl ProviderSelection {
         }
     }
 
+    pub(crate) fn from_snapshot(
+        language: impl Into<String>,
+        num_threads: u16,
+        options: ProviderOptions,
+    ) -> Self {
+        Self::new(language, num_threads, options)
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(model_id: &str) -> Self {
         let manifest = model_registry().model(model_id).unwrap();

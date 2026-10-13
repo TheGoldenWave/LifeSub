@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Check, Plus, Search, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, Check, Plus, Search, X } from 'lucide-react'
 import type { DictionaryCategory, DictionaryEntry } from '../domain'
 import {
   createCategoryAdapter,
@@ -20,6 +20,10 @@ type ScopeFilter = 'global' | 'project'
 type DetailMode = 'empty' | 'entry-view' | 'entry-create' | 'entry-edit' | 'category-create'
 type SaveState = 'idle' | 'saving' | 'error'
 type LoadState = 'idle' | 'loading' | 'ready' | 'error'
+type MobilePane = 'categories' | 'entries' | 'detail'
+type DeleteConfirmation =
+  | { kind: 'category'; id: string; name: string; entryCount: number }
+  | { kind: 'entry'; id: string; categoryId: string; name: string }
 
 interface EntryFormState {
   term: string
@@ -52,6 +56,10 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [detailMode, setDetailMode] = useState<DetailMode>('empty')
+  const [mobilePane, setMobilePane] = useState<MobilePane>('categories')
+  const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const deleteInFlight = useRef(false)
   const [categoriesLoadState, setCategoriesLoadState] = useState<LoadState>('loading')
   const [entriesLoadState, setEntriesLoadState] = useState<LoadState>('idle')
   const [categoriesLoadError, setCategoriesLoadError] = useState('')
@@ -107,6 +115,8 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
       setEntries([])
       setEntriesLoadState('idle')
       setEntriesLoadError('')
+      setDeleteConfirmation(null)
+      setMobilePane('categories')
       if (detailMode !== 'category-create') {
         setDetailMode('empty')
       }
@@ -182,14 +192,18 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
   function openCategoryCreateForm() {
     resetCategoryForm()
     setSelectedEntryId(null)
+    setDeleteConfirmation(null)
     setDetailMode('category-create')
+    setMobilePane('detail')
   }
 
   function openEntryCreateForm() {
     if (!selectedCategoryId || entriesLoadState !== 'ready') return
     resetEntryForm()
     setSelectedEntryId(null)
+    setDeleteConfirmation(null)
     setDetailMode('entry-create')
+    setMobilePane('detail')
   }
 
   function openEntryEditForm() {
@@ -200,10 +214,13 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
       aliases: selectedEntry.aliases,
       note: selectedEntry.note,
     })
+    setDeleteConfirmation(null)
     setDetailMode('entry-edit')
+    setMobilePane('detail')
   }
 
   function closeDetailPanel() {
+    setMobilePane(detailMode === 'category-create' ? 'categories' : 'entries')
     resetCategoryForm()
     resetEntryForm()
     setDetailMode(selectedEntryId ? 'entry-view' : 'empty')
@@ -228,6 +245,12 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
     )
   }
 
+  function cancelDeleteConfirmation() {
+    if (deleteInFlight.current) return
+    setMobilePane(deleteConfirmation?.kind === 'category' ? 'categories' : 'entries')
+    setDeleteConfirmation(null)
+  }
+
   async function handleSaveCategory() {
     const trimmedName = categoryName.trim()
     if (!trimmedName) {
@@ -244,6 +267,7 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
       setCategories((previousCategories) => [...previousCategories, createdCategory])
       setSelectedCategoryId(createdCategory.id)
       setDetailMode('empty')
+      setMobilePane('entries')
       resetCategoryForm()
       onNotice(`分类「${trimmedName}」已创建`)
     } catch {
@@ -252,19 +276,37 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
     }
   }
 
+  function requestDeleteCategory() {
+    if (!selectedCategory || deleteInFlight.current) return
+    setDeleteConfirmation({
+      kind: 'category',
+      id: selectedCategory.id,
+      name: selectedCategory.name,
+      entryCount: selectedCategory.entryCount,
+    })
+    setMobilePane('detail')
+  }
+
   async function handleDeleteCategory() {
-    if (!selectedCategoryId) return
-    if (!window.confirm('确定要删除此分类及其所有词条？')) return
+    if (deleteConfirmation?.kind !== 'category' || deleteInFlight.current) return
+
+    deleteInFlight.current = true
+    setIsDeleting(true)
 
     try {
-      await deleteCategoryAdapter(selectedCategoryId)
-      setCategories((previousCategories) => previousCategories.filter((category) => category.id !== selectedCategoryId))
+      await deleteCategoryAdapter(deleteConfirmation.id)
+      setCategories((previousCategories) => previousCategories.filter((category) => category.id !== deleteConfirmation.id))
       setSelectedEntryId(null)
       setEntries([])
+      setDeleteConfirmation(null)
       setDetailMode('empty')
+      setMobilePane('categories')
       onNotice('分类已删除')
     } catch {
       onNotice('分类删除失败，请重试')
+    } finally {
+      deleteInFlight.current = false
+      setIsDeleting(false)
     }
   }
 
@@ -298,6 +340,7 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
         updateCategoryEntryCount(selectedCategoryId, 1)
         setSelectedEntryId(createdEntry.id)
         setDetailMode('entry-view')
+        setMobilePane('detail')
         resetEntryForm()
         onNotice(`词条「${trimmedTerm}」已创建`)
         return
@@ -350,35 +393,52 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
     }
   }
 
+  function requestDeleteEntry() {
+    if (!selectedEntry || deleteInFlight.current) return
+    setDeleteConfirmation({
+      kind: 'entry',
+      id: selectedEntry.id,
+      categoryId: selectedEntry.categoryId,
+      name: selectedEntry.term,
+    })
+    setMobilePane('detail')
+  }
+
   async function handleDeleteEntry() {
-    if (!selectedEntry) return
-    if (!window.confirm(`确定删除词条「${selectedEntry.term}」？`)) return
+    if (deleteConfirmation?.kind !== 'entry' || deleteInFlight.current) return
+
+    deleteInFlight.current = true
+    setIsDeleting(true)
 
     try {
-      await deleteEntryAdapter(selectedEntry.id)
-      setEntries((previousEntries) => previousEntries.filter((entry) => entry.id !== selectedEntry.id))
-      updateCategoryEntryCount(selectedEntry.categoryId, -1)
+      await deleteEntryAdapter(deleteConfirmation.id)
+      setEntries((previousEntries) => previousEntries.filter((entry) => entry.id !== deleteConfirmation.id))
+      updateCategoryEntryCount(deleteConfirmation.categoryId, -1)
       setSelectedEntryId(null)
+      setDeleteConfirmation(null)
       setDetailMode('empty')
-      onNotice(`词条「${selectedEntry.term}」已删除`)
+      setMobilePane('entries')
+      onNotice(`词条「${deleteConfirmation.name}」已删除`)
     } catch {
       onNotice('词条删除失败，请重试')
+    } finally {
+      deleteInFlight.current = false
+      setIsDeleting(false)
     }
   }
 
   if (categoriesLoadState === 'loading') {
     return (
       <main className="dictionary-view">
-        <p className="empty-state">加载中...</p>
+        <p className="empty-state" role="status" aria-live="polite">正在加载词典...</p>
       </main>
     )
   }
 
   return (
-    <main className="dictionary-view">
+    <main className={`dictionary-view dictionary-view--mobile-${mobilePane}`}>
       <header className="dictionary-view__header">
         <div className="dictionary-view__title-group">
-          <span className="eyebrow">DICTIONARY</span>
           <h1>常用词库</h1>
           <div className="dictionary-view__scope-group">
             <span className="dictionary-view__scope-label">当前范围：</span>
@@ -389,7 +449,9 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
               onChange={(event) => {
                 setScope(event.target.value as ScopeFilter)
                 setSelectedEntryId(null)
+                setDeleteConfirmation(null)
                 setDetailMode('empty')
+                setMobilePane('categories')
               }}
             >
               <option value="global">全局词典</option>
@@ -412,15 +474,18 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
             新建词条
           </button>
           {selectedCategoryId && (
-            <button className="text-button" onClick={handleDeleteCategory}>
+            <button className="text-button" disabled={isDeleting} onClick={requestDeleteCategory}>
               删除分类
             </button>
           )}
         </div>
       </header>
 
-      <div className="dictionary-view__body">
-        <aside className="dictionary-view__categories">
+      <div
+        className={`dictionary-view__body dictionary-view__body--mobile-${mobilePane} ${detailMode === 'empty' && !deleteConfirmation ? 'dictionary-view__body--detail-empty' : ''}`}
+        data-testid="dictionary-body"
+      >
+        <aside className={`dictionary-view__categories dictionary-view__pane dictionary-view__pane--${mobilePane === 'categories' ? 'active' : 'inactive'}`}>
           {categoriesLoadState === 'error' ? (
             <div className="empty-state">
               <p>{categoriesLoadError}</p>
@@ -441,13 +506,18 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
               <button
                 key={category.id}
                 className={`dictionary-category ${category.id === selectedCategoryId ? 'dictionary-category--active' : ''}`}
+                aria-pressed={category.id === selectedCategoryId}
                 onClick={() => {
-                  setSelectedCategoryId(category.id)
-                  setEntries([])
-                  setEntriesLoadState('loading')
-                  setEntriesLoadError('')
+                  if (category.id !== selectedCategoryId) {
+                    setSelectedCategoryId(category.id)
+                    setEntries([])
+                    setEntriesLoadState('loading')
+                    setEntriesLoadError('')
+                  }
                   setSelectedEntryId(null)
+                  setDeleteConfirmation(null)
                   setDetailMode('empty')
+                  setMobilePane('entries')
                 }}
               >
                 <span className="dictionary-category__name">{category.name}</span>
@@ -457,11 +527,16 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
           )}
         </aside>
 
-        <section className="dictionary-view__entries">
-          <div className="search-field" style={{ marginBottom: 'var(--spacing-3)' }}>
-            <Search size={16} />
+        <section className={`dictionary-view__entries dictionary-view__pane dictionary-view__pane--${mobilePane === 'entries' ? 'active' : 'inactive'}`}>
+          <button className="text-button dictionary-view__mobile-back" onClick={() => setMobilePane('categories')}>
+            <ArrowLeft size={14} aria-hidden="true" />
+            返回分类
+          </button>
+          <div className="search-field dictionary-view__search">
+            <Search size={16} aria-hidden="true" />
             <input
               type="search"
+              aria-label="搜索词条"
               placeholder="搜索词条..."
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
@@ -483,10 +558,13 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
                 <button
                   key={entry.id}
                   aria-label={entry.term}
+                  aria-pressed={entry.id === selectedEntryId}
                   className={`dictionary-entry ${entry.id === selectedEntryId ? 'dictionary-entry--active' : ''}`}
                   onClick={() => {
                     setSelectedEntryId(entry.id)
+                    setDeleteConfirmation(null)
                     setDetailMode('entry-view')
+                    setMobilePane('detail')
                   }}
                 >
                   <span className="dictionary-entry__status">
@@ -505,8 +583,52 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
           )}
         </section>
 
-        <aside className="dictionary-view__detail">
-          {detailMode === 'category-create' && (
+        <aside
+          className={`dictionary-view__detail dictionary-view__pane dictionary-view__pane--${mobilePane === 'detail' ? 'active' : 'inactive'} ${detailMode === 'empty' && !deleteConfirmation ? 'dictionary-view__detail--empty' : ''}`}
+          data-testid="dictionary-detail"
+        >
+          <button
+            className="text-button dictionary-view__mobile-back"
+            disabled={isDeleting}
+            onClick={() => {
+              if (deleteConfirmation) {
+                cancelDeleteConfirmation()
+                return
+              }
+              setMobilePane(detailMode === 'category-create' ? 'categories' : 'entries')
+            }}
+          >
+            <ArrowLeft size={14} aria-hidden="true" />
+            {detailMode === 'category-create' || deleteConfirmation?.kind === 'category' ? '返回分类' : '返回词条'}
+          </button>
+
+          {deleteConfirmation?.kind === 'category' && (
+            <section className="dictionary-delete-confirmation" aria-labelledby="dictionary-delete-category-title">
+              <h3 id="dictionary-delete-category-title">删除分类「{deleteConfirmation.name}」？</h3>
+              <p>该分类中的 {deleteConfirmation.entryCount} 个词条将一并永久删除，此操作无法撤销。</p>
+              <div className="dictionary-detail__actions">
+                <button className="text-button" disabled={isDeleting} onClick={handleDeleteCategory}>
+                  {isDeleting ? '删除中...' : '确认删除分类'}
+                </button>
+                <button className="text-button" disabled={isDeleting} onClick={cancelDeleteConfirmation}>取消</button>
+              </div>
+            </section>
+          )}
+
+          {deleteConfirmation?.kind === 'entry' && (
+            <section className="dictionary-delete-confirmation" aria-labelledby="dictionary-delete-entry-title">
+              <h3 id="dictionary-delete-entry-title">删除词条「{deleteConfirmation.name}」？</h3>
+              <p>该词条将被永久删除，此操作无法撤销。</p>
+              <div className="dictionary-detail__actions">
+                <button className="text-button" disabled={isDeleting} onClick={handleDeleteEntry}>
+                  {isDeleting ? '删除中...' : '确认删除词条'}
+                </button>
+                <button className="text-button" disabled={isDeleting} onClick={cancelDeleteConfirmation}>取消</button>
+              </div>
+            </section>
+          )}
+
+          {!deleteConfirmation && detailMode === 'category-create' && (
             <>
               <h3>新建分类</h3>
               <div className="dictionary-detail__fields">
@@ -545,7 +667,7 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
             </>
           )}
 
-          {(detailMode === 'entry-create' || detailMode === 'entry-edit') && (
+          {!deleteConfirmation && (detailMode === 'entry-create' || detailMode === 'entry-edit') && (
             <>
               <h3>{detailMode === 'entry-create' ? '新建词条' : '编辑词条'}</h3>
               <div className="dictionary-detail__fields">
@@ -614,7 +736,7 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
             </>
           )}
 
-          {detailMode === 'entry-view' && selectedEntry && (
+          {!deleteConfirmation && detailMode === 'entry-view' && selectedEntry && (
             <>
               <h3>{selectedEntry.term}</h3>
               <div className="dictionary-detail__fields">
@@ -648,14 +770,14 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
                 <button className="text-button" onClick={handleToggleEntry}>
                   {selectedEntry.enabled ? '停用' : '启用'}
                 </button>
-                <button className="text-button" onClick={handleDeleteEntry}>
+                <button className="text-button" onClick={requestDeleteEntry}>
                   删除
                 </button>
               </div>
             </>
           )}
 
-          {detailMode === 'empty' && (
+          {!deleteConfirmation && detailMode === 'empty' && (
             <>
               <h3>词典说明</h3>
               <div className="dictionary-detail__fields">
@@ -665,7 +787,7 @@ export function DictionaryView({ onNotice }: DictionaryViewProps) {
                 </div>
                 <div className="dictionary-detail__field">
                   <label>作用边界</label>
-                  <span>词典会影响未来任务中的 ASR 修正，不会回写或覆盖历史转写记录。</span>
+                  <span>词典条目目前用于管理和查阅，尚未接入自动 ASR 修正；历史转写不会被覆盖。</span>
                 </div>
                 <div className="dictionary-detail__field">
                   <label>操作建议</label>

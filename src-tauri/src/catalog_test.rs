@@ -1,7 +1,10 @@
 use crate::asr::job::{EnqueueJob, canonical_time};
 use crate::asr::model_manager::{ArtifactCheckpoint, ModelCatalog, ModelInstallPlan};
 use crate::catalog::Catalog;
-use crate::domain::{AudioSource, CaptureSession, TranscriptSegment};
+use crate::catalog::capture::NativeCaptureInsertError;
+use crate::domain::{
+    AudioSource, CaptureChunkTiming, CaptureSession, CaptureSourceRecord, TranscriptSegment,
+};
 
 fn import_job_fixture(session_id: &str, chunk_id: &str, fingerprint: &str) -> EnqueueJob {
     let now = canonical_time(chrono::Utc::now());
@@ -137,6 +140,302 @@ fn unknown_persisted_chunk_integrity_is_rejected() {
 
     assert!(catalog.chunk_integrity(&chunk.id).is_err());
     assert!(catalog.chunk_diagnostics(&chunk.id).is_err());
+}
+
+#[test]
+fn capture_source_and_chunk_timing_are_persisted_for_native_chunks() {
+    let catalog = Catalog::in_memory().unwrap();
+    let mut session = CaptureSession::new("native timing");
+    session.state = crate::domain::CaptureState::Recording;
+    catalog.insert_session(&session).unwrap();
+    let source = CaptureSourceRecord {
+        id: "src_mic".into(),
+        session_id: session.id.clone(),
+        source: AudioSource::Microphone,
+        device_uid: "BuiltInMicrophoneDevice".into(),
+        device_name: "MacBook Pro Microphone".into(),
+        channel_count: 1,
+        sample_rate_hz: 48_000,
+        created_at: chrono::Utc::now(),
+    };
+    let chunk = crate::domain::AudioChunk {
+        id: "chk_native".into(),
+        session_id: session.id,
+        source: AudioSource::Microphone,
+        path: "audio/chk_native.caf".into(),
+        sha256: "3".repeat(64),
+        byte_length: 4096,
+    };
+    let timing = CaptureChunkTiming {
+        chunk_id: chunk.id.clone(),
+        capture_source_id: source.id.clone(),
+        source_sequence: 7,
+        source_sample_start: 60_000,
+        source_sample_end: 228_000,
+        session_start_ms: 1_250,
+        session_end_ms: 4_750,
+        monotonic_start_ns: 12_500_000,
+        monotonic_end_ns: 47_500_000,
+        utc_start_at: chrono::Utc::now(),
+        utc_end_at: chrono::Utc::now(),
+        discontinuity_count: 1,
+        dropped_frame_count: 2,
+        created_at: chrono::Utc::now(),
+    };
+
+    catalog.insert_capture_source(&source).unwrap();
+    catalog
+        .insert_native_capture_chunk(&chunk, &timing)
+        .unwrap();
+
+    assert_eq!(
+        catalog.capture_source(&source.id).unwrap().as_ref(),
+        Some(&source)
+    );
+    assert_eq!(
+        catalog.capture_chunk_timing(&chunk.id).unwrap().as_ref(),
+        Some(&timing)
+    );
+    assert_eq!(
+        catalog
+            .connection()
+            .query_row(
+                "SELECT session_offset_ms, duration_ms FROM chunks WHERE id = ?1",
+                [&chunk.id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+        (1_250, 3_500)
+    );
+}
+
+#[test]
+fn native_capture_transaction_rejects_forged_provenance_without_rows() {
+    let catalog = Catalog::in_memory().unwrap();
+    let mut session = CaptureSession::new("native provenance");
+    session.state = crate::domain::CaptureState::Recording;
+    catalog.insert_session(&session).unwrap();
+    let source = CaptureSourceRecord {
+        id: "src_native_provenance".into(),
+        session_id: session.id.clone(),
+        source: AudioSource::Microphone,
+        device_uid: "mic".into(),
+        device_name: "Microphone".into(),
+        channel_count: 1,
+        sample_rate_hz: 48_000,
+        created_at: chrono::Utc::now(),
+    };
+    catalog.insert_capture_source(&source).unwrap();
+    let now = chrono::Utc::now();
+    let timing = CaptureChunkTiming {
+        chunk_id: "chk_forged".into(),
+        capture_source_id: source.id.clone(),
+        source_sequence: 0,
+        source_sample_start: 0,
+        source_sample_end: 48_000,
+        session_start_ms: 0,
+        session_end_ms: 1_000,
+        monotonic_start_ns: 1,
+        monotonic_end_ns: 2,
+        utc_start_at: now,
+        utc_end_at: now,
+        discontinuity_count: 0,
+        dropped_frame_count: 0,
+        created_at: now,
+    };
+    let base = crate::domain::AudioChunk {
+        id: timing.chunk_id.clone(),
+        session_id: session.id.clone(),
+        source: AudioSource::Microphone,
+        path: "audio/chk_forged.caf".into(),
+        sha256: "4".repeat(64),
+        byte_length: 16,
+    };
+
+    let mut imported = base.clone();
+    imported.source = AudioSource::Imported;
+    assert!(matches!(
+        catalog.insert_native_capture_chunk(&imported, &timing),
+        Err(NativeCaptureInsertError::Conflict)
+    ));
+
+    let other_session = CaptureSession::new("other session");
+    catalog.insert_session(&other_session).unwrap();
+    let mut cross_session = base.clone();
+    cross_session.session_id = other_session.id;
+    assert!(matches!(
+        catalog.insert_native_capture_chunk(&cross_session, &timing),
+        Err(NativeCaptureInsertError::Conflict)
+    ));
+
+    let mut source_mismatch = base.clone();
+    source_mismatch.source = AudioSource::SystemAudio;
+    assert!(matches!(
+        catalog.insert_native_capture_chunk(&source_mismatch, &timing),
+        Err(NativeCaptureInsertError::Conflict)
+    ));
+
+    let mut negative = timing.clone();
+    negative.session_start_ms = -1;
+    assert!(matches!(
+        catalog.insert_native_capture_chunk(&base, &negative),
+        Err(NativeCaptureInsertError::Conflict)
+    ));
+
+    let mut overflow = base.clone();
+    overflow.byte_length = i64::MAX as u64 + 1;
+    assert!(matches!(
+        catalog.insert_native_capture_chunk(&overflow, &timing),
+        Err(NativeCaptureInsertError::Conflict)
+    ));
+
+    assert!(catalog.chunk(&base.id).unwrap().is_none());
+    assert!(catalog.capture_chunk_timing(&base.id).unwrap().is_none());
+
+    catalog.insert_native_capture_chunk(&base, &timing).unwrap();
+    let mut path_alias = base.clone();
+    path_alias.id = "chk_path_alias".into();
+    let mut alias_timing = timing.clone();
+    alias_timing.chunk_id = path_alias.id.clone();
+    alias_timing.source_sequence += 1;
+    assert!(matches!(
+        catalog.insert_native_capture_chunk(&path_alias, &alias_timing),
+        Err(NativeCaptureInsertError::Conflict)
+    ));
+    assert_eq!(catalog.chunk(&base.id).unwrap(), Some(base));
+    assert!(catalog.chunk(&path_alias.id).unwrap().is_none());
+    assert!(
+        catalog
+            .capture_chunk_timing(&path_alias.id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn native_capture_path_identity_does_not_require_global_path_uniqueness() {
+    let catalog = Catalog::in_memory().unwrap();
+    let mut session = CaptureSession::new("native path identity");
+    session.state = crate::domain::CaptureState::Recording;
+    catalog.insert_session(&session).unwrap();
+    let duplicate_path = "audio/chk_native_path_conflict.caf";
+    for id in ["legacy_path_one", "legacy_path_two"] {
+        catalog
+            .insert_chunk(&crate::domain::AudioChunk {
+                id: id.into(),
+                session_id: session.id.clone(),
+                source: AudioSource::Imported,
+                path: duplicate_path.into(),
+                sha256: "7".repeat(64),
+                byte_length: 7,
+            })
+            .unwrap();
+    }
+    let source = CaptureSourceRecord {
+        id: "src_native_path_identity".into(),
+        session_id: session.id.clone(),
+        source: AudioSource::Microphone,
+        device_uid: "mic".into(),
+        device_name: "Microphone".into(),
+        channel_count: 1,
+        sample_rate_hz: 48_000,
+        created_at: chrono::Utc::now(),
+    };
+    catalog.insert_capture_source(&source).unwrap();
+    let chunk = crate::domain::AudioChunk {
+        id: "chk_native_path_conflict".into(),
+        session_id: session.id,
+        source: AudioSource::Microphone,
+        path: duplicate_path.into(),
+        sha256: "8".repeat(64),
+        byte_length: 8,
+    };
+    let now = chrono::Utc::now();
+    let timing = CaptureChunkTiming {
+        chunk_id: chunk.id.clone(),
+        capture_source_id: source.id,
+        source_sequence: 0,
+        source_sample_start: 0,
+        source_sample_end: 48_000,
+        session_start_ms: 0,
+        session_end_ms: 1_000,
+        monotonic_start_ns: 1,
+        monotonic_end_ns: 2,
+        utc_start_at: now,
+        utc_end_at: now,
+        discontinuity_count: 0,
+        dropped_frame_count: 0,
+        created_at: now,
+    };
+
+    assert!(matches!(
+        catalog.insert_native_capture_chunk(&chunk, &timing),
+        Err(NativeCaptureInsertError::Conflict)
+    ));
+    assert!(catalog.chunk(&chunk.id).unwrap().is_none());
+    assert_eq!(
+        catalog
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE path = ?1",
+                [duplicate_path],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn capture_sources_reject_imported_audio_source() {
+    let catalog = Catalog::in_memory().unwrap();
+    let session = CaptureSession::new("imported source rejection");
+    catalog.insert_session(&session).unwrap();
+    let source = CaptureSourceRecord {
+        id: "src_imported".into(),
+        session_id: session.id,
+        source: AudioSource::Imported,
+        device_uid: "file".into(),
+        device_name: "Imported file".into(),
+        channel_count: 1,
+        sample_rate_hz: 16_000,
+        created_at: chrono::Utc::now(),
+    };
+
+    assert!(catalog.insert_capture_source(&source).is_err());
+    assert!(catalog.capture_source(&source.id).unwrap().is_none());
+}
+
+#[test]
+fn capture_sources_atomic_registration_rolls_back_all_sources_on_conflict() {
+    let catalog = Catalog::in_memory().unwrap();
+    let session = CaptureSession::new("atomic source registration");
+    catalog.insert_session(&session).unwrap();
+    let now = chrono::Utc::now();
+    let sources = vec![
+        CaptureSourceRecord {
+            id: "src_atomic_mic".into(),
+            session_id: session.id.clone(),
+            source: AudioSource::Microphone,
+            device_uid: "mic".into(),
+            device_name: "Microphone".into(),
+            channel_count: 1,
+            sample_rate_hz: 48_000,
+            created_at: now,
+        },
+        CaptureSourceRecord {
+            id: "src_atomic_mic".into(),
+            session_id: session.id,
+            source: AudioSource::SystemAudio,
+            device_uid: "system".into(),
+            device_name: "System".into(),
+            channel_count: 2,
+            sample_rate_hz: 48_000,
+            created_at: now,
+        },
+    ];
+    assert!(catalog.insert_capture_sources_atomic(&sources).is_err());
+    assert!(catalog.capture_source("src_atomic_mic").unwrap().is_none());
 }
 
 #[test]

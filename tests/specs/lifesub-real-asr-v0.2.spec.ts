@@ -26,14 +26,14 @@ test.describe('LifeSub V0.2 — Live Capture', () => {
   test('starts recording and shows transcript', async ({ page }) => {
     await page.goto('/')
     await expect(page.getByText('浏览器演示数据，不会录音或保存。')).toBeVisible({ timeout: 5000 })
-    await page.getByRole('button', { name: '开始演示' }).click()
-    await expect(page.getByText('浏览器演示').first()).toBeVisible({ timeout: 5000 })
+    await page.getByRole('button', { name: '播放示例转写' }).click()
+    await expect(page.getByText('正在播放示例转写').first()).toBeVisible({ timeout: 5000 })
     await expect(page.locator('.live-segment').first()).toBeVisible({ timeout: 8000 })
   })
 
   test('pauses and continues recording', async ({ page }) => {
     await page.goto('/')
-    await page.getByRole('button', { name: '开始演示' }).click()
+    await page.getByRole('button', { name: '播放示例转写' }).click()
     await expect(page.getByRole('button', { name: '停止' })).toBeVisible({ timeout: 5000 })
     await page.getByRole('button', { name: '暂停' }).click()
     await expect(page.getByRole('button', { name: '继续' })).toBeVisible({ timeout: 5000 })
@@ -41,14 +41,14 @@ test.describe('LifeSub V0.2 — Live Capture', () => {
 
   test('stops recording and shows saved notice', async ({ page }) => {
     await page.goto('/')
-    await page.getByRole('button', { name: '开始演示' }).click()
+    await page.getByRole('button', { name: '播放示例转写' }).click()
     await page.getByRole('button', { name: '停止' }).click()
     await expect(page.getByRole('status').filter({ hasText: '浏览器演示数据，不会录音或保存。' }).last()).toBeVisible({ timeout: 5000 })
   })
 
   test('adds and deletes a note', async ({ page }) => {
     await page.goto('/')
-    await page.getByRole('button', { name: '开始演示' }).click()
+    await page.getByRole('button', { name: '播放示例转写' }).click()
     await expect(page.getByRole('button', { name: '停止' })).toBeVisible({ timeout: 5000 })
     await page.getByRole('button', { name: '新笔记' }).last().click()
     await expect(page.locator('.note-editor')).toBeVisible({ timeout: 5000 })
@@ -89,13 +89,10 @@ test.describe('LifeSub V0.2 — Settings Modal', () => {
     await page.goto('/')
     await page.getByRole('button', { name: '设置' }).click()
 
-    await page.getByRole('tab', { name: 'ASR 设置' }).click()
+    await page.getByRole('tab', { name: 'ASR 与模型' }).click()
     await expect(page.getByText('当前 Provider')).toBeVisible({ timeout: 5000 })
-
-    await page.getByRole('tab', { name: '模型' }).click()
     await expect(page.getByText('当前清单')).toBeVisible({ timeout: 5000 })
-
-    await page.getByRole('tab', { name: '关于' }).click()
+    await page.getByRole('tab', { name: '诊断' }).click()
     await expect(page.getByRole('heading', { name: '关于 LifeSub' })).toBeVisible({ timeout: 5000 })
   })
 

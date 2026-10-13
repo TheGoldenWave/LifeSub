@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::asr::job::{
     ClaimToken, EnqueueJob, EnqueueOutcome, ExecutionSnapshot, ExecutionStage, InputValidation,
-    SnapshotError,
+    JobIdentity, SnapshotError,
 };
 use crate::catalog::PublicationError;
 #[cfg(test)]
@@ -78,6 +78,13 @@ impl<'a> JobCatalog<'a> {
         self.ensure()?;
         self.catalog
             .validate_asr_input(session_id, chunk_id, input_sha256)
+            .map_err(JobCatalogError::Catalog)
+    }
+
+    pub(crate) fn job_identity(&self, job_id: &str) -> Result<JobIdentity, JobCatalogError> {
+        self.ensure()?;
+        self.catalog
+            .asr_job_identity(job_id)
             .map_err(JobCatalogError::Catalog)
     }
 
@@ -213,7 +220,7 @@ impl<'a> JobCatalog<'a> {
         receipt: &ProviderReceipt,
         segments: &[TranscriptSegmentPublication],
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<TranscriptRevision, PublicationError> {
+    ) -> Result<Option<TranscriptRevision>, PublicationError> {
         self.ensure().map_err(|error| match error {
             JobCatalogError::Ownership(error) => PublicationError::Ownership(error),
             JobCatalogError::Catalog(error) => PublicationError::Catalog(error.to_string()),
@@ -300,6 +307,20 @@ pub(crate) struct ReadyModel<'a> {
 }
 
 impl Catalog {
+    fn asr_job_identity(&self, job_id: &str) -> rusqlite::Result<JobIdentity> {
+        self.connection.lock().unwrap().query_row(
+            "SELECT id, session_id, chunk_id FROM asr_jobs WHERE id = ?1",
+            [job_id],
+            |row| {
+                Ok(JobIdentity {
+                    job_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    chunk_id: row.get(2)?,
+                })
+            },
+        )
+    }
+
     fn validate_asr_input(
         &self,
         session_id: &str,

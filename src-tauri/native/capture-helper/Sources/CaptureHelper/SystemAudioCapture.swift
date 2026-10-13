@@ -42,6 +42,8 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, CaptureSourceAdap
     private let failureHandler: @Sendable (CaptureFailure) -> Void
     private let signalHandler: @Sendable (CaptureSourceSignal) -> Void
     private var stream: SCStream?
+    private var selectedDisplay: SCDisplay?
+    private var startHostTime: UInt64?
 
     init(
         encoder: ChunkEncoder,
@@ -64,11 +66,25 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, CaptureSourceAdap
     func preflight() async throws {
         if CGPreflightScreenCaptureAccess() { return }
         guard CGRequestScreenCaptureAccess() else {
-            throw CaptureSourceError.permissionDenied
+            throw CaptureSourceError.permissionDenied(source: .systemAudio)
         }
     }
 
-    func start() async throws {
+    func metadata() async throws -> CaptureSourceMetadata {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = selectedDisplay ?? content.displays.first,
+              let startHostTime
+        else { throw CaptureSourceError.deviceUnavailable }
+        return CaptureSourceMetadata(
+            deviceId: String(display.displayID),
+            deviceName: "Display \(display.displayID)",
+            sampleRate: 16_000,
+            channelCount: 1,
+            hostTime: startHostTime
+        )
+    }
+
+    func start(selectedMicrophoneUID _: String?) async throws {
         frames.startAccepting()
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(
@@ -78,6 +94,8 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, CaptureSourceAdap
             guard let display = content.displays.first else {
                 throw CaptureSourceError.deviceUnavailable
             }
+            selectedDisplay = display
+            startHostTime = CaptureContinuousClock.nowNanoseconds()
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let configuration = SCStreamConfiguration()
             configuration.width = 2
@@ -107,14 +125,16 @@ final class SystemAudioCapture: NSObject, @unchecked Sendable, CaptureSourceAdap
         do { try await stream?.startCapture() } catch { throw CaptureSourceError.sourceFailed }
     }
 
-    func stop() async {
+    func stop() async -> CaptureSourceStopMetadata {
         if let stream {
             try? await stream.stopCapture()
             try? stream.removeStreamOutput(self, type: .audio)
         }
         stream = nil
+        startHostTime = nil
         await frames.suspendAndDrain()
         try? await encoder.sealForDiscontinuity()
+        return await encoder.stopMetadata()
     }
 
     func sealForDiscontinuity() async {

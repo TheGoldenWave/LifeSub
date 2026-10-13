@@ -123,7 +123,6 @@ fn tail_padding_clamps_without_an_empty_trailing_window() {
 fn detector_cores_are_strictly_validated_without_merging_gaps_or_adjacency() {
     let audio = silence();
     let invalid = [
-        vec![],
         vec![SampleRange { start: 10, end: 10 }],
         vec![SampleRange {
             start: 0,
@@ -159,6 +158,11 @@ fn detector_cores_are_strictly_validated_without_merging_gaps_or_adjacency() {
             .collect::<Vec<_>>(),
         cores
     );
+}
+
+#[test]
+fn empty_detector_cores_are_a_valid_silence_result() {
+    assert_eq!(partition_detector_cores(&silence(), &[]).unwrap(), vec![]);
 }
 
 #[test]

@@ -4,9 +4,9 @@ use rusqlite::{Connection, Error, TransactionBehavior, ffi};
 
 use self::ddl::{
     ASR_SCHEMA, CURRENT_VERSION, FRESH_BASE_SCHEMA, LEGACY_ALTERS, MODEL_MANAGER_V3_SCHEMA,
-    TOOL_API_V4_SCHEMA, V5_SCHEMA,
+    TOOL_API_V4_SCHEMA, V5_SCHEMA, V6_SCHEMA,
 };
-use self::fingerprint::{classify_locked, is_v2, is_v3, is_v4, is_v5};
+use self::fingerprint::{classify_locked, is_v2, is_v3, is_v4, is_v5, is_v6};
 
 mod ddl;
 mod fingerprint;
@@ -21,7 +21,8 @@ pub(crate) enum SchemaKind {
     CurrentV3,
     CurrentV4,
     CurrentV5,
-    /// A newer schema that still contains the complete v5 contract.
+    CurrentV6,
+    /// A newer schema that still contains the complete current contract.
     CompatibleNewer,
     Unknown,
 }
@@ -36,7 +37,7 @@ pub(crate) fn classify(connection: &mut Connection) -> rusqlite::Result<SchemaKi
 }
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
-    migrate_with_hooks(connection, || Ok(()), || Ok(()))
+    migrate_with_hooks(connection, || Ok(()), || Ok(()), || Ok(()))
 }
 
 #[cfg(test)]
@@ -44,7 +45,15 @@ pub(crate) fn migrate_with_hook<F>(connection: &mut Connection, hook: F) -> rusq
 where
     F: FnOnce() -> rusqlite::Result<()>,
 {
-    migrate_with_hooks(connection, || Ok(()), hook)
+    migrate_with_hooks(connection, || Ok(()), hook, || Ok(()))
+}
+
+#[cfg(test)]
+pub(crate) fn migrate_with_v6_hook<F>(connection: &mut Connection, hook: F) -> rusqlite::Result<()>
+where
+    F: FnOnce() -> rusqlite::Result<()>,
+{
+    migrate_with_hooks(connection, || Ok(()), || Ok(()), hook)
 }
 
 #[cfg(test)]
@@ -55,36 +64,42 @@ pub(crate) fn migrate_with_classification_hook<F>(
 where
     F: FnOnce() -> rusqlite::Result<()>,
 {
-    migrate_with_hooks(connection, hook, || Ok(()))
+    migrate_with_hooks(connection, hook, || Ok(()), || Ok(()))
 }
 
-fn migrate_with_hooks<C, D>(
+fn migrate_with_hooks<C, D, V>(
     connection: &mut Connection,
     classification_hook: C,
     ddl_hook: D,
+    v6_hook: V,
 ) -> rusqlite::Result<()>
 where
     C: FnOnce() -> rusqlite::Result<()>,
     D: FnOnce() -> rusqlite::Result<()>,
+    V: FnOnce() -> rusqlite::Result<()>,
 {
     configure_connection(connection)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let kind = classify_locked(&transaction)?;
     classification_hook()?;
     match kind {
-        SchemaKind::CurrentV5 | SchemaKind::CompatibleNewer => return transaction.commit(),
+        SchemaKind::CurrentV6 | SchemaKind::CompatibleNewer => return transaction.commit(),
         SchemaKind::Unknown => return Err(migration_error("unknown or corrupt catalog schema")),
         SchemaKind::Fresh
         | SchemaKind::LegacyV1
         | SchemaKind::CurrentV2
         | SchemaKind::CurrentV3
-        | SchemaKind::CurrentV4 => {}
+        | SchemaKind::CurrentV4
+        | SchemaKind::CurrentV5 => {}
     }
     match kind {
         SchemaKind::Fresh => transaction.execute_batch(FRESH_BASE_SCHEMA)?,
         SchemaKind::LegacyV1 => transaction.execute_batch(LEGACY_ALTERS)?,
-        SchemaKind::CurrentV2 | SchemaKind::CurrentV3 | SchemaKind::CurrentV4 => {}
-        SchemaKind::CurrentV5 | SchemaKind::CompatibleNewer | SchemaKind::Unknown => unreachable!(),
+        SchemaKind::CurrentV2
+        | SchemaKind::CurrentV3
+        | SchemaKind::CurrentV4
+        | SchemaKind::CurrentV5 => {}
+        SchemaKind::CurrentV6 | SchemaKind::CompatibleNewer | SchemaKind::Unknown => unreachable!(),
     }
     if matches!(kind, SchemaKind::Fresh | SchemaKind::LegacyV1) {
         transaction.execute_batch(ASR_SCHEMA)?;
@@ -133,6 +148,23 @@ where
         if !is_v5(&transaction)? {
             return Err(migration_error(
                 "migration produced invalid v5 catalog schema",
+            ));
+        }
+    }
+    if matches!(
+        kind,
+        SchemaKind::Fresh
+            | SchemaKind::LegacyV1
+            | SchemaKind::CurrentV2
+            | SchemaKind::CurrentV3
+            | SchemaKind::CurrentV4
+            | SchemaKind::CurrentV5
+    ) {
+        transaction.execute_batch(V6_SCHEMA)?;
+        v6_hook()?;
+        if !is_v6(&transaction)? {
+            return Err(migration_error(
+                "migration produced invalid v6 catalog schema",
             ));
         }
     }

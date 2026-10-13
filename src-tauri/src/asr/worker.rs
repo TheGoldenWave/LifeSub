@@ -6,7 +6,30 @@ use chrono::{DateTime, Utc};
 
 use crate::asr::job::{Clock, ExecutionSnapshot, ExecutionStage, JobCoordinator, JobError};
 use crate::catalog::PublicationError;
-use crate::domain::{AsrErrorCode, ProviderReceipt, TranscriptSegmentPublication};
+use crate::domain::{
+    AsrErrorCode, ProviderReceipt, TranscriptRevision, TranscriptSegmentPublication,
+};
+
+pub type PublicationCallback = Arc<dyn Fn(&TranscriptRevision) + Send + Sync>;
+pub type FailureCallback = Arc<dyn Fn(&DurableJobFailure) + Send + Sync>;
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct DurableJobFailure {
+    pub session_id: String,
+    pub job_id: String,
+    pub chunk_id: String,
+    pub error_code: String,
+    pub error_summary: String,
+    pub retry_available: bool,
+    #[serde(skip)]
+    pub code: AsrErrorCode,
+}
+
+#[derive(Default)]
+pub struct WorkerCallbacks {
+    pub publication: Option<PublicationCallback>,
+    pub failure: Option<FailureCallback>,
+}
 
 pub const DEFAULT_IDLE_POLL: Duration = Duration::from_millis(250);
 pub const DEFAULT_RUN_POLL: Duration = Duration::from_millis(200);
@@ -67,6 +90,39 @@ pub fn spawn_fail_closed_worker(
             thread_shutdown,
             ThreadSleepWaiter,
         );
+        let _ = worker.run_until_shutdown();
+    });
+    (shutdown, handle)
+}
+
+#[cfg(feature = "desktop")]
+pub fn spawn_native_worker(
+    runtime: Arc<crate::service::CoreRuntime>,
+) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+    spawn_native_worker_with_callbacks(runtime, WorkerCallbacks::default())
+}
+
+#[cfg(feature = "desktop")]
+pub fn spawn_native_worker_with_callbacks(
+    runtime: Arc<crate::service::CoreRuntime>,
+    callbacks: WorkerCallbacks,
+) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let thread_shutdown = shutdown.clone();
+    let engine = crate::asr::native_engine::ProductionNativeAsrEngine::new(runtime.clone());
+    let handle = std::thread::spawn(move || {
+        let Ok(coordinator) = runtime.job_coordinator("desktop-worker") else {
+            return;
+        };
+        let mut worker = WorkerLoop::new(
+            coordinator,
+            crate::asr::job::SystemClock,
+            engine,
+            thread_shutdown,
+            ThreadSleepWaiter,
+        );
+        worker.publication_callback = callbacks.publication;
+        worker.failure_callback = callbacks.failure;
         let _ = worker.run_until_shutdown();
     });
     (shutdown, handle)
@@ -151,6 +207,8 @@ where
     idle_poll: Duration,
     run_poll: Duration,
     recovered: bool,
+    publication_callback: Option<PublicationCallback>,
+    failure_callback: Option<FailureCallback>,
 }
 
 impl<'a, C, E, W> WorkerLoop<'a, C, E, W>
@@ -175,7 +233,21 @@ where
             idle_poll: DEFAULT_IDLE_POLL,
             run_poll: DEFAULT_RUN_POLL,
             recovered: false,
+            publication_callback: None,
+            failure_callback: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_publication_callback(mut self, callback: PublicationCallback) -> Self {
+        self.publication_callback = Some(callback);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_failure_callback(mut self, callback: FailureCallback) -> Self {
+        self.failure_callback = Some(callback);
+        self
     }
 
     #[cfg(test)]
@@ -214,17 +286,19 @@ where
             .expect("claimed job must remain active")
             .token
             .clone();
+        let job_identity = self.coordinator.job_identity(&token.job_id)?;
         let snapshot = match self
             .coordinator
             .load_execution_snapshot(&token, ExecutionStage::Preparing)
         {
             Ok(snapshot) => snapshot,
-            Err(error) => return self.handle_preparing_snapshot_error(error),
+            Err(error) => return self.handle_preparing_snapshot_error(error, &job_identity),
         };
         let prepared = match self.engine.prepare(&snapshot) {
             Ok(prepared) => prepared,
             Err(failure) => {
                 self.coordinator.fail(failure.code, &failure.summary)?;
+                self.notify_failure(&snapshot, &failure);
                 return Ok(());
             }
         };
@@ -234,6 +308,7 @@ where
             Ok(run) => run,
             Err(failure) => {
                 self.coordinator.fail(failure.code, &failure.summary)?;
+                self.notify_failure(&snapshot, &failure);
                 return Ok(());
             }
         };
@@ -245,7 +320,10 @@ where
                         .coordinator
                         .publish(&token, &success.receipt, &success.segments)
                     {
-                        Ok(_) => {
+                        Ok(revision) => {
+                            if let Some(revision) = revision {
+                                self.notify_publication(&revision);
+                            }
                             self.coordinator.recover()?;
                             return Ok(());
                         }
@@ -264,14 +342,51 @@ where
                 }
                 Ok(Err(failure)) => {
                     self.coordinator.fail(failure.code, &failure.summary)?;
+                    self.notify_failure(&snapshot, &failure);
                     return Ok(());
                 }
                 Err(RunPollResult::Pending) => {
-                    if let Some(outcome) = self.observe_running(&token, &run)? {
+                    if let Some(outcome) = self.observe_running(&token, &run, &snapshot)? {
                         return Ok(outcome);
                     }
                 }
             }
+        }
+    }
+
+    fn notify_publication(&self, revision: &TranscriptRevision) {
+        if let Some(callback) = &self.publication_callback {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(revision)));
+        }
+    }
+
+    fn notify_failure(&self, snapshot: &ExecutionSnapshot, failure: &ExecutionFailure) {
+        self.notify_failure_identity(
+            &crate::asr::job::JobIdentity {
+                job_id: snapshot.job_id.clone(),
+                session_id: snapshot.session_id.clone(),
+                chunk_id: snapshot.chunk.id.clone(),
+            },
+            failure,
+        );
+    }
+
+    fn notify_failure_identity(
+        &self,
+        identity: &crate::asr::job::JobIdentity,
+        failure: &ExecutionFailure,
+    ) {
+        if let Some(callback) = &self.failure_callback {
+            let event = DurableJobFailure {
+                session_id: identity.session_id.clone(),
+                job_id: identity.job_id.clone(),
+                chunk_id: identity.chunk_id.clone(),
+                error_code: stable_error_code(failure.code),
+                error_summary: failure.summary.clone(),
+                retry_available: true,
+                code: failure.code,
+            };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(&event)));
         }
     }
 
@@ -294,6 +409,7 @@ where
         &mut self,
         token: &crate::asr::job::ClaimToken,
         run: &R,
+        snapshot: &ExecutionSnapshot,
     ) -> Result<Option<()>, WorkerError> {
         let renew_due = self
             .coordinator
@@ -338,6 +454,13 @@ where
                     AsrErrorCode::InputUnavailable,
                     "job input became unavailable while transcribing",
                 )?;
+                self.notify_failure(
+                    snapshot,
+                    &ExecutionFailure {
+                        code: AsrErrorCode::InputUnavailable,
+                        summary: "job input became unavailable while transcribing".to_owned(),
+                    },
+                );
                 Ok(Some(()))
             }
             Err(error) => {
@@ -345,6 +468,7 @@ where
                 let failure = map_snapshot_error(error);
                 self.coordinator
                     .fail(AsrErrorCode::RecoveryRequired, &failure.summary)?;
+                self.notify_failure(snapshot, &failure);
                 Ok(Some(()))
             }
         }
@@ -353,6 +477,7 @@ where
     fn handle_preparing_snapshot_error(
         &mut self,
         error: crate::asr::job::SnapshotError,
+        identity: &crate::asr::job::JobIdentity,
     ) -> Result<(), WorkerError> {
         match error {
             crate::asr::job::SnapshotError::CancelRequested => {
@@ -360,10 +485,12 @@ where
                 Ok(())
             }
             crate::asr::job::SnapshotError::InputUnavailable => {
-                self.coordinator.fail(
-                    AsrErrorCode::InputUnavailable,
-                    "job input became unavailable before execution",
-                )?;
+                let failure = ExecutionFailure {
+                    code: AsrErrorCode::InputUnavailable,
+                    summary: "job input became unavailable before execution".to_owned(),
+                };
+                self.coordinator.fail(failure.code, &failure.summary)?;
+                self.notify_failure_identity(identity, &failure);
                 Ok(())
             }
             crate::asr::job::SnapshotError::OwnershipLost
@@ -382,10 +509,18 @@ where
                 let failure = map_snapshot_error(error);
                 self.coordinator
                     .fail(AsrErrorCode::RecoveryRequired, &failure.summary)?;
+                self.notify_failure_identity(identity, &failure);
                 Ok(())
             }
         }
     }
+}
+
+fn stable_error_code(code: AsrErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "recovery_required".to_owned())
 }
 
 fn map_snapshot_error(error: crate::asr::job::SnapshotError) -> ExecutionFailure {
@@ -763,6 +898,51 @@ mod tests {
     }
 
     #[test]
+    fn publication_callback_runs_only_after_persisted_revision_commit() {
+        let fixture = Fixture::new();
+        fixture.insert_job("notify-after-commit", "queued", NOW);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let idle = StopAfterIdle {
+            clock: fixture.clock.clone(),
+            shutdown: shutdown.clone(),
+            waits: Arc::new(AtomicUsize::new(0)),
+            stop_after: 1,
+        };
+        let engine = ScriptedEngine {
+            clock: fixture.clock.clone(),
+            plans: Arc::new(Mutex::new(VecDeque::from([JobPlan {
+                polls_before_finish: 0,
+                on_poll: None,
+                outcome: PlanOutcome::Success { text: "committed" },
+            }]))),
+        };
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let coordinator = fixture
+            .runtime
+            .job_coordinator_with_clock("worker-publication", fixture.clock.clone())
+            .unwrap();
+        let mut worker =
+            WorkerLoop::new(coordinator, fixture.clock.clone(), engine, shutdown, idle)
+                .with_publication_callback({
+                    let published = published.clone();
+                    Arc::new(move |revision| published.lock().unwrap().push(revision.clone()))
+                })
+                .with_polls(Duration::from_secs(1), Duration::from_secs(5));
+
+        assert!(published.lock().unwrap().is_empty());
+        worker.run_until_shutdown().unwrap();
+
+        let published = published.lock().unwrap();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].session_id, "session-worker");
+        assert_eq!(
+            published[0].segments[0].chunk_id.as_deref(),
+            Some("chunk-worker")
+        );
+        assert_eq!(fixture.revision_count(), 1);
+    }
+
+    #[test]
     fn worker_renews_long_running_transcription_until_publish_succeeds() {
         let fixture = Fixture::new();
         fixture.insert_job("long-run", "queued", NOW);
@@ -893,6 +1073,52 @@ mod tests {
             assert!(error_code.is_some());
             assert_eq!(fixture.revision_count(), 0);
         }
+    }
+
+    #[test]
+    fn failure_callback_runs_only_after_failed_job_is_durable() {
+        let fixture = Fixture::new();
+        fixture.insert_job("notify-failure", "queued", NOW);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let idle = StopAfterIdle {
+            clock: fixture.clock.clone(),
+            shutdown: shutdown.clone(),
+            waits: Arc::new(AtomicUsize::new(0)),
+            stop_after: 1,
+        };
+        let engine = ScriptedEngine {
+            clock: fixture.clock.clone(),
+            plans: Arc::new(Mutex::new(VecDeque::from([JobPlan {
+                polls_before_finish: 0,
+                on_poll: None,
+                outcome: PlanOutcome::Failure {
+                    code: AsrErrorCode::TranscriptionFailed,
+                    summary: "durable provider failure",
+                },
+            }]))),
+        };
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let coordinator = fixture
+            .runtime
+            .job_coordinator_with_clock("worker-failure-event", fixture.clock.clone())
+            .unwrap();
+        let mut worker =
+            WorkerLoop::new(coordinator, fixture.clock.clone(), engine, shutdown, idle)
+                .with_failure_callback({
+                    let failures = failures.clone();
+                    Arc::new(move |failure| failures.lock().unwrap().push(failure.clone()))
+                })
+                .with_polls(Duration::from_secs(1), Duration::from_secs(5));
+
+        assert!(failures.lock().unwrap().is_empty());
+        worker.run_until_shutdown().unwrap();
+
+        assert_eq!(fixture.row_state("notify-failure").0, "failed");
+        let failures = failures.lock().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].session_id, "session-worker");
+        assert_eq!(failures[0].chunk_id, "chunk-worker");
+        assert_eq!(failures[0].code, AsrErrorCode::TranscriptionFailed);
     }
 
     #[test]

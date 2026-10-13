@@ -890,10 +890,7 @@ fn sherpa_configs_use_exact_required_files_and_supported_runtime_fields() {
         whisper.model_config.whisper.decoder.as_deref(),
         Some("/qualified/model/base-decoder.onnx")
     );
-    assert_eq!(
-        whisper.model_config.whisper.language.as_deref(),
-        Some("auto")
-    );
+    assert_eq!(whisper.model_config.whisper.language.as_deref(), Some(""));
     assert_eq!(
         whisper.model_config.whisper.task.as_deref(),
         Some("transcribe")

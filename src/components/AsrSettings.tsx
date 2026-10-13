@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   deleteVoiceprintAdapter,
   loadAsrConfig,
@@ -14,9 +14,34 @@ type VoiceprintMutation =
   | { action: 'delete'; id: string }
   | null
 
-export function AsrSettings() {
+const PROVIDERS: Array<{ value: string; label: string }> = [
+  { value: 'sense_voice', label: 'SenseVoice（推荐）' },
+  { value: 'whisper', label: 'Whisper' },
+  { value: 'qwen3_asr', label: 'Qwen3-ASR' },
+]
+
+const LANGUAGE_LABELS: Record<string, string> = {
+  auto: '自动检测',
+  zh: '中文',
+  en: 'English',
+  ja: '日本語',
+  ko: '한국어',
+  yue: '粤语',
+}
+
+const WHISPER_TASK_OPTIONS: Array<{ value: 'transcribe' | 'translate'; label: string }> = [
+  { value: 'transcribe', label: '转写原语言' },
+  { value: 'translate', label: '翻译为英语' },
+]
+
+interface AsrSettingsProps {
+  onDirtyChange?: (dirty: boolean) => void
+}
+
+export function AsrSettings({ onDirtyChange }: AsrSettingsProps = {}) {
   const [voiceprints, setVoiceprints] = useState<CoreVoiceprint[]>([])
   const [config, setConfig] = useState<CoreAsrConfig | null>(null)
+  const [savedConfig, setSavedConfig] = useState<CoreAsrConfig | null>(null)
   const [models, setModels] = useState<CoreAsrModel[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -40,23 +65,17 @@ export function AsrSettings() {
       loadModelCatalog(),
     ])
 
-    if (configResult.status === 'fulfilled') {
-      setConfig(configResult.value)
-    } else {
-      setConfig(null)
-    }
+    const loadedModels = modelResult.status === 'fulfilled' && Array.isArray(modelResult.value)
+      ? modelResult.value
+      : []
 
-    if (voiceprintResult.status === 'fulfilled') {
-      setVoiceprints(voiceprintResult.value)
-    } else {
-      setVoiceprints([])
-    }
-
-    if (modelResult.status === 'fulfilled') {
-      setModels(Array.isArray(modelResult.value) ? modelResult.value : [])
-    } else {
-      setModels([])
-    }
+    setModels(loadedModels)
+    const loadedConfig = configResult.status === 'fulfilled'
+      ? normalizeAsrConfig(configResult.value, loadedModels)
+      : null
+    setConfig(loadedConfig)
+    setSavedConfig(loadedConfig)
+    setVoiceprints(voiceprintResult.status === 'fulfilled' ? voiceprintResult.value : [])
 
     const errorMessage = configResult.status === 'rejected'
       ? errorText(configResult.reason)
@@ -64,10 +83,14 @@ export function AsrSettings() {
         ? errorText(voiceprintResult.reason)
         : modelResult.status === 'rejected'
           ? errorText(modelResult.reason)
-        : null
+          : null
 
     setLoadError(errorMessage)
     setLoading(false)
+  }
+
+  const updateConfig = (updater: (current: CoreAsrConfig) => CoreAsrConfig) => {
+    setConfig((current) => current ? normalizeAsrConfig(updater(current), models) : null)
   }
 
   const handleSave = async () => {
@@ -75,7 +98,10 @@ export function AsrSettings() {
     setSaveError(null)
     setStatusMessage(null)
     try {
-      await saveAsrConfig(config)
+      const normalized = normalizeAsrConfig(config, models)
+      await saveAsrConfig(normalized)
+      setConfig(normalized)
+      setSavedConfig(normalized)
       setStatusMessage('设置已保存')
     } catch (error) {
       setSaveError(errorText(error))
@@ -83,19 +109,31 @@ export function AsrSettings() {
   }
 
   const set = <K extends keyof CoreAsrConfig>(key: K, value: CoreAsrConfig[K]) => {
-    setConfig((prev) => prev ? { ...prev, [key]: value } : null)
+    updateConfig((current) => ({ ...current, [key]: value }))
   }
 
   const setProvider = (provider: string) => {
-    setConfig((previous) => previous ? {
-      ...previous,
+    updateConfig((current) => ({
+      ...current,
       provider,
       model_id: '',
-    } : null)
+      itn_enabled: provider === 'sense_voice' ? current.itn_enabled : false,
+      whisper_task: provider === 'whisper' ? normalizeWhisperTask(current.whisper_task) : null,
+    }))
+  }
+
+  const [editingVoiceprintId, setEditingVoiceprintId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [deleteVoiceprintId, setDeleteVoiceprintId] = useState<string | null>(null)
+
+  const beginRenameVoiceprint = (voiceprint: CoreVoiceprint) => {
+    setEditingVoiceprintId(voiceprint.id)
+    setRenameDraft(voiceprint.name)
+    setDeleteVoiceprintId(null)
   }
 
   const handleRenameVoiceprint = async (voiceprint: CoreVoiceprint) => {
-    const nextName = window.prompt('输入新的声纹名称', voiceprint.name)?.trim()
+    const nextName = renameDraft.trim()
     if (!nextName || nextName === voiceprint.name) return
 
     setPendingMutation({ action: 'rename', id: voiceprint.id })
@@ -103,6 +141,7 @@ export function AsrSettings() {
     try {
       await renameVoiceprintAdapter(voiceprint.id, nextName)
       setVoiceprints((previous) => previous.map((item) => item.id === voiceprint.id ? { ...item, name: nextName } : item))
+      setEditingVoiceprintId(null)
       setStatusMessage('声纹已重命名')
     } catch (error) {
       setMutationError(errorText(error))
@@ -112,13 +151,12 @@ export function AsrSettings() {
   }
 
   const handleDeleteVoiceprint = async (voiceprint: CoreVoiceprint) => {
-    if (!window.confirm(`删除声纹“${voiceprint.name}”？`)) return
-
     setPendingMutation({ action: 'delete', id: voiceprint.id })
     setMutationError(null)
     try {
       await deleteVoiceprintAdapter(voiceprint.id)
       setVoiceprints((previous) => previous.filter((item) => item.id !== voiceprint.id))
+      setDeleteVoiceprintId(null)
       setStatusMessage('声纹已删除')
     } catch (error) {
       setMutationError(errorText(error))
@@ -127,26 +165,26 @@ export function AsrSettings() {
     }
   }
 
-  const providers: { value: string; label: string }[] = [
-    { value: 'sense_voice', label: 'SenseVoice（推荐）' },
-    { value: 'whisper', label: 'Whisper' },
-    { value: 'qwen3_asr', label: 'Qwen3-ASR' },
-  ]
-
-  const languages: { value: string; label: string }[] = [
-    { value: 'zh', label: '中文' },
-    { value: 'en', label: 'English' },
-    { value: 'auto', label: '自动检测' },
-  ]
-
+  const providerModels = config ? models.filter((model) => model.provider === config.provider) : []
+  const selectedModel = config ? findSelectedModel(models, config.provider, config.model_id) : null
+  const languageOptions = selectedModel?.supported_languages ?? []
   const controlsDisabled = loading || Boolean(loadError) || !config || Boolean(pendingMutation)
-  const saveDisabled = controlsDisabled || !config?.model_id
+  const dirty = useMemo(() => Boolean(config && savedConfig && JSON.stringify(config) !== JSON.stringify(savedConfig)), [config, savedConfig])
+  const saveDisabled = controlsDisabled || !config?.model_id || !dirty
   const status = mutationError ?? saveError ?? statusMessage
+
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+  }, [dirty, onDirtyChange])
 
   return (
     <div className="settings-tab-content">
-      <span className="eyebrow">ASR</span>
       <h1>ASR 设置</h1>
+
+      <div className="settings-readiness">
+        <strong>转写准备</strong>
+        <span>{asrReadiness(loading, loadError, config, selectedModel)}</span>
+      </div>
 
       {loadError && (
         <div className="settings-inline-status">
@@ -163,7 +201,7 @@ export function AsrSettings() {
           <label htmlFor="asr-provider">当前 Provider</label>
           {config ? (
             <select id="asr-provider" className="dictionary-view__scope" value={config.provider} onChange={(e) => setProvider(e.target.value)} disabled={controlsDisabled}>
-              {providers.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+              {PROVIDERS.map((provider) => <option key={provider.value} value={provider.value}>{provider.label}</option>)}
             </select>
           ) : <span>{loading ? '加载中...' : '—'}</span>}
         </div>
@@ -178,7 +216,7 @@ export function AsrSettings() {
               disabled={controlsDisabled}
             >
               <option value="" disabled>请选择模型</option>
-              {models.filter((model) => model.provider === config.provider).map((model) => (
+              {providerModels.map((model) => (
                 <option key={model.model_id} value={model.model_id}>{model.display_name}</option>
               ))}
             </select>
@@ -189,17 +227,17 @@ export function AsrSettings() {
       <section className="settings-section">
         <h2>语言与行为</h2>
         <div className="setting-row">
-          <label>识别语言</label>
-          {config ? (
-            <select className="dictionary-view__scope" value={config.language} onChange={(e) => set('language', e.target.value)} disabled={controlsDisabled}>
-              {languages.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+          <label htmlFor="asr-language">识别语言</label>
+          {config && selectedModel ? (
+            <select id="asr-language" className="dictionary-view__scope" value={config.language} onChange={(e) => set('language', e.target.value)} disabled={controlsDisabled}>
+              {languageOptions.map((language) => <option key={language} value={language}>{languageLabel(language)}</option>)}
             </select>
-          ) : <span>{loading ? '加载中...' : '—'}</span>}
+          ) : <span>{config ? '请先选择模型' : loading ? '加载中...' : '—'}</span>}
         </div>
         <div className="setting-row">
           <label>自动转写</label>
           <label className="toggle">
-            <input type="checkbox" checked={config?.auto_transcribe ?? false} onChange={(e) => set('auto_transcribe', e.target.checked)} disabled={controlsDisabled} />
+            <input type="checkbox" aria-label="自动转写" checked={config?.auto_transcribe ?? false} onChange={(e) => set('auto_transcribe', e.target.checked)} disabled={controlsDisabled} />
             <span className={`status-pill ${config?.auto_transcribe ? '' : 'status-pill--quiet'}`}>
               {config?.auto_transcribe ? '启用' : '停用'}
             </span>
@@ -218,7 +256,7 @@ export function AsrSettings() {
         <div className="setting-row">
           <label>VAD</label>
           <label className="toggle">
-            <input type="checkbox" checked={config?.vad_enabled ?? false} onChange={(e) => set('vad_enabled', e.target.checked)} disabled={controlsDisabled} />
+            <input type="checkbox" aria-label="VAD" checked={config?.vad_enabled ?? false} onChange={(e) => set('vad_enabled', e.target.checked)} disabled={controlsDisabled} />
             <span className={`status-pill ${config?.vad_enabled ? '' : 'status-pill--quiet'}`}>
               {config?.vad_enabled ? '启用' : '停用'}
             </span>
@@ -238,24 +276,46 @@ export function AsrSettings() {
         </div>
       </section>
 
-      <section className="settings-section">
-        <h2>Provider 专属选项</h2>
-        <div className="setting-row">
-          <label>ITN（逆文本正则化）</label>
-          <label className="toggle">
-            <input type="checkbox" checked={config?.itn_enabled ?? false} onChange={(e) => set('itn_enabled', e.target.checked)} disabled={controlsDisabled} />
-            <span className={`status-pill ${config?.itn_enabled ? '' : 'status-pill--quiet'}`}>
-              {config?.itn_enabled ? '启用' : '停用'}
-            </span>
-          </label>
-        </div>
-      </section>
+      {config?.provider === 'sense_voice' && (
+        <section className="settings-section">
+          <h2>Provider 专属选项</h2>
+          <div className="setting-row">
+            <label>ITN（逆文本正则化）</label>
+            <label className="toggle">
+              <input type="checkbox" aria-label="ITN（逆文本正则化）" checked={config.itn_enabled} onChange={(e) => set('itn_enabled', e.target.checked)} disabled={controlsDisabled} />
+              <span className={`status-pill ${config.itn_enabled ? '' : 'status-pill--quiet'}`}>
+                {config.itn_enabled ? '启用' : '停用'}
+              </span>
+            </label>
+          </div>
+        </section>
+      )}
+
+      {config?.provider === 'whisper' && (
+        <section className="settings-section">
+          <h2>Provider 专属选项</h2>
+          <div className="setting-row">
+            <label htmlFor="whisper-task">Whisper 任务</label>
+            <select
+              id="whisper-task"
+              className="dictionary-view__scope"
+              value={normalizeWhisperTask(config.whisper_task)}
+              onChange={(e) => set('whisper_task', e.target.value as CoreAsrConfig['whisper_task'])}
+              disabled={controlsDisabled}
+            >
+              {WHISPER_TASK_OPTIONS.map((task) => (
+                <option key={task.value} value={task.value}>{task.label}</option>
+              ))}
+            </select>
+          </div>
+        </section>
+      )}
 
       <section className="settings-section">
         <h2>声纹库</h2>
-        <p>已注册的说话人声纹，用于自动识别转写中的说话人。</p>
+        <p>这里管理已有声纹记录；自动识别说话人尚未接入当前转写流程。</p>
         {voiceprints.length === 0 ? (
-          <p className="empty-state">暂无注册声纹，录音时点击未知说话人即可保存。</p>
+          <p className="empty-state">暂无已注册声纹；当前录音不会自动创建声纹。</p>
         ) : (
           <div className="voiceprint-list">
             {voiceprints.map((vp) => {
@@ -264,27 +324,37 @@ export function AsrSettings() {
               return (
                 <div key={vp.id} className="voiceprint-card">
                   <div className="voiceprint-card__info">
-                    <strong>{vp.name}</strong>
+                    {editingVoiceprintId === vp.id ? (
+                      <label className="voiceprint-card__editor">
+                        <span>声纹名称</span>
+                        <input className="setting-input" aria-label="声纹名称" value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} disabled={isPending} />
+                      </label>
+                    ) : <strong>{vp.name}</strong>}
                     <small>{vp.sample_count} 个样本 · 更新于 {vp.updated_at?.slice(0, 10) ?? '—'}</small>
                     {vp.dictionary_entry_id && <span className="status-pill">关联词典</span>}
                   </div>
                   <div className="voiceprint-card__actions">
-                    <button
-                      type="button"
-                      className="text-button"
-                      onClick={() => void handleRenameVoiceprint(vp)}
-                      disabled={disableActions}
-                    >
-                      {isPending && pendingMutation?.action === 'rename' ? '重命名中…' : '重命名'}
-                    </button>
-                    <button
-                      type="button"
-                      className="text-button"
-                      onClick={() => void handleDeleteVoiceprint(vp)}
-                      disabled={disableActions}
-                    >
-                      {isPending && pendingMutation?.action === 'delete' ? '删除中…' : '删除'}
-                    </button>
+                    {editingVoiceprintId === vp.id ? (
+                      <>
+                        <button type="button" className="text-button" onClick={() => void handleRenameVoiceprint(vp)} disabled={disableActions || !renameDraft.trim() || renameDraft.trim() === vp.name}>
+                          {isPending && pendingMutation?.action === 'rename' ? '重命名中…' : '保存重命名'}
+                        </button>
+                        <button type="button" className="text-button" onClick={() => setEditingVoiceprintId(null)} disabled={disableActions}>取消重命名</button>
+                      </>
+                    ) : deleteVoiceprintId === vp.id ? (
+                      <div className="voiceprint-card__confirm" role="group" aria-label={`删除 ${vp.name}`}>
+                        <span>确认删除“{vp.name}”？</span>
+                        <button type="button" className="text-button" onClick={() => void handleDeleteVoiceprint(vp)} disabled={disableActions}>
+                          {isPending && pendingMutation?.action === 'delete' ? '删除中…' : '确认删除'}
+                        </button>
+                        <button type="button" className="text-button" onClick={() => setDeleteVoiceprintId(null)} disabled={disableActions}>取消删除</button>
+                      </div>
+                    ) : (
+                      <>
+                        <button type="button" className="text-button" onClick={() => beginRenameVoiceprint(vp)} disabled={disableActions}>重命名</button>
+                        <button type="button" className="text-button" onClick={() => { setDeleteVoiceprintId(vp.id); setEditingVoiceprintId(null) }} disabled={disableActions}>删除</button>
+                      </>
+                    )}
                   </div>
                 </div>
               )
@@ -301,6 +371,7 @@ export function AsrSettings() {
           保存设置
         </button>
       </div>
+      {dirty && <p className="settings-dirty-indicator" role="status">有未保存的更改</p>}
       {status && (
         <p className={`settings-feedback ${loadError || mutationError || saveError ? 'settings-feedback--error' : ''}`} role="status">
           {status}
@@ -308,6 +379,54 @@ export function AsrSettings() {
       )}
     </div>
   )
+}
+
+function asrReadiness(
+  loading: boolean,
+  loadError: string | null,
+  config: CoreAsrConfig | null,
+  selectedModel: CoreAsrModel | null,
+) {
+  if (loading) return '正在读取 ASR 设置。'
+  if (loadError || !config) return '设置未读取成功，请重试。'
+  if (!config.auto_transcribe) return '自动转写已关闭。'
+  if (!selectedModel) return '请选择转写模型。'
+  if (selectedModel.installation_state !== 'runtime_qualified' || !selectedModel.executable) {
+    return '设置载入时该模型尚未就绪；安装后请刷新模型状态。'
+  }
+  return '设置载入时该模型已通过运行时验证；执行时仍会重新核验。'
+}
+
+function findSelectedModel(models: CoreAsrModel[], provider: string, modelId: string) {
+  return models.find((model) => model.provider === provider && model.model_id === modelId) ?? null
+}
+
+function normalizeAsrConfig(config: CoreAsrConfig, models: CoreAsrModel[]): CoreAsrConfig {
+  const selectedModel = findSelectedModel(models, config.provider, config.model_id)
+  const supportedLanguages = selectedModel?.supported_languages ?? []
+
+  return {
+    ...config,
+    language: supportedLanguages.length > 0
+      ? normalizeLanguage(config.language, supportedLanguages)
+      : config.language,
+    itn_enabled: config.provider === 'sense_voice' ? config.itn_enabled : false,
+    whisper_task: config.provider === 'whisper' ? normalizeWhisperTask(config.whisper_task) : null,
+  }
+}
+
+function normalizeLanguage(language: string, supportedLanguages: string[]) {
+  if (supportedLanguages.includes(language)) return language
+  if (supportedLanguages.includes('auto')) return 'auto'
+  return supportedLanguages[0] ?? language
+}
+
+function normalizeWhisperTask(task: CoreAsrConfig['whisper_task']) {
+  return task === 'translate' ? 'translate' : 'transcribe'
+}
+
+function languageLabel(language: string) {
+  return LANGUAGE_LABELS[language] ?? language
 }
 
 function errorText(error: unknown) {

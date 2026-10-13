@@ -100,3 +100,12 @@ Reviewer 必须先判断验证手段是否匹配变更类型，再判断证据�
 
 门禁命令是最低要求，不替代 feature spec 明确的真实模型、音频、权限、性能或重启恢复验收。
 
+## 8. Native Capture 结构化验收
+
+原生采集发布验收必须使用 `scripts/verify-native-capture.sh --verify-report-dir <dir>` 校验目标机报告。编译成功、心跳报告、单一路径 smoke 或人工口述均不能替代报告。
+
+报告集必须覆盖 mic-only、system-only、dual-source、权限拒绝、权限允许/撤回、系统设置往返、设备断开/恢复、helper 崩溃恢复、应用重启恢复、sleep/wake、搜索/回放/导出和 30 分钟双源运行。
+
+每份报告至少绑定同一套 app/helper SHA-256、source worktree/commit/dirty digest、macOS 14+ Apple Silicon 环境、canonical thresholds、权限和真实设备身份。产生音频的场景还必须绑定 capture source sample/host ranges、chunk-to-source references、chunk sequence/rotation、chunk hash、ASR job/Receipt/Revision、漂移、丢帧、峰值内存以及搜索、回放、导出和重启恢复结果。30 分钟场景要求 duration >= 1800 秒、每个源至少 3 个连续 rotation chunk、单 chunk <= 600 秒、P95 drift <= 250 ms、dropped frames = 0、peak RSS <= 2048 MiB。
+
+权限拒绝场景必须记录 start 被拒绝，并且不得产生 source/chunk/ASR 记录。allow/revoke、Settings 往返、设备重连、helper relaunch、app restart 和 sleep/wake 必须提供有序 transition/effect 证据。报告缺字段、身份不完整、候选构建混用、阈值超限、场景语义矛盾或场景缺失均视为验收失败。

@@ -2,13 +2,14 @@
 # LifeSub desktop ASR verification harness.
 #
 # Usage:
-#   scripts/verify-desktop-asr.sh [target|dmg|--verify-existing]
+#   scripts/verify-desktop-asr.sh [target|dmg|native-reports <dir>|--verify-existing]
 #
 # Modes:
 #   target       Build the app and run acceptance scenarios against the
 #                development binary with an isolated HOME.
 #   dmg          Locate the produced DMG, mount it, verify the contained
 #                .app signature, run packaged-smoke, then detach.
+#   native-reports <dir>  Validate structured native capture reports.
 #   --verify-existing  Read-only: validate committed report JSON without
 #                      executing models or rewriting results.
 #
@@ -181,7 +182,7 @@ run_target_scenarios() {
   green "6. running acceptance scenarios..."
 
   local acceptance_dir="$isolated_home/acceptance"
-  mkdir -p "$acceptance_dir"
+  mkdir -p "$acceptance_dir" "$isolated_home/Library/Application Support"
 
   # 6a. real-asr-heartbeat
   green "   6a. real-asr-heartbeat..."
@@ -283,7 +284,7 @@ run_dmg_verification() {
   trap "hdiutil detach '$mount_point' 2>/dev/null; rm -rf '$isolated_home' '$mount_point'" EXIT
 
   local acceptance_dir="$isolated_home/acceptance"
-  mkdir -p "$acceptance_dir" "$REPORT_DIR"
+  mkdir -p "$acceptance_dir" "$isolated_home/Library/Application Support" "$REPORT_DIR"
 
   local app_executable="$app_bundle/Contents/MacOS/lifesub"
   if [ ! -f "$app_executable" ]; then
@@ -326,8 +327,12 @@ case "${1:-target}" in
   --verify-existing)
     verify_existing
     ;;
+  native-reports)
+    [[ -n "${2:-}" ]] || die "native-reports requires a report directory"
+    "$SCRIPT_DIR/verify-native-capture.sh" --verify-report-dir "$2"
+    ;;
   *)
-    echo "Usage: $0 [target|dmg|--verify-existing]" >&2
+    echo "Usage: $0 [target|dmg|native-reports <dir>|--verify-existing]" >&2
     exit 1
     ;;
 esac

@@ -21,6 +21,12 @@ pub(crate) struct ModelDownloadRecord {
     pub bundle_identity: String,
     pub state: String,
     pub updated_at: String,
+    pub downloaded_bytes: u64,
+    pub expected_bytes: u64,
+    pub artifact_count: usize,
+    pub verified_artifact_count: usize,
+    pub error_code: Option<String>,
+    pub error_summary: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -189,7 +195,9 @@ impl ModelCatalog for Catalog {
         let connection = self.connection.lock().unwrap();
         let changed = connection.execute(
             "UPDATE model_downloads
-             SET state = ?2, error_code = ?3, updated_at = ?4 WHERE id = ?1",
+             SET state = ?2, error_code = ?3,
+                 error_summary = CASE WHEN ?3 IS NULL THEN NULL ELSE ?3 END,
+                 updated_at = ?4 WHERE id = ?1",
             params![download_id, state, error_code, Utc::now().to_rfc3339()],
         )?;
         if changed == 1 {
@@ -468,11 +476,30 @@ impl Catalog {
     pub(crate) fn model_download_records(&self) -> rusqlite::Result<Vec<ModelDownloadRecord>> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
-            "SELECT id, model_id, manifest_version, archive_sha256, state, updated_at
-             FROM model_downloads ORDER BY updated_at DESC, id DESC",
+            "SELECT d.id, d.model_id, d.manifest_version, d.archive_sha256, d.state, d.updated_at,
+                    d.downloaded_bytes, d.expected_bytes, d.error_code, d.error_summary,
+                    (SELECT COUNT(*) FROM model_download_artifacts a WHERE a.download_id = d.id),
+                    (SELECT COUNT(*) FROM model_download_artifacts a
+                     WHERE a.download_id = d.id AND a.state = 'verified')
+             FROM model_downloads d ORDER BY d.updated_at DESC, d.id DESC",
         )?;
         statement
             .query_map([], |row| {
+                let downloaded_bytes: i64 = row.get(6)?;
+                let expected_bytes: i64 = row.get(7)?;
+                let artifact_count: i64 = row.get(10)?;
+                let verified_artifact_count: i64 = row.get(11)?;
+                if downloaded_bytes < 0
+                    || expected_bytes < 0
+                    || artifact_count < 0
+                    || verified_artifact_count < 0
+                    || verified_artifact_count > artifact_count
+                {
+                    return Err(rusqlite::Error::IntegralValueOutOfRange(
+                        6,
+                        downloaded_bytes,
+                    ));
+                }
                 Ok(ModelDownloadRecord {
                     id: row.get(0)?,
                     model_id: row.get(1)?,
@@ -480,6 +507,12 @@ impl Catalog {
                     bundle_identity: row.get(3)?,
                     state: row.get(4)?,
                     updated_at: row.get(5)?,
+                    downloaded_bytes: downloaded_bytes as u64,
+                    expected_bytes: expected_bytes as u64,
+                    artifact_count: artifact_count as usize,
+                    verified_artifact_count: verified_artifact_count as usize,
+                    error_code: row.get(8)?,
+                    error_summary: row.get(9)?,
                 })
             })?
             .collect()

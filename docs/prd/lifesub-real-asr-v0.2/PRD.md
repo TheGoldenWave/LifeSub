@@ -1,6 +1,6 @@
 # PRD - LifeSub 真实本地 ASR V0.2
 
-> **当前发布映射（2026-08-20）**：本 PRD 的真实本地 ASR、模型管理、Job、Receipt、Revision 与重转写范围作为 V0.2.1 交付。真实麦克风/系统音频采集拆至 V0.2.2；Diarization 拆至 V0.3；CAM++ 声纹身份拆至 V0.3.1。
+> **发布映射更新（2026-10-13）**：0.2.1 已交付真实麦克风/系统音频双源采集、SenseVoice/Whisper 本地转写和 Job/Receipt/Revision 闭环；0.2.2 仅进行 S1-S4 稳定化。下文含早期完整目标与历史版本设想，其中 Qwen 两档、Diarization、CAM++、重转写等未交付项不属于 0.2.2 的完成条件。当前范围和证据以 [现行计划](../../superpowers/plans/2026-08-26-lifesub-asr-audio-settings-reference-optimization.md) 与 [过程记录](.artifacts/process.md) 为准。
 
 ## 1. 业务目标
 
@@ -406,6 +406,7 @@ ui --> user: 展示真实转写和来源
 | Job、Receipt、Revision | 行为、数据、接口契约 | Critical | Rust 集成、故障注入、重启恢复 | 状态确定；成功原子发布；失败无半条 Evidence | v1 Catalog、损坏音频、取消、过期 lease、重启 fixture | 必须 | focused tests；Tier 2 结果写入 `.artifacts/process.md` |
 | 真实 Provider 与质量 | 模型运行时、量化质量 | Important | 真实模型集成和量化 Gate | CER/WER、关键短语、时间误差满足本节阈值 | macOS 14+ Apple Silicon；固定中/英/混合音频和模型 hash | Provider 行为必须；量化 Gate 另行执行 | `scripts/verify-asr-gate.sh`、fixture digest、质量报告 |
 | 模型下载与安装 | 行为、数据、供应链安全 | Critical | 集成、负向用例、启动 reconciliation | 中断、低空间、hash 错误或不完整安装不进入 ready；可恢复 | 隔离模型目录和对应故障 fixture | 必须 | model-manager tests、安装 manifest、诊断截图 |
+| 模型下载进度 UI | 行为、交互可访问性 | Important | 组件测试、Tauri 集成、重启恢复、截图 | 下载期间展示持久化的已下载/总字节与百分比或不确定进度；下载完成后准确切换验证/安装/运行时验证状态；失败可重试，支持时可取消；刷新或重启不回退、不伪造进度 | 桌面运行时、受控慢速/中断下载 fixture、当前 bundle identity | 必须 | ModelManager focused tests、Tauri 下载集成测试、`output/asr-v0.2/model-download-progress.png` |
 | UI 与重转写 | 行为、交互可访问性 | Important | 组件测试和 Playwright | 设置持久化；状态准确；重转写保留历史；无伪成功 | 浏览器映射 fixture + Tauri acceptance backend | 行为必须 | frontend tests、`tests/specs/lifesub-real-asr-v0.2.spec.ts`、截图 |
 | 性能与取消 | 性能、资源 | Important | heartbeat/cancel 量化测试 | 满足本节 P95、可见和停止时间阈值 | M1/16GB、固定 5 分钟音频和真实模型 | 行为必须；性能 Gate 另行执行 | 性能报告和命令输出写入 `.artifacts/process.md` |
 | 发布安装包 | 配置、生成物、真实环境 | Critical | 构建、签名/动态库检查、DMG smoke | 镜像内签名通过；无缺失库；两个 Provider 执行成功 | macOS 14+ Apple Silicon；release DMG、固定模型/音频 | 不制造合成 RED；必须有 smoke 证据 | checksum、`codesign`、`otool -L`、packaged smoke 日志 |

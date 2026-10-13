@@ -2,62 +2,23 @@
 
 > 让生活与工作中的重要声音，成为个人可控、Agent 可用的长期记忆。
 
-LifeSub（中文名：旁白）是一个本地优先的个人记忆系统。它从 macOS 会议音频和麦克风开始，完成录音、转写、摘要、检索与证据回溯，并通过插件把个人记忆安全地提供给 Codex、DeepSeek Harness、Malow 等 Agent。
+LifeSub（中文名：旁白）是一个本地优先的音频 Evidence 工具。它在 macOS 上采集或导入音频，完成本地转写、检索、回放与来源回溯。导航摘要和 Agent 插件仍属后续规划。
 
 LifeSub 由 goldenwave 与 Malow 产品协同打造，可作为 Malow 生态插件，也面向其他 Agent 产品提供通用能力。长期方向是"可穿戴录音硬件 + 桌面与移动伴侣 + 个人记忆核心 + Agent 插件生态"；首版坚持软件先行。
 
-## 当前版本：V0.2
+## 当前版本
 
-> 开发源护栏（2026-08-22）：唯一开发/发布工作树为 `/Users/goldenwave/Documents/MyProject/LifeSub`，分支 `main`。原外部 worktree 仅作回滚和补丁比较；历史 DMG 和 `/Applications/LifeSub.app` 不是源码真值。
+`0.2.1` 已完成真实双源采集、本地 ASR、Catalog Job/Receipt/Revision 发布，以及签名 DMG 和安装版验收。安装版仍是 `0.2.1`。`0.2.2` 正在进行轻量稳定化，源码版本已经更新；完成验证和重新打包前，不把它称为已发布版本。开发与发布源以 [工作区状态](docs/workspace-status.md) 为准。
 
-当前已完成 V0.2 UI/Catalog 安全闭环，以及 V0.2.1 原生采集计划 Task 1--6：Rust/Swift 采集协议、ScreenCaptureKit 系统音频、AVAudioEngine 麦克风、arm64 sidecar 构建签名、继承 FD nonce 和 UID/PID/可执行文件身份认证。这些能力尚未经 Task 7/8 接入 Catalog 原子 chunk sealing 和 production coordinator，因此桌面生产路径仍 fail closed，不回退 Mock 或伪报保存成功。
+| 已交付能力 | 当前边界 |
+|---|---|
+| 录音与导入 | 麦克风、系统音频、双源采集和音频导入；原始 Chunk 不可变 |
+| 本地转写 | SenseVoice 与 Whisper 已通过安装版样本 Gate；精确模型身份、durable Job、Receipt、Revision 和 Segment 证据 |
+| 找回与管理 | Catalog 时间线、搜索、按片段回放、Markdown 导出、笔记、词典及设置持久化 |
+| 桌面可靠性 | 精确麦克风 UID、首帧测试、同 UID 恢复、诊断导出和模型下载/取消/重试 |
+| 浏览器预览 | 仅演示布局；不会录音、保存或运行本地 ASR |
 
-### 已完成
-
-| 模块 | 状态 |
-|------|------|
-| 前端 4 页面架构（录音 / 时间线 / 词典 / 设置弹窗） | ✅ |
-| 浏览器 Demo 预览 | ✅ 显式标识，不录音、不保存、不调用本地 ASR |
-| 桌面 Catalog 时间线、搜索、统计与错误重试 | ✅ 真实数据 |
-| 音频导入、hash、不可变 Chunk 与 durable Job outcome | ✅ |
-| 时间戳笔记（待办/备忘/问题/决定） | ✅ Catalog 持久化 |
-| 词典管理（分类/词条/别名/启用停用） | ✅ Catalog 持久化 |
-| ASR Provider + 精确 model_id 设置 | ✅ Catalog 持久化，禁止静默换模型 |
-| revision 历史、人工修订与按 Segment/Chunk 回放 | ✅ |
-| 设置弹窗焦点锁定、多 Modal 栈与响应式布局 | ✅ |
-| 声纹库（FunASR CAM++ embedding） | UI/CRUD 就绪，embedding 提取未接通 |
-| 后端 Catalog V5 迁移（notes / dictionary / voiceprints / settings） | ✅ |
-| 后端 22 个 Tauri 命令（CRUD + 统计 + 配置） | ✅ |
-| 后端 idempotency + mutation flow | ✅ |
-| ASR Provider/模型/Receipt/Job 基础设施（SenseVoice / Whisper / Qwen3-ASR） | ✅；production executor 待接通 |
-| 模型管理（下载/安装/卸载） | ✅ |
-| 本地 LLM 润色与快速输入基础设施 | ✅ 失败显式；禁止静默 Mock |
-| V0.2 arm64 安装包与 `/Applications/LifeSub.app` | ✅ 已重新打包、签名验证并替换 |
-
-### 进行中
-
-| 模块 | 状态 |
-|------|------|
-| ScreenCaptureKit + AVAudioEngine helper | 已实现、测试和复审；待 Task 7/8 接入 Catalog/production coordinator |
-| Catalog v6 capture timing + atomic chunk sealing | Task 7 RED，暂停中 |
-| production NativeCaptureCoordinator | 未实现；当前桌面路径 fail closed |
-| native ASR production executor | 待接通；Job worker 生命周期已完成，执行器当前 fail closed |
-| 模型安装/下载交互 | 后端基础设施已完成，UI 暂禁用并标注计划中 |
-| 说话人分离（Diarization）与 CAM++ embedding | 待开发 |
-
-### 规划中
-
-| 模块 | 设计文档 |
-|------|---------|
-| Agent 插件生态（MCP Server） | Phase 2 |
-| 隐私同步（GitHub 加密记忆库） | Phase 3 |
-
-### 当前质量门禁
-
-- Rust Tier 2：`504 passed / 0 failed / 7 ignored`，`cargo fmt`、Clippy `-D warnings`、`git diff --check` 通过。
-- 前端：Vitest `69/69`、Playwright `32/32`、TypeScript/Vite 生产构建通过。
-- 源码版本：`package.json`、Cargo 与 Tauri bundle 统一为 `0.2.1`。
-- 当前 `/Applications/LifeSub.app` 和历史 `0.1.0` DMG 早于本轮主工作树合并，只作为历史运行记录，不是当前源码的发布证据；Tasks 7--12 与硬件验收通过前不生成或安装新的发布候选。
+当前不提供真实说话人分离、CAM++ 身份识别、词典自动 ASR 修正或持久的 AI 校正版；临时润色只在页面预览。`0.2.2` 的范围是设置与状态表达、诊断操作和性能基线，不修改 Evidence 图谱。后续方向见 [路线图](docs/roadmap.md)，最新门禁见 [过程记录](docs/prd/lifesub-real-asr-v0.2/.artifacts/process.md)。
 
 ## 生态关系
 

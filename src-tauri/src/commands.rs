@@ -1,11 +1,13 @@
 use sha2::Digest;
 use std::collections::HashMap;
+use std::io::Write;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::asr::job::canonical_time;
 use crate::asr::manifest::{QualificationPolicy, RuntimeRequirement, model_registry, vad_manifest};
@@ -16,24 +18,53 @@ use crate::asr::model_manager::DeviceProfile;
 use crate::asr::provider::{ProviderOptions, ProviderSelection};
 use crate::asr::service::{AsrEnqueueRequest, DEFAULT_VAD_MODEL_ID, EnqueueProviderFactory};
 use crate::asr::settings::{AsrProviderOptions, AsrSettings, WhisperTask};
-use crate::capture::StreamingCapture;
+use crate::capture::helper::{
+    MicrophoneDiscoveryError, list_microphones_one_shot_with_cancel,
+    permission_state_one_shot_with_cancel, probe_microphone_one_shot_with_cancel,
+};
+use crate::capture::protocol::{
+    MicrophoneDevice, MicrophoneProbeMessage, MicrophoneProbeResult, MicrophoneTransport,
+    PermissionState, PermissionStateMessage,
+};
+use crate::capture::session::NativeCaptureSession;
 use crate::catalog::{Catalog, TimelineChunk, TimelineJobSummary};
 use crate::desktop_runtime::{DesktopRuntimeFactory, ProductionDesktopRuntimeFactory};
+use crate::diagnostics::{
+    DiagnosticError, DiagnosticIdentities, DiagnosticMicrophoneProbe, DiagnosticModel,
+    DiagnosticPermissions, DiagnosticSelectedMicrophone, DiagnosticsSnapshot, sha256_file,
+    sha256_text, storage_snapshot,
+};
 use crate::domain::{
-    AsrErrorCode, AsrLanguage, AsrProviderKind, AudioChunk, CaptureNote, CaptureSession,
-    CaptureState, ChunkIntegrityState, DictionaryCategory, DictionaryEntry, ImportAsrDisposition,
-    ImportModelReadiness, StatsSnapshot, TranscriptRevision, TranscriptSegment, Voiceprint,
+    AsrErrorCode, AsrLanguage, AsrProviderKind, AudioChunk, AudioSource, CaptureNote,
+    CaptureSession, CaptureState, ChunkIntegrityState, DictionaryCategory, DictionaryEntry,
+    ImportAsrDisposition, ImportModelReadiness, StatsSnapshot, TranscriptRevision,
+    TranscriptSegment, Voiceprint,
 };
 use crate::quick_input::QuickInput;
-use crate::service::{CoreRuntime, EvidenceService, parse_evidence_uri};
+use crate::service::{CoreRuntime, EvidenceService, parse_evidence_uri, render_record_markdown};
 
 pub struct AppState {
     runtime: Arc<CoreRuntime>,
     data_dir: PathBuf,
-    streaming: Mutex<StreamingCapture>,
+    streaming: Mutex<NativeCaptureSession>,
+    last_microphone_probe: Mutex<Option<MicrophoneProbeMessage>>,
+    last_capture_error: Mutex<Option<DiagnosticError>>,
+    model_operations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_shutdown: Arc<AtomicBool>,
     worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub quick_input: QuickInput,
+}
+
+pub(crate) enum StartupDisposition<T> {
+    Ready(T),
+    Exit { reason: String },
+}
+
+pub(crate) fn startup_disposition<T>(result: Result<T, String>) -> StartupDisposition<T> {
+    match result {
+        Ok(value) => StartupDisposition::Ready(value),
+        Err(reason) => StartupDisposition::Exit { reason },
+    }
 }
 
 #[derive(Serialize)]
@@ -80,6 +111,43 @@ pub struct TimelineJobSummaryPayload {
     pub error_summary: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct CommittedSegmentPayload {
+    pub segment_id: String,
+    pub chunk_id: String,
+    pub capture_source_id: Option<String>,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub source: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CommittedPublicationPayload {
+    pub revision_id: String,
+    pub session_id: String,
+    pub revision_number: i64,
+    pub provider: String,
+    pub created_at: String,
+    pub segments: Vec<CommittedSegmentPayload>,
+}
+
+#[derive(Serialize)]
+pub struct AsrSessionStatePayload {
+    pub latest_revision: Option<CommittedPublicationPayload>,
+    pub latest_job: Option<TimelineJobSummaryPayload>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicrophoneDevicePayload {
+    pub uid: String,
+    pub name: String,
+    pub is_default: bool,
+    pub is_connected: bool,
+    pub transport: String,
+}
+
 #[derive(Serialize)]
 pub struct AppRuntimeInfo {
     pub app_version: String,
@@ -90,7 +158,14 @@ pub struct AppRuntimeInfo {
 
 #[derive(Serialize)]
 pub struct ModelDownloadPayload {
+    pub id: String,
     pub state: String,
+    pub downloaded_bytes: u64,
+    pub expected_bytes: u64,
+    pub artifact_index: usize,
+    pub artifact_count: usize,
+    pub error_code: Option<String>,
+    pub error_summary: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -122,18 +197,56 @@ impl AppState {
             .path()
             .app_data_dir()
             .map_err(|error| error.to_string())?;
-        Self::initialize_at(data_dir)
+        let runtime =
+            Arc::new(CoreRuntime::initialize(&data_dir).map_err(|error| format!("{error:?}"))?);
+        let publication_app = app.clone();
+        let publication_runtime = runtime.clone();
+        let publication = Arc::new(move |revision: &TranscriptRevision| {
+            if let Ok(payload) =
+                committed_publication_payload(publication_runtime.catalog_ref(), revision)
+            {
+                let _ = publication_app.emit("asr-publication-committed", payload);
+            }
+        });
+        let failure_app = app.clone();
+        let failure = Arc::new(move |event: &crate::asr::worker::DurableJobFailure| {
+            let _ = failure_app.emit("asr-job-failed", event);
+        });
+        Self::from_runtime(
+            data_dir,
+            runtime,
+            crate::asr::worker::WorkerCallbacks {
+                publication: Some(publication),
+                failure: Some(failure),
+            },
+        )
     }
 
+    #[cfg(test)]
     fn initialize_at(data_dir: PathBuf) -> Result<Self, String> {
         let runtime =
             Arc::new(CoreRuntime::initialize(&data_dir).map_err(|error| format!("{error:?}"))?);
+        Self::from_runtime(
+            data_dir,
+            runtime,
+            crate::asr::worker::WorkerCallbacks::default(),
+        )
+    }
+
+    fn from_runtime(
+        data_dir: PathBuf,
+        runtime: Arc<CoreRuntime>,
+        callbacks: crate::asr::worker::WorkerCallbacks,
+    ) -> Result<Self, String> {
         let (worker_shutdown, worker_handle) =
-            ProductionDesktopRuntimeFactory::spawn_worker(runtime.clone());
+            ProductionDesktopRuntimeFactory::spawn_worker(runtime.clone(), callbacks);
         Ok(Self {
             runtime,
             data_dir,
-            streaming: Mutex::new(ProductionDesktopRuntimeFactory::create_capture()),
+            streaming: Mutex::new(NativeCaptureSession::new()),
+            last_microphone_probe: Mutex::new(None),
+            last_capture_error: Mutex::new(None),
+            model_operations: Arc::new(Mutex::new(HashMap::new())),
             worker_shutdown,
             worker_handle: Mutex::new(worker_handle),
             quick_input: QuickInput::default(),
@@ -148,6 +261,30 @@ impl AppState {
             .ensure_current()
             .map_err(|error| format!("{error:?}"))?;
         mutation(self.runtime.catalog_ref())
+    }
+
+    fn write_record_markdown_export(
+        &self,
+        path: &std::path::Path,
+        session_id: &str,
+        revision_number: i64,
+    ) -> Result<(), String> {
+        let markdown = self.with_current_catalog(|catalog| {
+            let session = catalog
+                .list_sessions()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| "record export session not found".to_string())?;
+            let revision = catalog
+                .list_revisions_with_segments(session_id)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|revision| revision.number == revision_number)
+                .ok_or_else(|| "record export revision not found".to_string())?;
+            Ok(render_record_markdown(&session, &revision))
+        })?;
+        write_private_export(path, markdown.as_bytes(), "record export")
     }
 
     fn create_capture_session(&self, title: String) -> Result<CaptureSession, String> {
@@ -389,25 +526,81 @@ impl AppState {
         })
     }
 
+    fn asr_session_state(&self, session_id: String) -> Result<AsrSessionStatePayload, String> {
+        self.with_current_catalog(|catalog| {
+            let latest_revision = catalog
+                .list_revisions_with_segments(&session_id)
+                .map_err(|error| error.to_string())?
+                .last()
+                .map(|revision| committed_publication_payload(catalog, revision))
+                .transpose()?;
+            let latest_job = catalog
+                .latest_job_for_session(&session_id)
+                .map_err(|error| error.to_string())?
+                .map(map_timeline_job);
+            Ok(AsrSessionStatePayload {
+                latest_revision,
+                latest_job,
+            })
+        })
+    }
+
     fn enqueue_import_job(
         &self,
         session: &CaptureSession,
         chunk: &AudioChunk,
     ) -> Result<Option<TimelineJobSummaryPayload>, String> {
-        let config = self.get_asr_config()?;
+        Self::enqueue_auto_transcription(&self.runtime, &session.id, chunk)
+    }
+
+    fn create_note(
+        &self,
+        session_id: String,
+        content: String,
+        timestamp_ms: i64,
+        tag: String,
+        segment_id: Option<String>,
+    ) -> Result<CaptureNote, String> {
+        let note = CaptureNote::new(session_id, content, timestamp_ms, tag, segment_id);
+        self.with_current_catalog(|catalog| {
+            catalog.insert_note(&note).map_err(|e| e.to_string())?;
+            Ok(note.clone())
+        })
+    }
+
+    fn list_notes(&self, session_id: String) -> Result<Vec<CaptureNote>, String> {
+        self.with_current_catalog(|catalog| {
+            catalog.list_notes(&session_id).map_err(|e| e.to_string())
+        })
+    }
+
+    fn update_note(&self, note_id: String, content: String, tag: String) -> Result<(), String> {
+        self.with_current_catalog(|catalog| {
+            catalog
+                .update_note(&note_id, &content, &tag)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub(crate) fn enqueue_auto_transcription(
+        runtime: &CoreRuntime,
+        session_id: &str,
+        chunk: &AudioChunk,
+    ) -> Result<Option<TimelineJobSummaryPayload>, String> {
+        let config = load_asr_config(runtime)?;
         if !config.auto_transcribe {
             return Ok(None);
         }
 
         config.validate_for_persistence()?;
-        let selection = resolve_import_model(self, &config)?;
+        let selection = resolve_import_model(runtime, &config)?;
         let settings = asr_settings_from_config(&config, &selection.model_id)?;
         let provider_selection = provider_selection_from_settings(&settings);
         let manifest = model_registry()
             .model(&selection.model_id)
             .ok_or_else(|| "selected model manifest missing".to_owned())?;
         let fingerprint = import_fingerprint(
-            &session.id,
+            session_id,
             &chunk.id,
             &chunk.sha256,
             manifest.id,
@@ -418,7 +611,7 @@ impl AppState {
         let now = canonical_time(chrono::Utc::now());
         let job = crate::asr::job::EnqueueJob {
             id: job_id.clone(),
-            session_id: session.id.clone(),
+            session_id: session_id.to_owned(),
             chunk_id: chunk.id.clone(),
             provider: provider_name(settings.provider).to_owned(),
             model_id: manifest.id.to_owned(),
@@ -453,8 +646,7 @@ impl AppState {
             created_at: now,
         };
 
-        let vad_ready =
-            !settings.vad_enabled || default_vad_is_executable(self.runtime.catalog_ref())?;
+        let vad_ready = !settings.vad_enabled || default_vad_is_executable(runtime.catalog_ref())?;
 
         if selection.executable && vad_ready {
             let lookup = ImportModelLookup {
@@ -468,11 +660,9 @@ impl AppState {
                 model_executable: true,
                 vad_executable: vad_ready,
             };
-            let service = self
-                .runtime
-                .asr_service(&lookup, &NoopEnqueueProviderFactory);
+            let service = runtime.asr_service(&lookup, &NoopEnqueueProviderFactory);
             match service.enqueue(AsrEnqueueRequest {
-                session_id: session.id.clone(),
+                session_id: session_id.to_owned(),
                 chunk_id: chunk.id.clone(),
                 input_sha256: chunk.sha256.clone(),
                 settings,
@@ -501,7 +691,7 @@ impl AppState {
                         ImportAsrDisposition::BlockedModel(code) => {
                             let summary =
                                 format!("auto-transcribe blocked: {}", asr_error_name(code));
-                            self.runtime
+                            runtime
                                 .catalog_ref()
                                 .insert_blocked_asr_job(&job, asr_error_name(code), &summary)
                                 .map_err(|error| format!("{error:?}"))?;
@@ -510,7 +700,7 @@ impl AppState {
                         ImportAsrDisposition::Failed(code) => {
                             let summary =
                                 format!("auto-transcribe failed: {}", asr_error_name(code));
-                            self.runtime
+                            runtime
                                 .catalog_ref()
                                 .insert_failed_asr_job(&job, asr_error_name(code), &summary)
                                 .map_err(|error| format!("{error:?}"))?;
@@ -537,7 +727,7 @@ impl AppState {
             AsrErrorCode::ModelCapabilityUnavailable
         };
         let error_code = asr_error_name(error).to_owned();
-        self.runtime
+        runtime
             .catalog_ref()
             .insert_blocked_asr_job(
                 &job,
@@ -552,35 +742,6 @@ impl AppState {
             error_code: Some(error_code.clone()),
             error_summary: Some(format!("auto-transcribe blocked: {error_code}")),
         }))
-    }
-
-    fn create_note(
-        &self,
-        session_id: String,
-        content: String,
-        timestamp_ms: i64,
-        tag: String,
-        segment_id: Option<String>,
-    ) -> Result<CaptureNote, String> {
-        let note = CaptureNote::new(session_id, content, timestamp_ms, tag, segment_id);
-        self.with_current_catalog(|catalog| {
-            catalog.insert_note(&note).map_err(|e| e.to_string())?;
-            Ok(note.clone())
-        })
-    }
-
-    fn list_notes(&self, session_id: String) -> Result<Vec<CaptureNote>, String> {
-        self.with_current_catalog(|catalog| {
-            catalog.list_notes(&session_id).map_err(|e| e.to_string())
-        })
-    }
-
-    fn update_note(&self, note_id: String, content: String, tag: String) -> Result<(), String> {
-        self.with_current_catalog(|catalog| {
-            catalog
-                .update_note(&note_id, &content, &tag)
-                .map_err(|e| e.to_string())
-        })
     }
 
     fn delete_note(&self, note_id: String) -> Result<(), String> {
@@ -723,31 +884,13 @@ impl AppState {
     }
 
     fn get_asr_config(&self) -> Result<crate::domain::AsrConfig, String> {
-        self.with_current_catalog(|catalog| {
-            let json = catalog
-                .get_setting("asr_config")
-                .map_err(|e| e.to_string())?
-                .unwrap_or_else(|| {
-                    serde_json::to_string(&crate::domain::AsrConfig {
-                        provider: "sense_voice".into(),
-                        model_id: "sense-voice-small-int8-2024-07-17".into(),
-                        language: "zh".into(),
-                        auto_transcribe: true,
-                        threads: 4,
-                        vad_enabled: true,
-                        vad_min_speech_ms: 300,
-                        vad_silence_ms: 800,
-                        itn_enabled: true,
-                    })
-                    .unwrap()
-                });
-            serde_json::from_str(&json).map_err(|e| e.to_string())
-        })
+        load_asr_config(&self.runtime)
     }
 
     fn set_asr_config(&self, config: crate::domain::AsrConfig) -> Result<(), String> {
-        config.validate_for_persistence()?;
-        let json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
+        let normalized = config.normalized_for_persistence()?;
+        normalized.validate_for_persistence()?;
+        let json = serde_json::to_string(&normalized).map_err(|e| e.to_string())?;
         self.with_current_catalog(|catalog| {
             catalog
                 .set_setting("asr_config", &json)
@@ -755,41 +898,252 @@ impl AppState {
         })
     }
 
+    fn get_settings_capabilities(&self) -> Result<crate::domain::SettingsCapabilities, String> {
+        Ok(settings_capabilities_for(&self.data_dir))
+    }
+
     fn get_recording_config(&self) -> Result<crate::domain::RecordingConfig, String> {
+        let capabilities = settings_capabilities_for(&self.data_dir);
         self.with_current_catalog(|catalog| {
             let json = catalog
                 .get_setting("recording_config")
                 .map_err(|e| e.to_string())?
                 .unwrap_or_else(|| {
-                    serde_json::to_string(&crate::domain::RecordingConfig {
-                        capture_mode: "smart".into(),
-                        im_detection_enabled: true,
-                        im_apps: vec![
-                            "wechat".into(),
-                            "dingtalk".into(),
-                            "feishu".into(),
-                            "teams".into(),
-                            "zoom".into(),
-                            "qq".into(),
-                        ],
-                        detection_delay_secs: 3,
-                        recovery_delay_secs: 5,
-                        sample_rate: 16000,
-                        storage_path: "~/.lifesub/recordings/".into(),
-                    })
+                    serde_json::to_string(
+                        &crate::domain::RecordingConfig::default_for_capabilities(&capabilities),
+                    )
                     .unwrap()
                 });
-            serde_json::from_str(&json).map_err(|e| e.to_string())
+            let config: crate::domain::RecordingConfig =
+                serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            Ok(config.normalized_for_capabilities(&capabilities))
         })
     }
 
     fn set_recording_config(&self, config: crate::domain::RecordingConfig) -> Result<(), String> {
-        let json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
+        let capabilities = settings_capabilities_for(&self.data_dir);
+        let normalized = config.normalized_for_capabilities(&capabilities);
+        normalized.validate_for_persistence()?;
+        let json = serde_json::to_string(&normalized).map_err(|e| e.to_string())?;
         self.with_current_catalog(|catalog| {
             catalog
                 .set_setting("recording_config", &json)
                 .map_err(|e| e.to_string())
         })
+    }
+
+    fn list_microphone_devices(
+        &self,
+        cancelled: &AtomicBool,
+    ) -> Result<Vec<MicrophoneDevicePayload>, String> {
+        let devices = list_microphones_one_shot_with_cancel(
+            &self.data_dir,
+            std::time::Duration::from_secs(5),
+            cancelled,
+        )
+        .map_err(map_microphone_discovery_error)?;
+        Ok(devices
+            .into_iter()
+            .map(MicrophoneDevicePayload::from)
+            .collect())
+    }
+
+    fn probe_microphone(
+        &self,
+        microphone_device_uid: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<MicrophoneProbeMessage, String> {
+        let result = probe_microphone_one_shot_with_cancel(
+            &self.data_dir,
+            microphone_device_uid,
+            std::time::Duration::from_secs(5),
+            cancelled,
+        )
+        .map_err(map_microphone_discovery_error)?;
+        *self
+            .last_microphone_probe
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(result.clone());
+        Ok(result)
+    }
+
+    fn diagnostics_snapshot(
+        &self,
+        app_version: String,
+        app_executable: &std::path::Path,
+        permissions: PermissionStateMessage,
+        devices: Vec<MicrophoneDevice>,
+    ) -> Result<DiagnosticsSnapshot, String> {
+        let config = self.get_recording_config()?;
+        let selected = config
+            .microphone_device_uid
+            .as_deref()
+            .and_then(|uid| devices.iter().find(|device| device.uid == uid));
+        let latest_probe = self
+            .last_microphone_probe
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .filter(|probe| Some(probe.uid.as_str()) == config.microphone_device_uid.as_deref());
+
+        let installations = self
+            .runtime
+            .catalog_ref()
+            .model_installation_records()
+            .map_err(|error| error.to_string())?;
+        let installation_by_id = installations
+            .into_iter()
+            .map(|record| (record.model_id.clone(), record))
+            .collect::<HashMap<_, _>>();
+        let models = self
+            .list_asr_models()?
+            .into_iter()
+            .map(|model| {
+                let installation = installation_by_id.get(&model.model_id).filter(|record| {
+                    record.manifest_version == model.manifest_version
+                        && record.bundle_identity == model.bundle_identity
+                });
+                DiagnosticModel {
+                    model_id: model.model_id,
+                    state: model.installation_state,
+                    bundle_identity: model.bundle_identity,
+                    runtime_identity_sha256: installation
+                        .and_then(|record| record.runtime_identity_json.as_deref())
+                        .map(sha256_text),
+                    last_error_code: model.last_error_code,
+                }
+            })
+            .collect();
+        let runtime = crate::asr::pinned_sherpa_runtime_identity();
+        let helper_code_sha256 = option_env!("LIFESUB_CAPTURE_HELPER_CODE_SHA256")
+            .ok_or_else(|| "capture helper build identity unavailable".to_string())?
+            .to_string();
+
+        let active_capture_error = self
+            .streaming
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .recent_error()
+            .map(|error| DiagnosticError {
+                code: error.code,
+                summary: error.message,
+            });
+        let recent_error = active_capture_error.or_else(|| {
+            self.last_capture_error
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        });
+
+        Ok(DiagnosticsSnapshot::new(
+            DiagnosticPermissions {
+                microphone: permission_name(permissions.microphone).to_string(),
+                screen_recording: permission_name(permissions.screen_recording).to_string(),
+            },
+            DiagnosticSelectedMicrophone {
+                uid: config.microphone_device_uid,
+                name: config.microphone_device_name,
+                connected: selected.is_some(),
+                transport: selected
+                    .map(|device| microphone_transport_name(device.transport).to_string()),
+                probe_result: latest_probe
+                    .as_ref()
+                    .map(|probe| probe_result_name(probe.result).to_string()),
+                probe: latest_probe.map(|probe| DiagnosticMicrophoneProbe {
+                    uid: probe.uid,
+                    name: probe.name,
+                    transport: microphone_transport_name(probe.transport).to_string(),
+                    input_sample_rate_hz: probe.input_sample_rate_hz,
+                    input_channel_count: probe.input_channel_count,
+                    read_back_uid: probe.read_back_uid,
+                    first_frame_sample_count: probe.first_frame_sample_count,
+                    elapsed_ms: probe.elapsed_ms,
+                    result: probe_result_name(probe.result).to_string(),
+                }),
+            },
+            DiagnosticIdentities {
+                app_version,
+                app_executable_sha256: sha256_file(app_executable)?,
+                helper_code_sha256,
+                capture_protocol_version: crate::capture::protocol::PROTOCOL_VERSION,
+                runtime_version: runtime.version.to_string(),
+                runtime_git_commit: runtime.git_commit.to_string(),
+                runtime_archive_sha256: runtime.native_archive_sha256.to_string(),
+                runtime_build_id: runtime.build_id.to_string(),
+            },
+            models,
+            storage_snapshot(&self.data_dir)?,
+            recent_error,
+        ))
+    }
+
+    fn record_capture_error(&self, code: &str, summary: String) {
+        *self
+            .last_capture_error
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(DiagnosticError {
+            code: code.to_string(),
+            summary,
+        });
+    }
+
+    fn request_model_cancellation(&self, download_id: String) -> Result<ModelOperationAck, String> {
+        let record = self
+            .runtime
+            .catalog_ref()
+            .model_download_records()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|record| record.id == download_id)
+            .ok_or_else(|| "model download not found".to_string())?;
+        validate_current_download_identity(&record)?;
+        if matches!(record.state.as_str(), "succeeded" | "failed" | "cancelled") {
+            return Ok(ModelOperationAck {
+                download_id,
+                cancel_requested: false,
+            });
+        }
+        let operation = self
+            .model_operations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&record.model_id)
+            .cloned()
+            .ok_or_else(|| "model operation is not active".to_string())?;
+        operation.store(true, Ordering::Release);
+        Ok(ModelOperationAck {
+            download_id,
+            cancel_requested: true,
+        })
+    }
+
+    fn retry_install_ids(&self, model_id: &str, download_id: &str) -> Result<[String; 2], String> {
+        let install_ids = model_install_ids(model_id)?;
+        let records = self
+            .runtime
+            .catalog_ref()
+            .model_download_records()
+            .map_err(|error| error.to_string())?;
+        let record = records
+            .iter()
+            .find(|record| record.id == download_id)
+            .ok_or_else(|| "model download not found".to_string())?;
+        validate_current_download_identity(record)?;
+        if !install_ids.iter().any(|id| id == &record.model_id)
+            || !matches!(record.state.as_str(), "failed" | "cancelled")
+        {
+            return Err("model download is not retryable for this model".to_string());
+        }
+        let latest_retryable = records.iter().find(|candidate| {
+            candidate.model_id == record.model_id
+                && candidate.manifest_version == record.manifest_version
+                && candidate.bundle_identity == record.bundle_identity
+                && matches!(candidate.state.as_str(), "failed" | "cancelled")
+        });
+        if latest_retryable.map(|candidate| candidate.id.as_str()) != Some(download_id) {
+            return Err("model download was replaced by a newer operation".to_string());
+        }
+        Ok(install_ids)
     }
 
     fn list_asr_models(&self) -> Result<Vec<AsrModelPayload>, String> {
@@ -833,6 +1187,28 @@ impl AppState {
                     .expect("manifest registry lookup must succeed");
 
                 let (runtime_family, runtime_version) = runtime_descriptor(manifest.runtime);
+                let vad = vad_manifest();
+                let vad_ready = installations.get(vad.id).is_some_and(|record| {
+                    record.manifest_version == vad.manifest_version
+                        && record.bundle_identity == vad.bundle.identity_sha256
+                        && record.state == "runtime_qualified"
+                });
+                let target_download = downloads.iter().find(|record| {
+                    record.model_id == manifest.id
+                        && record.manifest_version == manifest.manifest_version
+                        && record.bundle_identity == manifest.bundle.identity_sha256
+                });
+                let dependency_download = (!vad_ready)
+                    .then(|| {
+                        downloads.iter().find(|record| {
+                            record.model_id == vad.id
+                                && record.manifest_version == vad.manifest_version
+                                && record.bundle_identity == vad.bundle.identity_sha256
+                                && record.state != "succeeded"
+                        })
+                    })
+                    .flatten();
+                let visible_download = dependency_download.or(target_download);
 
                 AsrModelPayload {
                     model_id: manifest.id.to_owned(),
@@ -863,20 +1239,116 @@ impl AppState {
                     executable: capabilities.executable,
                     reason_code: capabilities.reason_code,
                     last_error_code: installation.and_then(|record| record.last_error_code.clone()),
-                    download: downloads
-                        .iter()
-                        .find(|record| {
-                            record.model_id == manifest.id
-                                && record.manifest_version == manifest.manifest_version
-                                && record.bundle_identity == manifest.bundle.identity_sha256
-                        })
-                        .map(|record| ModelDownloadPayload {
-                            state: record.state.clone(),
-                        }),
+                    download: visible_download.map(|record| ModelDownloadPayload {
+                        id: record.id.clone(),
+                        state: if record.state == "succeeded"
+                            && installation_state == "installed_unqualified"
+                        {
+                            "qualifying".to_string()
+                        } else {
+                            record.state.clone()
+                        },
+                        downloaded_bytes: record.downloaded_bytes,
+                        expected_bytes: record.expected_bytes,
+                        artifact_index: if record.artifact_count == 0 {
+                            0
+                        } else if record.state == "succeeded" {
+                            record.artifact_count
+                        } else {
+                            (record.verified_artifact_count + 1).min(record.artifact_count)
+                        },
+                        artifact_count: record.artifact_count,
+                        error_code: record.error_code.clone(),
+                        error_summary: record.error_summary.clone(),
+                    }),
                 }
             })
             .collect())
     }
+}
+
+fn load_asr_config(runtime: &CoreRuntime) -> Result<crate::domain::AsrConfig, String> {
+    runtime
+        .ensure_current()
+        .map_err(|error| format!("{error:?}"))?;
+    let json = runtime
+        .catalog_ref()
+        .get_setting("asr_config")
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| {
+            serde_json::to_string(
+                &crate::domain::AsrConfig::default_for_provider("sense_voice")
+                    .expect("default provider must be available"),
+            )
+            .expect("default ASR config must serialize")
+        });
+    let config: crate::domain::AsrConfig =
+        serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    Ok(config.normalized_for_projection())
+}
+
+fn model_install_ids(model_id: &str) -> Result<[String; 2], String> {
+    let model = model_registry()
+        .model(model_id)
+        .ok_or_else(|| format!("unknown ASR model {model_id}"))?;
+    Ok([
+        crate::asr::service::DEFAULT_VAD_MODEL_ID.to_owned(),
+        model.id.to_owned(),
+    ])
+}
+
+fn settings_capabilities_for(data_dir: &std::path::Path) -> crate::domain::SettingsCapabilities {
+    crate::domain::SettingsCapabilities::for_data_directory(data_dir.to_string_lossy().into_owned())
+}
+
+fn parse_whisper_task(task: Option<&str>) -> Result<WhisperTask, String> {
+    match task.unwrap_or("transcribe") {
+        "transcribe" => Ok(WhisperTask::Transcribe),
+        "translate" => Ok(WhisperTask::Translate),
+        other => Err(format!("unsupported whisper task {other}")),
+    }
+}
+
+fn committed_publication_payload(
+    catalog: &Catalog,
+    revision: &TranscriptRevision,
+) -> Result<CommittedPublicationPayload, String> {
+    let segments = revision
+        .segments
+        .iter()
+        .map(|segment| {
+            let chunk_id = segment
+                .chunk_id
+                .clone()
+                .ok_or_else(|| "committed ASR segment is missing chunk identity".to_owned())?;
+            let capture_source_id = catalog
+                .capture_chunk_timing(&chunk_id)
+                .map_err(|error| error.to_string())?
+                .map(|timing| timing.capture_source_id);
+            Ok(CommittedSegmentPayload {
+                segment_id: segment.id.clone(),
+                chunk_id,
+                capture_source_id,
+                start_ms: segment.start_ms,
+                end_ms: segment.end_ms,
+                source: match segment.source {
+                    AudioSource::Microphone => "microphone",
+                    AudioSource::SystemAudio => "system_audio",
+                    AudioSource::Imported => "imported",
+                }
+                .to_owned(),
+                text: segment.text.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(CommittedPublicationPayload {
+        revision_id: revision.id.clone(),
+        session_id: revision.session_id.clone(),
+        revision_number: revision.number,
+        provider: revision.provider.clone(),
+        created_at: revision.created_at.to_rfc3339(),
+        segments,
+    })
 }
 
 impl Drop for AppState {
@@ -1011,30 +1483,50 @@ fn map_timeline_job(job: TimelineJobSummary) -> TimelineJobSummaryPayload {
 }
 
 fn resolve_import_model(
-    state: &AppState,
+    runtime: &CoreRuntime,
     config: &crate::domain::AsrConfig,
 ) -> Result<ImportModelSelection, String> {
     let provider = parse_provider_kind(&config.provider)?;
-    let chosen = state
-        .list_asr_models()?
-        .into_iter()
-        .find(|model| model.model_id == config.model_id)
-        .ok_or_else(|| {
-            format!(
-                "configured ASR model {} is not in the manifest",
-                config.model_id
-            )
-        })?;
-    if chosen.provider != provider_name(provider) {
+    let manifest = model_registry().model(&config.model_id).ok_or_else(|| {
+        format!(
+            "configured ASR model {} is not in the manifest",
+            config.model_id
+        )
+    })?;
+    if manifest.provider != provider {
         return Err(format!(
             "configured ASR model {} does not belong to provider {}",
             config.model_id, config.provider
         ));
     }
+    let installation = runtime
+        .catalog_ref()
+        .model_installation_records()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|record| {
+            record.model_id == manifest.id
+                && record.manifest_version == manifest.manifest_version
+                && record.bundle_identity == manifest.bundle.identity_sha256
+        });
+    let qualification = match installation.as_ref().map(|record| record.state.as_str()) {
+        Some("runtime_qualified") => InstallationQualification::RuntimeQualified,
+        Some("installed_unqualified") => InstallationQualification::InstalledUnqualified,
+        _ => InstallationQualification::NotInstalled,
+    };
+    let capabilities = model_registry()
+        .lookup_with_context(
+            manifest.id,
+            ModelLookupContext::new(
+                device_support(manifest, &DeviceProfile::current()),
+                qualification,
+            ),
+        )
+        .ok_or_else(|| "selected model manifest lookup failed".to_owned())?;
     Ok(ImportModelSelection {
-        model_id: chosen.model_id,
-        executable: chosen.executable,
-        reason_code: chosen.reason_code,
+        model_id: manifest.id.to_owned(),
+        executable: capabilities.executable,
+        reason_code: capabilities.reason_code,
         provider,
     })
 }
@@ -1043,17 +1535,18 @@ fn asr_settings_from_config(
     config: &crate::domain::AsrConfig,
     model_id: &str,
 ) -> Result<AsrSettings, String> {
-    let provider = parse_provider_kind(&config.provider)?;
-    let language =
-        AsrLanguage::new(config.language.clone()).map_err(|_| "invalid ASR language".to_owned())?;
+    let normalized = config.normalized_for_persistence()?;
+    let provider = parse_provider_kind(&normalized.provider)?;
+    let language = AsrLanguage::new(normalized.language.clone())
+        .map_err(|_| "invalid ASR language".to_owned())?;
     let num_threads =
-        u16::try_from(config.threads).map_err(|_| "invalid ASR thread count".to_owned())?;
+        u16::try_from(normalized.threads).map_err(|_| "invalid ASR thread count".to_owned())?;
     let options = match provider {
         AsrProviderKind::SenseVoice => AsrProviderOptions::SenseVoice {
-            use_itn: config.itn_enabled,
+            use_itn: normalized.itn_enabled,
         },
         AsrProviderKind::Whisper => AsrProviderOptions::Whisper {
-            task: WhisperTask::Transcribe,
+            task: parse_whisper_task(normalized.whisper_task.as_deref())?,
         },
         AsrProviderKind::Qwen3Asr => AsrProviderOptions::Qwen3Asr,
     };
@@ -1062,8 +1555,8 @@ fn asr_settings_from_config(
         model_id: model_id.to_owned(),
         language,
         num_threads,
-        vad_enabled: config.vad_enabled,
-        auto_transcribe_imports: config.auto_transcribe,
+        vad_enabled: normalized.vad_enabled,
+        auto_transcribe_imports: normalized.auto_transcribe,
         options,
     })
 }
@@ -1276,6 +1769,14 @@ pub fn list_timeline_records(
 }
 
 #[tauri::command]
+pub fn get_asr_session_state(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<AsrSessionStatePayload, String> {
+    state.asr_session_state(session_id)
+}
+
+#[tauri::command]
 pub fn search_transcripts(
     query: String,
     state: State<'_, AppState>,
@@ -1477,6 +1978,13 @@ pub fn get_asr_config(state: State<'_, AppState>) -> Result<crate::domain::AsrCo
 }
 
 #[tauri::command]
+pub fn get_settings_capabilities(
+    state: State<'_, AppState>,
+) -> Result<crate::domain::SettingsCapabilities, String> {
+    state.get_settings_capabilities()
+}
+
+#[tauri::command]
 pub fn set_asr_config(
     config: crate::domain::AsrConfig,
     state: State<'_, AppState>,
@@ -1500,6 +2008,206 @@ pub fn set_recording_config(
 }
 
 #[tauri::command]
+pub async fn list_microphone_devices(
+    app: AppHandle,
+) -> Result<Vec<MicrophoneDevicePayload>, String> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = cancelled.clone();
+    let mut cancellation_guard = MicrophoneDiscoveryCancellationGuard::new(cancelled);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.list_microphone_devices(&worker_cancelled)
+    })
+    .await;
+    cancellation_guard.disarm();
+    result.map_err(|error| format!("microphone device listing task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn probe_microphone(
+    microphone_device_uid: String,
+    app: AppHandle,
+) -> Result<MicrophoneProbeMessage, String> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = cancelled.clone();
+    let mut cancellation_guard = MicrophoneDiscoveryCancellationGuard::new(cancelled);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.probe_microphone(&microphone_device_uid, &worker_cancelled)
+    })
+    .await;
+    cancellation_guard.disarm();
+    result.map_err(|error| format!("microphone probe task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn get_diagnostics(app: AppHandle) -> Result<DiagnosticsSnapshot, String> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = cancelled.clone();
+    let mut cancellation_guard = MicrophoneDiscoveryCancellationGuard::new(cancelled);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let permissions = permission_state_one_shot_with_cancel(
+            &state.data_dir,
+            std::time::Duration::from_secs(5),
+            &worker_cancelled,
+        )
+        .map_err(map_microphone_discovery_error)?;
+        let devices = list_microphones_one_shot_with_cancel(
+            &state.data_dir,
+            std::time::Duration::from_secs(5),
+            &worker_cancelled,
+        )
+        .map_err(map_microphone_discovery_error)?;
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        state.diagnostics_snapshot(
+            app.package_info().version.to_string(),
+            &executable,
+            permissions,
+            devices,
+        )
+    })
+    .await;
+    cancellation_guard.disarm();
+    result.map_err(|error| format!("diagnostics task failed: {error}"))?
+}
+
+#[tauri::command]
+pub fn write_diagnostics_export(path: String, snapshot: DiagnosticsSnapshot) -> Result<(), String> {
+    let path = std::path::Path::new(&path);
+    let json = snapshot.to_redacted_pretty_json()?;
+    write_private_export(path, json.as_bytes(), "diagnostics export")
+}
+
+#[tauri::command]
+pub fn write_record_markdown_export(
+    path: String,
+    session_id: String,
+    revision_number: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.write_record_markdown_export(std::path::Path::new(&path), &session_id, revision_number)
+}
+
+fn write_private_export(
+    path: &std::path::Path,
+    contents: &[u8],
+    export_name: &str,
+) -> Result<(), String> {
+    write_private_export_with_before_replace(path, contents, export_name, || Ok(()))
+}
+
+fn write_private_export_with_before_replace(
+    path: &std::path::Path,
+    contents: &[u8],
+    export_name: &str,
+    before_replace: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("{export_name} path must be absolute"));
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() || metadata.nlink() != 1 => {
+            return Err(format!(
+                "{export_name} target must be a single-link regular file"
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{export_name} path has no parent"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("{export_name} path has no safe filename"))?;
+    let temporary_path = parent.join(format!(
+        ".{file_name}.lifesub-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&temporary_path)
+            .map_err(|error| error.to_string())?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+        file.write_all(contents)
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        before_replace().map_err(|error| error.to_string())?;
+        std::fs::rename(&temporary_path, path).map_err(|error| error.to_string())?;
+        let parent_directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(parent)
+            .map_err(|error| error.to_string())?;
+        parent_directory
+            .sync_all()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+#[tauri::command]
+pub fn open_macos_privacy_settings(target: String) -> Result<(), String> {
+    let url = match target.as_str() {
+        "microphone" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        }
+        "screen_recording" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        }
+        _ => return Err("unsupported macOS privacy settings target".to_string()),
+    };
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg(url)
+        .status()
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("failed to open macOS privacy settings".to_string())
+    }
+}
+
+struct MicrophoneDiscoveryCancellationGuard {
+    cancelled: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl MicrophoneDiscoveryCancellationGuard {
+    fn new(cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            cancelled,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MicrophoneDiscoveryCancellationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+#[tauri::command]
 pub fn get_app_runtime_info(app: AppHandle) -> Result<AppRuntimeInfo, String> {
     let sherpa = crate::asr::pinned_sherpa_runtime_identity();
     Ok(AppRuntimeInfo {
@@ -1515,16 +2223,165 @@ pub fn list_asr_models(state: State<'_, AppState>) -> Result<Vec<AsrModelPayload
     state.list_asr_models()
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ModelOperationAck {
+    pub download_id: String,
+    pub cancel_requested: bool,
+}
+
+struct ModelOperationRegistration {
+    registry: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    model_ids: Vec<String>,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl Drop for ModelOperationRegistration {
+    fn drop(&mut self) {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for model_id in &self.model_ids {
+            if registry
+                .get(model_id)
+                .is_some_and(|value| Arc::ptr_eq(value, &self.cancellation))
+            {
+                registry.remove(model_id);
+            }
+        }
+    }
+}
+
+fn register_model_operation(
+    registry: &Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    model_ids: &[String],
+) -> Result<(Arc<AtomicBool>, ModelOperationRegistration), String> {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let mut operations = registry.lock().unwrap_or_else(|error| error.into_inner());
+    if model_ids
+        .iter()
+        .any(|model_id| operations.contains_key(model_id))
+    {
+        return Err("model operation already active".to_string());
+    }
+    for model_id in model_ids {
+        operations.insert(model_id.clone(), cancellation.clone());
+    }
+    drop(operations);
+    Ok((
+        cancellation.clone(),
+        ModelOperationRegistration {
+            registry: registry.clone(),
+            model_ids: model_ids.to_vec(),
+            cancellation,
+        },
+    ))
+}
+
+async fn execute_model_install(
+    runtime: Arc<CoreRuntime>,
+    registry: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    install_ids: [String; 2],
+) -> Result<(), String> {
+    let model_ids = install_ids.to_vec();
+    let (cancellation, registration) = register_model_operation(&registry, &model_ids)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _registration = registration;
+        let device = DeviceProfile::current();
+        for install_id in install_ids {
+            runtime
+                .ensure_model_installed(&install_id, &device, || {
+                    cancellation.load(Ordering::Acquire)
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|error| format!("model install task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn install_asr_model(
+    model_id: String,
+    state: State<'_, AppState>,
+) -> Result<AsrModelPayload, String> {
+    let install_ids = model_install_ids(&model_id)?;
+    execute_model_install(
+        state.runtime.clone(),
+        state.model_operations.clone(),
+        install_ids,
+    )
+    .await?;
+
+    state
+        .list_asr_models()?
+        .into_iter()
+        .find(|model| model.model_id == model_id)
+        .ok_or_else(|| "installed model is missing from the current manifest".to_owned())
+}
+
+#[tauri::command]
+pub fn cancel_model_download(
+    download_id: String,
+    state: State<'_, AppState>,
+) -> Result<ModelOperationAck, String> {
+    state.request_model_cancellation(download_id)
+}
+
+#[tauri::command]
+pub async fn retry_model_download(
+    model_id: String,
+    download_id: String,
+    state: State<'_, AppState>,
+) -> Result<AsrModelPayload, String> {
+    let install_ids = state.retry_install_ids(&model_id, &download_id)?;
+    execute_model_install(
+        state.runtime.clone(),
+        state.model_operations.clone(),
+        install_ids,
+    )
+    .await?;
+    state
+        .list_asr_models()?
+        .into_iter()
+        .find(|model| model.model_id == model_id)
+        .ok_or_else(|| "installed model is missing from the current manifest".to_string())
+}
+
+fn validate_current_download_identity(
+    record: &crate::catalog::ModelDownloadRecord,
+) -> Result<(), String> {
+    let current = if record.model_id == DEFAULT_VAD_MODEL_ID {
+        let manifest = vad_manifest();
+        Some((manifest.manifest_version, manifest.bundle.identity_sha256))
+    } else {
+        model_registry()
+            .model(&record.model_id)
+            .map(|manifest| (manifest.manifest_version, manifest.bundle.identity_sha256))
+    }
+    .ok_or_else(|| "model download manifest is no longer current".to_string())?;
+    if record.manifest_version == current.0 && record.bundle_identity == current.1 {
+        Ok(())
+    } else {
+        Err("model download identity is stale".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
     use std::sync::{Arc, Barrier};
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
     use super::*;
     use crate::asr::manifest::model_registry;
-    use crate::asr::model_manager::{ModelCatalog, ModelInstallPlan, StoredInstallation};
+    use crate::asr::model_manager::{
+        ArtifactCheckpoint, ModelCatalog, ModelInstallPlan, StoredInstallation,
+    };
     use crate::domain::{AudioSource, TranscriptSegment};
 
     #[test]
@@ -1665,7 +2522,10 @@ mod tests {
         let state = AppState {
             runtime: Arc::new(runtime),
             data_dir,
-            streaming: Mutex::new(StreamingCapture::default()),
+            streaming: Mutex::new(NativeCaptureSession::new()),
+            last_microphone_probe: Mutex::new(None),
+            last_capture_error: Mutex::new(None),
+            model_operations: Arc::new(Mutex::new(HashMap::new())),
             worker_shutdown: Arc::new(AtomicBool::new(false)),
             worker_handle: Mutex::new(None),
             quick_input: QuickInput::default(),
@@ -1930,46 +2790,1003 @@ mod tests {
                 .map(|download| download.state.as_str()),
             Some("installing")
         );
+        let download = model.download.unwrap();
+        assert_eq!(download.id, second);
+        assert_eq!(download.downloaded_bytes, 0);
+        assert_eq!(
+            download.expected_bytes,
+            plan.artifacts
+                .iter()
+                .map(|artifact| artifact.expected_bytes)
+                .sum::<u64>()
+        );
+        assert_eq!(download.artifact_index, 1);
+        assert_eq!(download.artifact_count, plan.artifacts.len());
+        assert_eq!(download.error_code, None);
+        assert_eq!(download.error_summary, None);
+    }
+
+    #[test]
+    fn model_cancel_requests_active_operation_without_synthesizing_catalog_state() {
+        let parent = tempdir().unwrap();
+        let state = AppState::initialize_at(parent.path().join("data")).unwrap();
+        let manifest = model_registry()
+            .model("sense-voice-small-int8-2024-07-17")
+            .unwrap();
+        let plan = ModelInstallPlan::from_manifest(manifest);
+        let download_id = state.runtime.catalog_ref().begin_download(&plan).unwrap();
+        state
+            .runtime
+            .catalog_ref()
+            .set_download_state(&download_id, "downloading", None)
+            .unwrap();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        state
+            .model_operations
+            .lock()
+            .unwrap()
+            .insert(manifest.id.to_string(), cancellation.clone());
+
+        let ack = state
+            .request_model_cancellation(download_id.clone())
+            .unwrap();
+
+        assert_eq!(
+            ack,
+            ModelOperationAck {
+                download_id: download_id.clone(),
+                cancel_requested: true,
+            }
+        );
+        assert!(cancellation.load(Ordering::Acquire));
+        let persisted = state
+            .runtime
+            .catalog_ref()
+            .model_download_records()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.id == download_id)
+            .unwrap();
+        assert_eq!(persisted.state, "downloading");
+    }
+
+    #[test]
+    fn model_retry_preserves_exact_latest_download_identity() {
+        let parent = tempdir().unwrap();
+        let state = AppState::initialize_at(parent.path().join("data")).unwrap();
+        let manifest = model_registry()
+            .model("sense-voice-small-int8-2024-07-17")
+            .unwrap();
+        let plan = ModelInstallPlan::from_manifest(manifest);
+        let first = state.runtime.catalog_ref().begin_download(&plan).unwrap();
+        state
+            .runtime
+            .catalog_ref()
+            .set_download_state(&first, "failed", Some("network"))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        let latest = state.runtime.catalog_ref().begin_download(&plan).unwrap();
+        state
+            .runtime
+            .catalog_ref()
+            .set_download_state(&latest, "cancelled", Some("manual_cancel"))
+            .unwrap();
+
+        assert!(state.retry_install_ids(manifest.id, &first).is_err());
+        assert_eq!(
+            state.retry_install_ids(manifest.id, &latest).unwrap(),
+            model_install_ids(manifest.id).unwrap()
+        );
+    }
+
+    #[test]
+    fn model_catalog_projects_active_vad_dependency_on_the_requested_asr_model() {
+        let parent = tempdir().unwrap();
+        let state = AppState::initialize_at(parent.path().join("data")).unwrap();
+        let vad = vad_manifest();
+        let vad_plan = ModelInstallPlan::from_vad_manifest(vad);
+        let download_id = state
+            .runtime
+            .catalog_ref()
+            .begin_download(&vad_plan)
+            .unwrap();
+        state
+            .runtime
+            .catalog_ref()
+            .set_download_state(&download_id, "downloading", None)
+            .unwrap();
+
+        let model = state
+            .list_asr_models()
+            .unwrap()
+            .into_iter()
+            .find(|model| model.model_id == "sense-voice-small-int8-2024-07-17")
+            .unwrap();
+
+        assert_eq!(
+            model.download.as_ref().map(|download| download.id.as_str()),
+            Some(download_id.as_str())
+        );
+        assert_eq!(
+            model
+                .download
+                .as_ref()
+                .map(|download| download.state.as_str()),
+            Some("downloading")
+        );
+    }
+
+    #[test]
+    fn model_catalog_projects_durable_checkpoint_bytes_artifact_and_error() {
+        let parent = tempdir().unwrap();
+        let state = AppState::initialize_at(parent.path().join("data")).unwrap();
+        let manifest = model_registry().model("whisper-base").unwrap();
+        let plan = ModelInstallPlan::from_manifest(manifest);
+        let download_id = state.runtime.catalog_ref().begin_download(&plan).unwrap();
+        let artifact = &plan.artifacts[0];
+        let checkpoint_path = parent.path().join("download.part");
+        std::fs::write(&checkpoint_path, vec![0_u8; 17]).unwrap();
+        state
+            .runtime
+            .catalog_ref()
+            .save_checkpoint(
+                &download_id,
+                &ArtifactCheckpoint {
+                    artifact_id: artifact.artifact_id.clone(),
+                    source_identity: format!(
+                        "{}\n{}\n{}\n{}\n{}\n{}",
+                        artifact.source_repository,
+                        artifact.source_model,
+                        artifact.revision,
+                        artifact.url,
+                        artifact.expected_sha256,
+                        artifact.required_path,
+                    ),
+                    downloaded_bytes: 17,
+                    expected_bytes: artifact.expected_bytes,
+                    temp_path: checkpoint_path,
+                    etag: None,
+                    last_modified: None,
+                    verified_sha256: None,
+                    state: "downloading".to_string(),
+                },
+            )
+            .unwrap();
+        state
+            .runtime
+            .catalog_ref()
+            .set_download_state(&download_id, "downloading", None)
+            .unwrap();
+
+        let active = state
+            .list_asr_models()
+            .unwrap()
+            .into_iter()
+            .find(|model| model.model_id == manifest.id)
+            .unwrap()
+            .download
+            .unwrap();
+        assert_eq!(active.downloaded_bytes, 17);
+        assert_eq!(active.artifact_index, 1);
+        assert_eq!(active.artifact_count, plan.artifacts.len());
+
+        state
+            .runtime
+            .catalog_ref()
+            .set_download_state(&download_id, "failed", Some("model_download_failed"))
+            .unwrap();
+        let failed = state
+            .list_asr_models()
+            .unwrap()
+            .into_iter()
+            .find(|model| model.model_id == manifest.id)
+            .unwrap()
+            .download
+            .unwrap();
+        assert_eq!(failed.error_code.as_deref(), Some("model_download_failed"));
+        assert_eq!(
+            failed.error_summary.as_deref(),
+            Some("model_download_failed")
+        );
+    }
+
+    #[test]
+    fn recording_config_persists_selected_microphone_pair_through_catalog_settings() {
+        let parent = tempdir().unwrap();
+        let data_dir = parent.path().join("data");
+        let state = AppState::initialize_at(data_dir.clone()).unwrap();
+
+        let default_config = state.get_recording_config().unwrap();
+        assert_eq!(default_config.microphone_device_uid, None);
+        assert_eq!(default_config.microphone_device_name, None);
+
+        state
+            .set_recording_config(crate::domain::RecordingConfig {
+                capture_mode: "smart".to_string(),
+                im_detection_enabled: true,
+                im_apps: vec!["wechat".to_string(), "zoom".to_string()],
+                detection_delay_secs: 3,
+                recovery_delay_secs: 5,
+                sample_rate: 16_000,
+                storage_path: "~/.lifesub/recordings/".to_string(),
+                microphone_device_uid: Some("mic-uid-1".to_string()),
+                microphone_device_name: Some("Built-in Microphone".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            state.get_recording_config().unwrap(),
+            crate::domain::RecordingConfig {
+                capture_mode: "smart".to_string(),
+                im_detection_enabled: false,
+                im_apps: Vec::new(),
+                detection_delay_secs: 3,
+                recovery_delay_secs: 5,
+                sample_rate: 16_000,
+                storage_path: data_dir.to_string_lossy().into_owned(),
+                microphone_device_uid: Some("mic-uid-1".to_string()),
+                microphone_device_name: Some("Built-in Microphone".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn recording_config_projects_truthful_production_defaults_instead_of_legacy_active_values() {
+        let parent = tempdir().unwrap();
+        let data_dir = parent.path().join("data");
+        let state = AppState::initialize_at(data_dir.clone()).unwrap();
+
+        state
+            .runtime
+            .catalog_ref()
+            .set_setting(
+                "recording_config",
+                r#"{
+                    "capture_mode":"smart",
+                    "im_detection_enabled":true,
+                    "im_apps":["wechat","qq"],
+                    "detection_delay_secs":3,
+                    "recovery_delay_secs":5,
+                    "sample_rate":48000,
+                    "storage_path":"/tmp/legacy-recordings"
+                }"#,
+            )
+            .unwrap();
+
+        let config = state.get_recording_config().unwrap();
+
+        assert_eq!(config.sample_rate, 16_000);
+        assert_eq!(config.storage_path, data_dir.to_string_lossy());
+        assert!(!config.im_detection_enabled);
+    }
+
+    #[test]
+    fn settings_capabilities_report_truthful_capture_constraints() {
+        let parent = tempdir().unwrap();
+        let data_dir = parent.path().join("data");
+        let state = AppState::initialize_at(data_dir.clone()).unwrap();
+
+        let capabilities = state.get_settings_capabilities().unwrap();
+        let json = serde_json::to_value(capabilities).unwrap();
+
+        assert_eq!(json["production_capture_output_sample_rate_hz"], 16_000);
+        assert_eq!(
+            json["data_directory_path"],
+            data_dir.to_string_lossy().as_ref()
+        );
+        assert_eq!(json["im_detection_available"], false);
+        assert_eq!(
+            json["supported_capture_modes"],
+            serde_json::json!(["smart", "mic_only", "system_only"])
+        );
+    }
+
+    #[test]
+    fn diagnostics_snapshot_projects_current_runtime_model_device_and_error_facts() {
+        let parent = tempdir().unwrap();
+        let data_dir = parent.path().join("data");
+        let state = AppState::initialize_at(data_dir.clone()).unwrap();
+        let mut config = state.get_recording_config().unwrap();
+        config.microphone_device_uid = Some("mic-1".to_string());
+        config.microphone_device_name = Some("Built-in Microphone".to_string());
+        state.set_recording_config(config).unwrap();
+        *state.last_microphone_probe.lock().unwrap() = Some(MicrophoneProbeMessage {
+            uid: "mic-1".to_string(),
+            name: "Built-in Microphone".to_string(),
+            transport: MicrophoneTransport::BuiltIn,
+            input_sample_rate_hz: Some(44_100),
+            input_channel_count: Some(1),
+            read_back_uid: Some("mic-1".to_string()),
+            first_frame_sample_count: 128,
+            elapsed_ms: 12,
+            result: MicrophoneProbeResult::Compatible,
+        });
+        state.record_capture_error(
+            "selected_microphone_disconnected",
+            "所选麦克风已断开".to_string(),
+        );
+        let executable = parent.path().join("lifesub-test");
+        std::fs::write(&executable, b"test executable").unwrap();
+
+        let snapshot = state
+            .diagnostics_snapshot(
+                "0.2.1-test".to_string(),
+                &executable,
+                PermissionStateMessage {
+                    microphone: PermissionState::Granted,
+                    screen_recording: PermissionState::NotGranted,
+                },
+                vec![MicrophoneDevice {
+                    uid: "mic-1".to_string(),
+                    name: "Built-in Microphone".to_string(),
+                    is_default: true,
+                    is_connected: true,
+                    transport: MicrophoneTransport::BuiltIn,
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(snapshot.permissions.microphone, "granted");
+        assert_eq!(snapshot.permissions.screen_recording, "not_granted");
+        assert_eq!(snapshot.selected_microphone.uid.as_deref(), Some("mic-1"));
+        assert_eq!(
+            snapshot.selected_microphone.probe_result.as_deref(),
+            Some("compatible")
+        );
+        let diagnostic_probe = snapshot.selected_microphone.probe.as_ref().unwrap();
+        assert_eq!(diagnostic_probe.uid, "mic-1");
+        assert_eq!(diagnostic_probe.read_back_uid.as_deref(), Some("mic-1"));
+        assert_eq!(diagnostic_probe.first_frame_sample_count, 128);
+        assert_eq!(diagnostic_probe.elapsed_ms, 12);
+        assert_eq!(snapshot.identities.app_version, "0.2.1-test");
+        assert_eq!(snapshot.identities.app_executable_sha256.len(), 64);
+        assert!(
+            snapshot
+                .models
+                .iter()
+                .any(|model| model.model_id == "sense-voice-small-int8-2024-07-17")
+        );
+        assert_eq!(
+            snapshot
+                .recent_error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("selected_microphone_disconnected")
+        );
+        snapshot.to_redacted_pretty_json().unwrap();
+    }
+
+    #[test]
+    #[ignore = "run explicitly for the 0.2.2 high-file-count diagnostics baseline"]
+    fn diagnostics_snapshot_high_file_count_baseline() {
+        use std::time::Instant;
+
+        const FILES_PER_CATEGORY: usize = 2_000;
+        const FILE_BYTES: usize = 16;
+
+        let parent = tempdir().unwrap();
+        let data_dir = parent.path().join("data");
+        let state = AppState::initialize_at(data_dir.clone()).unwrap();
+        for category in ["audio", "models"] {
+            let directory = data_dir.join(category);
+            std::fs::create_dir_all(&directory).unwrap();
+            for index in 0..FILES_PER_CATEGORY {
+                std::fs::write(
+                    directory.join(format!("baseline-{index:05}.bin")),
+                    [0_u8; FILE_BYTES],
+                )
+                .unwrap();
+            }
+        }
+        let executable = parent.path().join("lifesub-test");
+        std::fs::write(&executable, b"test executable").unwrap();
+        let permissions = PermissionStateMessage {
+            microphone: PermissionState::Granted,
+            screen_recording: PermissionState::Granted,
+        };
+        for run in ["cold", "warm"] {
+            let started = Instant::now();
+            let snapshot = state
+                .diagnostics_snapshot(
+                    "0.2.2-baseline".to_string(),
+                    &executable,
+                    permissions.clone(),
+                    Vec::new(),
+                )
+                .unwrap();
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            assert_eq!(
+                snapshot.storage.audio_bytes,
+                (FILES_PER_CATEGORY * FILE_BYTES) as u64
+            );
+            assert_eq!(
+                snapshot.storage.model_bytes,
+                (FILES_PER_CATEGORY * FILE_BYTES) as u64
+            );
+            println!(
+                "diagnostics_baseline run={run} files={} elapsed_ms={elapsed_ms:.3} complete=true",
+                FILES_PER_CATEGORY * 2
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostics_export_rejects_relative_symlink_and_unknown_privacy_targets() {
+        let snapshot = DiagnosticsSnapshot::new(
+            DiagnosticPermissions {
+                microphone: "granted".to_string(),
+                screen_recording: "not_granted".to_string(),
+            },
+            DiagnosticSelectedMicrophone {
+                uid: None,
+                name: None,
+                connected: false,
+                transport: None,
+                probe_result: None,
+                probe: None,
+            },
+            DiagnosticIdentities {
+                app_version: "0.2.1".to_string(),
+                app_executable_sha256: "a".repeat(64),
+                helper_code_sha256: "b".repeat(64),
+                capture_protocol_version: 2,
+                runtime_version: "1.13.5".to_string(),
+                runtime_git_commit: "c".repeat(40),
+                runtime_archive_sha256: "d".repeat(64),
+                runtime_build_id: "build".to_string(),
+            },
+            Vec::new(),
+            crate::diagnostics::DiagnosticStorage {
+                data_directory: "/tmp/lifesub".to_string(),
+                catalog_bytes: 0,
+                audio_bytes: 0,
+                model_bytes: 0,
+            },
+            None,
+        );
+        assert!(write_diagnostics_export("relative.json".to_string(), snapshot.clone()).is_err());
+
+        let parent = tempdir().unwrap();
+        let target = parent.path().join("target.json");
+        let link = parent.path().join("link.json");
+        std::fs::write(&target, b"unchanged").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(write_diagnostics_export(link.to_string_lossy().into_owned(), snapshot).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
+        assert!(open_macos_privacy_settings("camera".to_string()).is_err());
+    }
+
+    #[test]
+    fn record_markdown_export_uses_exact_catalog_revision_and_rejects_symlinks() {
+        let parent = tempdir().unwrap();
+        let state = AppState::initialize_at(parent.path().join("data")).unwrap();
+        let session = CaptureSession::new("真实导出");
+        state
+            .runtime
+            .catalog_ref()
+            .insert_session(&session)
+            .unwrap();
+        let revision = state
+            .runtime
+            .catalog_ref()
+            .append_revision(
+                &session.id,
+                "sense_voice",
+                vec![TranscriptSegment::new(
+                    1_200,
+                    4_400,
+                    AudioSource::Microphone,
+                    "持久化后才能提示成功",
+                )],
+            )
+            .unwrap();
+        let output = parent.path().join("record.md");
+
+        state
+            .write_record_markdown_export(&output, &session.id, revision.number)
+            .unwrap();
+
+        let markdown = std::fs::read_to_string(&output).unwrap();
+        assert!(markdown.contains(&session.evidence_uri()));
+        assert!(markdown.contains("transcript_revision: 1"));
+        assert!(markdown.contains("持久化后才能提示成功"));
+        assert!(
+            state
+                .write_record_markdown_export(&output, &session.id, 99)
+                .is_err()
+        );
+
+        let target = parent.path().join("target.md");
+        let link = parent.path().join("link.md");
+        std::fs::write(&target, b"unchanged").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            state
+                .write_record_markdown_export(&link, &session.id, revision.number)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
+
+        let hardlink_target = parent.path().join("hardlink-target.md");
+        let hardlink = parent.path().join("hardlink.md");
+        std::fs::write(&hardlink_target, b"hardlink unchanged").unwrap();
+        std::fs::hard_link(&hardlink_target, &hardlink).unwrap();
+        assert!(
+            state
+                .write_record_markdown_export(&hardlink, &session.id, revision.number)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&hardlink_target).unwrap(),
+            b"hardlink unchanged"
+        );
+    }
+
+    #[test]
+    fn write_record_markdown_export_preserves_existing_file_on_failure() {
+        let parent = tempdir().unwrap();
+        let output = parent.path().join("record.md");
+        std::fs::write(&output, b"existing export").unwrap();
+
+        let result = write_private_export_with_before_replace(
+            &output,
+            b"replacement export",
+            "record export",
+            || Err(std::io::Error::other("injected before replace")),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing export");
+        assert_eq!(
+            std::fs::read_dir(parent.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".lifesub-"))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn write_private_export_atomically_replaces_with_private_permissions() {
+        let parent = tempdir().unwrap();
+        let output = parent.path().join("record.md");
+        std::fs::write(&output, b"existing export").unwrap();
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private_export(&output, b"replacement export", "record export").unwrap();
+
+        assert_eq!(std::fs::read(&output).unwrap(), b"replacement export");
+        assert_eq!(
+            std::fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn microphone_device_payload_serializes_with_camel_case_fields() {
+        let payload = MicrophoneDevicePayload::from(MicrophoneDevice {
+            uid: "mic-uid-1".to_string(),
+            name: "Built-in Microphone".to_string(),
+            is_default: true,
+            is_connected: true,
+            transport: crate::capture::protocol::MicrophoneTransport::BuiltIn,
+        });
+
+        let json = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(json["uid"], "mic-uid-1");
+        assert_eq!(json["name"], "Built-in Microphone");
+        assert_eq!(json["isDefault"], true);
+        assert_eq!(json["isConnected"], true);
+        assert_eq!(json["transport"], "built_in");
+        assert!(json.get("is_default").is_none());
+        assert!(json.get("is_connected").is_none());
+    }
+
+    #[test]
+    fn model_install_plan_includes_vad_before_the_requested_model() {
+        assert_eq!(
+            model_install_ids("sense-voice-small-int8-2024-07-17").unwrap(),
+            ["silero-vad-2024-01-17", "sense-voice-small-int8-2024-07-17",]
+        );
+        assert!(model_install_ids("retired-model").is_err());
+    }
+
+    #[test]
+    fn asr_settings_from_config_maps_the_whisper_task_and_rejects_unknown_values() {
+        let translate_config: crate::domain::AsrConfig = serde_json::from_str(
+            r#"{
+                "provider":"whisper",
+                "model_id":"whisper-base",
+                "language":"auto",
+                "auto_transcribe":true,
+                "threads":4,
+                "vad_enabled":true,
+                "vad_min_speech_ms":300,
+                "vad_silence_ms":800,
+                "itn_enabled":false,
+                "whisper_task":"translate"
+            }"#,
+        )
+        .unwrap();
+
+        let settings = asr_settings_from_config(&translate_config, "whisper-base").unwrap();
+        assert_eq!(
+            settings.options,
+            AsrProviderOptions::Whisper {
+                task: WhisperTask::Translate
+            }
+        );
+
+        let invalid = serde_json::from_str::<crate::domain::AsrConfig>(
+            r#"{
+                "provider":"whisper",
+                "model_id":"whisper-base",
+                "language":"auto",
+                "auto_transcribe":true,
+                "threads":4,
+                "vad_enabled":true,
+                "vad_min_speech_ms":300,
+                "vad_silence_ms":800,
+                "itn_enabled":false,
+                "whisper_task":"summarize"
+            }"#,
+        );
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn committed_publication_payload_includes_native_chunk_and_capture_source_identity() {
+        let catalog = Catalog::in_memory().unwrap();
+        let mut session = CaptureSession::new("native publication");
+        session.state = CaptureState::Stopped;
+        session.ended_at = Some(chrono::Utc::now());
+        catalog.insert_session(&session).unwrap();
+        let source = crate::domain::CaptureSourceRecord {
+            id: "capture-source-mic".to_owned(),
+            session_id: session.id.clone(),
+            source: AudioSource::Microphone,
+            device_uid: "device-uid".to_owned(),
+            device_name: "Built-in Microphone".to_owned(),
+            channel_count: 1,
+            sample_rate_hz: 16_000,
+            created_at: chrono::Utc::now(),
+        };
+        catalog.insert_capture_source(&source).unwrap();
+        let chunk = AudioChunk {
+            id: "chk_native_publication".to_owned(),
+            session_id: session.id.clone(),
+            source: AudioSource::Microphone,
+            path: "audio/chk_native_publication.caf".to_owned(),
+            sha256: "a".repeat(64),
+            byte_length: 32_000,
+        };
+        let now = chrono::Utc::now();
+        catalog
+            .insert_native_capture_chunk(
+                &chunk,
+                &crate::domain::CaptureChunkTiming {
+                    chunk_id: chunk.id.clone(),
+                    capture_source_id: source.id.clone(),
+                    source_sequence: 0,
+                    source_sample_start: 0,
+                    source_sample_end: 16_000,
+                    session_start_ms: 0,
+                    session_end_ms: 1_000,
+                    monotonic_start_ns: 1,
+                    monotonic_end_ns: 1_000_000_001,
+                    utc_start_at: now,
+                    utc_end_at: now + chrono::Duration::seconds(1),
+                    discontinuity_count: 0,
+                    dropped_frame_count: 0,
+                    created_at: now,
+                },
+            )
+            .unwrap();
+        let revision = catalog
+            .append_revision(
+                &session.id,
+                "sense_voice",
+                vec![TranscriptSegment {
+                    id: "segment-native".to_owned(),
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    source: AudioSource::Microphone,
+                    text: "persisted native text".to_owned(),
+                    chunk_id: Some(chunk.id.clone()),
+                    chunk_start_ms: Some(0),
+                    chunk_end_ms: Some(1_000),
+                }],
+            )
+            .unwrap();
+
+        let payload = committed_publication_payload(&catalog, &revision).unwrap();
+
+        assert_eq!(payload.revision_id, revision.id);
+        assert_eq!(payload.segments[0].chunk_id, chunk.id);
+        assert_eq!(
+            payload.segments[0].capture_source_id.as_deref(),
+            Some("capture-source-mic")
+        );
+        assert_eq!(payload.segments[0].source, "microphone");
+    }
+
+    #[test]
+    fn startup_failure_requests_clean_exit_instead_of_setup_error() {
+        match startup_disposition::<()>(Err("Ownership(AlreadyOwned)".to_owned())) {
+            StartupDisposition::Exit { reason } => {
+                assert_eq!(reason, "Ownership(AlreadyOwned)");
+            }
+            StartupDisposition::Ready(()) => {
+                panic!("startup failure must not enter the event loop")
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "set LIFESUB_RUN_REAL_ASR_E2E=1 and LIFESUB_REAL_MODEL_DATA_DIR to run canonical import-to-publication inference"]
+    fn real_sense_voice_import_persists_nonempty_revision_segments() {
+        assert_eq!(
+            std::env::var("LIFESUB_RUN_REAL_ASR_E2E").as_deref(),
+            Ok("1"),
+            "set LIFESUB_RUN_REAL_ASR_E2E=1 to run real inference"
+        );
+        let data_dir = std::env::var_os("LIFESUB_REAL_MODEL_DATA_DIR")
+            .map(PathBuf::from)
+            .expect("set LIFESUB_REAL_MODEL_DATA_DIR to the canonical LifeSub app data directory");
+        let state = AppState::initialize_at(data_dir).unwrap();
+        let (real_worker_shutdown, real_worker_handle) =
+            crate::asr::worker::spawn_native_worker(state.runtime.clone());
+        state
+            .set_asr_config(crate::domain::AsrConfig {
+                provider: "sense_voice".to_owned(),
+                model_id: "sense-voice-small-int8-2024-07-17".to_owned(),
+                language: "auto".to_owned(),
+                auto_transcribe: true,
+                threads: 4,
+                vad_enabled: true,
+                vad_min_speech_ms: 300,
+                vad_silence_ms: 800,
+                itn_enabled: true,
+                whisper_task: None,
+            })
+            .unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/asr/qwen06-codeswitch.wav");
+        let pending_session_id = state
+            .list_timeline_records()
+            .unwrap()
+            .into_iter()
+            .filter(|record| {
+                record.session.title == "Real SenseVoice E2E"
+                    && record.latest_job.as_ref().is_some_and(|job| {
+                        !matches!(job.state.as_str(), "succeeded" | "failed" | "cancelled")
+                    })
+            })
+            .min_by(|left, right| left.session.started_at.cmp(&right.session.started_at))
+            .map(|record| record.session.id);
+        let session_id = match pending_session_id {
+            Some(session_id) => session_id,
+            None => {
+                let outcome = state
+                    .import_audio_record(
+                        fixture.to_string_lossy().into_owned(),
+                        "Real SenseVoice E2E".to_owned(),
+                    )
+                    .unwrap();
+                assert!(outcome.asr_warning.is_none(), "{:?}", outcome.asr_warning);
+                outcome.session.id
+            }
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(300);
+        let completed = loop {
+            let job = state
+                .runtime
+                .catalog_ref()
+                .latest_job_for_session(&session_id)
+                .unwrap()
+                .unwrap();
+            if matches!(job.state.as_str(), "succeeded" | "failed" | "cancelled") {
+                break job;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "real ASR job timed out"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        assert_eq!(
+            completed.state, "succeeded",
+            "real ASR failed: {:?} {:?}",
+            completed.error_code, completed.error_summary
+        );
+
+        let record = state
+            .list_timeline_records()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.session.id == session_id)
+            .unwrap();
+        let revision = record.revisions.last().expect("ASR revision missing");
+        assert!(!revision.segments.is_empty());
+        assert!(
+            revision
+                .segments
+                .iter()
+                .all(|segment| !segment.text.trim().is_empty())
+        );
+        real_worker_shutdown.store(true, Ordering::Release);
+        real_worker_handle.join().unwrap();
     }
 }
 
 // ── Phase 2.1: Streaming capture ─────────────────────────────────────────
 
 #[tauri::command]
-pub fn start_streaming_capture(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let mut streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
-    if streaming.is_running() {
-        return Err("streaming capture already running".into());
+pub async fn start_streaming_capture(
+    app: AppHandle,
+    session_id: String,
+    capture_mode: crate::capture::session::NativeCaptureMode,
+    microphone_device_uid: Option<String>,
+) -> Result<crate::capture::session::NativeCaptureStartStatus, String> {
+    let blocking_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = blocking_app.state::<AppState>();
+        if !state
+            .runtime
+            .catalog_ref()
+            .session_exists(&session_id)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("capture session does not exist".into());
+        }
+        let mut streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
+        if streaming.is_running() {
+            return Err("streaming capture already running".into());
+        }
+        let result = streaming
+            .start(
+                blocking_app.clone(),
+                state.runtime.clone(),
+                state.data_dir.clone(),
+                session_id,
+                capture_mode,
+                microphone_device_uid,
+            )
+            .map_err(|error| error.to_string());
+        if let Err(error) = &result {
+            state.record_capture_error("capture_start_failed", error.clone());
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("capture start task failed: {error}"))?
+}
+
+impl From<MicrophoneDevice> for MicrophoneDevicePayload {
+    fn from(value: MicrophoneDevice) -> Self {
+        Self {
+            uid: value.uid,
+            name: value.name,
+            is_default: value.is_default,
+            is_connected: value.is_connected,
+            transport: serde_json::to_string(&value.transport)
+                .unwrap()
+                .trim_matches('"')
+                .to_owned(),
+        }
     }
-    streaming.start(app);
-    Ok(())
+}
+
+fn map_microphone_discovery_error(error: MicrophoneDiscoveryError) -> String {
+    match error {
+        MicrophoneDiscoveryError::Launch(launch_error) => {
+            format!("capture helper launch failed: {launch_error:?}")
+        }
+        MicrophoneDiscoveryError::Cancelled => {
+            "capture helper microphone request cancelled".to_string()
+        }
+        MicrophoneDiscoveryError::Timeout => {
+            "capture helper microphone request timed out".to_string()
+        }
+        MicrophoneDiscoveryError::Fatal { code, summary } => format!("{code}: {summary}"),
+        MicrophoneDiscoveryError::UnexpectedResponse => {
+            "capture helper returned an unexpected microphone response".to_string()
+        }
+        MicrophoneDiscoveryError::MissingShutdownAck => {
+            "capture helper did not acknowledge microphone shutdown".to_string()
+        }
+        MicrophoneDiscoveryError::Transport(summary) => {
+            format!("capture helper transport failed: {summary}")
+        }
+    }
+}
+
+fn permission_name(permission: PermissionState) -> &'static str {
+    match permission {
+        PermissionState::NotDetermined => "not_determined",
+        PermissionState::NotGranted => "not_granted",
+        PermissionState::Denied => "denied",
+        PermissionState::Restricted => "restricted",
+        PermissionState::Granted => "granted",
+    }
+}
+
+fn microphone_transport_name(transport: MicrophoneTransport) -> &'static str {
+    match transport {
+        MicrophoneTransport::BuiltIn => "built_in",
+        MicrophoneTransport::Usb => "usb",
+        MicrophoneTransport::Bluetooth => "bluetooth",
+        MicrophoneTransport::Aggregate => "aggregate",
+        MicrophoneTransport::Virtual => "virtual",
+        MicrophoneTransport::Unknown => "unknown",
+    }
+}
+
+fn probe_result_name(result: MicrophoneProbeResult) -> &'static str {
+    match result {
+        MicrophoneProbeResult::Compatible => "compatible",
+        MicrophoneProbeResult::PermissionDenied => "permission_denied",
+        MicrophoneProbeResult::Unavailable => "unavailable",
+        MicrophoneProbeResult::IdentityMismatch => "identity_mismatch",
+        MicrophoneProbeResult::InvalidFormat => "invalid_format",
+        MicrophoneProbeResult::NoAudioFrames => "no_audio_frames",
+        MicrophoneProbeResult::RouteConflict => "route_conflict",
+        MicrophoneProbeResult::Timeout => "timeout",
+    }
 }
 
 #[tauri::command]
-pub fn stop_streaming_capture(state: State<'_, AppState>) -> Result<(), String> {
-    let mut streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
-    streaming.stop();
-    Ok(())
+pub async fn stop_streaming_capture(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
+        let result = streaming.stop().map_err(|error| error.to_string());
+        if let Err(error) = &result {
+            state.record_capture_error("capture_stop_failed", error.clone());
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("capture stop task failed: {error}"))?
 }
 
 #[tauri::command]
-pub fn pause_streaming_capture(state: State<'_, AppState>) -> Result<(), String> {
-    let streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
-    if !streaming.is_running() {
-        return Err("streaming capture not running".into());
-    }
-    streaming.pause();
-    Ok(())
+pub async fn pause_streaming_capture(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
+        if !streaming.is_running() {
+            return Err("streaming capture not running".into());
+        }
+        let result = streaming.pause().map_err(|error| error.to_string());
+        if let Err(error) = &result {
+            state.record_capture_error("capture_pause_failed", error.clone());
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("capture pause task failed: {error}"))?
 }
 
 #[tauri::command]
-pub fn resume_streaming_capture(state: State<'_, AppState>) -> Result<(), String> {
-    let streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
-    if !streaming.is_running() {
-        return Err("streaming capture not running".into());
-    }
-    streaming.resume();
-    Ok(())
+pub async fn resume_streaming_capture(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let streaming = state.streaming.lock().unwrap_or_else(|e| e.into_inner());
+        if !streaming.is_running() {
+            return Err("streaming capture not running".into());
+        }
+        let result = streaming.resume().map_err(|error| error.to_string());
+        if let Err(error) = &result {
+            state.record_capture_error("capture_resume_failed", error.clone());
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("capture resume task failed: {error}"))?
 }
 
 // ── Phase 3: LLM polish + quick input ────────────────────────────────────

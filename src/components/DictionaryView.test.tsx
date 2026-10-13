@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DictionaryView } from './DictionaryView'
@@ -40,8 +40,6 @@ describe('DictionaryView', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.spyOn(window, 'prompt').mockReturnValue('')
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     adapterMocks.loadCategories.mockResolvedValue([
       { id: 'cat-1', name: '人名', scope: 'global', entryCount: 1 },
@@ -95,7 +93,7 @@ describe('DictionaryView', () => {
 
     expect(await screen.findByText('当前范围暂无分类')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /新建词条/i })).toBeDisabled()
-    expect(screen.getByText('词典会影响未来任务中的 ASR 修正，不会回写或覆盖历史转写记录。')).toBeInTheDocument()
+    expect(screen.getByText('词典条目目前用于管理和查阅，尚未接入自动 ASR 修正；历史转写不会被覆盖。')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '新建当前范围分类' }))
     expect(screen.getByRole('heading', { name: '新建分类' })).toBeInTheDocument()
   })
@@ -250,9 +248,117 @@ describe('DictionaryView', () => {
     await screen.findByText('2 个词')
     await user.click(screen.getByRole('button', { name: '李娜' }))
     await user.click(screen.getByRole('button', { name: '删除' }))
+    await user.click(screen.getByRole('button', { name: '确认删除词条' }))
 
     await waitFor(() => {
       expect(screen.getByText('1 个词')).toBeInTheDocument()
+    })
+  })
+
+  it('drills from categories to entries and detail while preserving search state', async () => {
+    const user = userEvent.setup()
+
+    render(<DictionaryView onNotice={onNotice} />)
+
+    const view = await screen.findByRole('main')
+    expect(view).toHaveClass('dictionary-view--mobile-categories')
+
+    await user.click(screen.getByRole('button', { name: /人名/i }))
+    expect(view).toHaveClass('dictionary-view--mobile-entries')
+
+    const search = screen.getByRole('searchbox', { name: '搜索词条' })
+    await user.type(search, '张')
+    await user.click(await screen.findByRole('button', { name: '张伟' }))
+    expect(view).toHaveClass('dictionary-view--mobile-detail')
+
+    await user.click(screen.getByRole('button', { name: '返回词条' }))
+    expect(view).toHaveClass('dictionary-view--mobile-entries')
+    expect(search).toHaveValue('张')
+
+    await user.click(screen.getByRole('button', { name: '返回分类' }))
+    expect(view).toHaveClass('dictionary-view--mobile-categories')
+  })
+
+  it('marks an empty detail panel as compact and removes the repeated eyebrow', async () => {
+    render(<DictionaryView onNotice={onNotice} />)
+
+    await screen.findByText('人名')
+
+    expect(screen.getByTestId('dictionary-detail')).toHaveClass('dictionary-view__detail--empty')
+    expect(screen.getByTestId('dictionary-body')).toHaveClass('dictionary-view__body--detail-empty')
+    expect(screen.queryByText('DICTIONARY')).not.toBeInTheDocument()
+  })
+
+  it('confirms category deletion inline with its name and irreversible impact', async () => {
+    const user = userEvent.setup()
+    const deletion = deferred<void>()
+    adapterMocks.deleteCategoryAdapter.mockReturnValue(deletion.promise)
+    const confirmSpy = vi.spyOn(window, 'confirm')
+
+    render(<DictionaryView onNotice={onNotice} />)
+
+    await user.click(await screen.findByRole('button', { name: '删除分类' }))
+
+    expect(adapterMocks.deleteCategoryAdapter).not.toHaveBeenCalled()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(screen.getByRole('heading', { name: '删除分类「人名」？' })).toBeInTheDocument()
+    expect(screen.getByText('该分类中的 1 个词条将一并永久删除，此操作无法撤销。')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.getByRole('main')).toHaveClass('dictionary-view--mobile-categories')
+    expect(adapterMocks.deleteCategoryAdapter).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: '删除分类' }))
+    const confirmButton = screen.getByRole('button', { name: '确认删除分类' })
+    await user.click(confirmButton)
+    await user.click(confirmButton)
+
+    expect(adapterMocks.deleteCategoryAdapter).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: '删除中...' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled()
+    expect(within(screen.getByTestId('dictionary-detail')).getByRole('button', { name: '返回分类' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '删除分类' })).toBeDisabled()
+
+    deletion.resolve()
+
+    await waitFor(() => {
+      expect(adapterMocks.deleteCategoryAdapter).toHaveBeenCalledWith('cat-1')
+    })
+  })
+
+  it('confirms entry deletion inline with the entry name', async () => {
+    const user = userEvent.setup()
+    const deletion = deferred<void>()
+    adapterMocks.deleteEntryAdapter.mockReturnValueOnce(deletion.promise).mockResolvedValueOnce(undefined)
+    const confirmSpy = vi.spyOn(window, 'confirm')
+
+    render(<DictionaryView onNotice={onNotice} />)
+
+    await user.click(await screen.findByRole('button', { name: '张伟' }))
+    await user.click(screen.getByRole('button', { name: '删除' }))
+
+    expect(adapterMocks.deleteEntryAdapter).not.toHaveBeenCalled()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(screen.getByRole('heading', { name: '删除词条「张伟」？' })).toBeInTheDocument()
+
+    const confirmButton = screen.getByRole('button', { name: '确认删除词条' })
+    await user.click(confirmButton)
+    await user.click(confirmButton)
+
+    expect(adapterMocks.deleteEntryAdapter).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: '删除中...' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '返回词条' })).toBeDisabled()
+
+    deletion.reject(new Error('delete failed'))
+
+    expect(await screen.findByRole('button', { name: '确认删除词条' })).toBeEnabled()
+    expect(onNotice).toHaveBeenCalledWith('词条删除失败，请重试')
+
+    await user.click(screen.getByRole('button', { name: '确认删除词条' }))
+
+    await waitFor(() => {
+      expect(adapterMocks.deleteEntryAdapter).toHaveBeenCalledTimes(2)
     })
   })
 })

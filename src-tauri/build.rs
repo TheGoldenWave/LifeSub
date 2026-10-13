@@ -36,9 +36,34 @@ fn attest_capture_helper() {
     let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("binaries/lifesub-capture-helper-aarch64-apple-darwin");
     symlink_metadata_regular_file(&helper, "capture helper sidecar");
-    let hash = sha256_file(&helper);
+    let hash = canonical_executable_sha256(&helper);
     println!("cargo:rerun-if-changed={}", helper.display());
-    println!("cargo:rustc-env=LIFESUB_CAPTURE_HELPER_SHA256={hash}");
+    println!("cargo:rustc-env=LIFESUB_CAPTURE_HELPER_CODE_SHA256={hash}");
+}
+
+fn canonical_executable_sha256(path: &Path) -> String {
+    let output_dir = PathBuf::from(
+        std::env::var_os("OUT_DIR").expect("OUT_DIR is required for helper attestation"),
+    );
+    let temporary = output_dir.join(format!(
+        "lifesub-capture-helper-unsigned-{}",
+        std::process::id()
+    ));
+    std::fs::copy(path, &temporary)
+        .unwrap_or_else(|error| panic!("failed to copy capture helper for attestation: {error}"));
+    let status = std::process::Command::new("/usr/bin/codesign")
+        .arg("--remove-signature")
+        .arg(&temporary)
+        .status()
+        .unwrap_or_else(|error| panic!("failed to canonicalize capture helper signature: {error}"));
+    assert!(
+        status.success(),
+        "failed to remove capture helper signature"
+    );
+    let hash = sha256_file(&temporary);
+    std::fs::remove_file(&temporary)
+        .unwrap_or_else(|error| panic!("failed to remove helper attestation copy: {error}"));
+    hash
 }
 
 fn verify_native_runtime_attestation() {

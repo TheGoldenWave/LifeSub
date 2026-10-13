@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::ddl::{
     ASR_SCHEMA, CURRENT_VERSION, FRESH_BASE_SCHEMA, FTS_SHADOW_SCHEMA, FTS_SHADOWS, FTS_TABLE,
     LEGACY_SCHEMA, MODEL_MANAGER_V3_SCHEMA, TOOL_API_V4_SCHEMA, V1_TABLES, V2_TABLES, V3_TABLES,
-    V4_TABLES, V5_SCHEMA, V5_TABLES,
+    V4_TABLES, V5_SCHEMA, V5_TABLES, V6_SCHEMA, V6_TABLES,
 };
 use super::{SchemaKind, migration_error};
 
@@ -26,10 +26,12 @@ pub(super) fn classify_locked(connection: &Connection) -> rusqlite::Result<Schem
         3 => Err(migration_error("corrupt v3 catalog schema")),
         4 if is_v4(connection)? => Ok(SchemaKind::CurrentV4),
         4 => Err(migration_error("corrupt v4 catalog schema")),
-        CURRENT_VERSION if is_v5(connection)? => Ok(SchemaKind::CurrentV5),
-        CURRENT_VERSION => Err(migration_error("corrupt v5 catalog schema")),
+        5 if is_v5(connection)? => Ok(SchemaKind::CurrentV5),
+        5 => Err(migration_error("corrupt v5 catalog schema")),
+        CURRENT_VERSION if is_v6(connection)? => Ok(SchemaKind::CurrentV6),
+        CURRENT_VERSION => Err(migration_error("corrupt v6 catalog schema")),
         newer if newer > CURRENT_VERSION => {
-            if is_v5_subset(connection)? {
+            if is_v6_subset(connection)? {
                 Ok(SchemaKind::CompatibleNewer)
             } else {
                 Ok(SchemaKind::Unknown)
@@ -39,6 +41,28 @@ pub(super) fn classify_locked(connection: &Connection) -> rusqlite::Result<Schem
             "incompatible catalog version {other}"
         ))),
     }
+}
+
+pub(super) fn is_v6(connection: &Connection) -> rusqlite::Result<bool> {
+    let expected_indexes = names(&[
+        "asr_jobs_claimable",
+        "asr_jobs_one_active_fingerprint",
+        "capture_sources_session",
+        "dictionary_entries_category",
+        "model_download_artifacts_state",
+        "model_downloads_one_active_model",
+        "notes_session",
+        "operations_principal",
+        "tool_requests_operation",
+    ]);
+    if all_tables(connection)? != table_names_with_fts_shadows(&V6_TABLES)
+        || !v6_core_schema_matches(connection)?
+        || named_indexes(connection)? != expected_indexes
+        || !auxiliary_objects(connection)?.is_empty()
+    {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn is_v1(connection: &Connection) -> rusqlite::Result<bool> {
@@ -443,10 +467,14 @@ fn is_token_character(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
 
-/// Return true if the v5 contract is present as a subset — extra tables and
-/// indexes are allowed (future versions may add them). The base tables,
-/// ASR tables, and FTS shadows must still match their v5 schemas exactly.
-fn is_v5_subset(connection: &Connection) -> rusqlite::Result<bool> {
+/// Return true if the current contract is present as a subset — extra tables
+/// and indexes are allowed for future versions. Core schema must still match
+/// v6 exactly.
+fn is_v6_subset(connection: &Connection) -> rusqlite::Result<bool> {
+    v6_core_schema_matches(connection)
+}
+
+fn v6_core_schema_matches(connection: &Connection) -> rusqlite::Result<bool> {
     // Every check uses schema_sql_optional to avoid panicking on missing
     // tables — a future database may have a higher user_version but be
     // empty or partially formed.
@@ -544,9 +572,19 @@ fn is_v5_subset(connection: &Connection) -> rusqlite::Result<bool> {
         (TOOL_API_V4_SCHEMA, "tool_requests_operation"),
         (V5_SCHEMA, "notes_session"),
         (V5_SCHEMA, "dictionary_entries_category"),
+        (V6_SCHEMA, "capture_sources_session"),
     ] {
         let expected = statement_named(schema, index)?;
         let Some(actual) = schema_sql_optional(connection, index)? else {
+            return Ok(false);
+        };
+        if normalize_sql(&actual) != normalize_sql(&expected) {
+            return Ok(false);
+        }
+    }
+    for table in ["capture_sources", "capture_chunk_timing"] {
+        let expected = statement_named(V6_SCHEMA, table)?;
+        let Some(actual) = schema_sql_optional(connection, table)? else {
             return Ok(false);
         };
         if normalize_sql(&actual) != normalize_sql(&expected) {

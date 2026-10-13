@@ -13,11 +13,13 @@ use crate::domain::{
 };
 
 mod anchored_vfs;
+pub(crate) mod capture;
 mod chunks;
 mod job_snapshot;
 pub(crate) mod jobs;
 pub(crate) mod migrations;
 mod models;
+pub(crate) use models::ModelDownloadRecord;
 mod publication;
 
 pub use chunks::ChunkDiagnostics;
@@ -167,6 +169,24 @@ impl Catalog {
             ],
         )?;
         Ok(())
+    }
+
+    pub(crate) fn reconcile_interrupted_capture_sessions(&self) -> rusqlite::Result<usize> {
+        self.connection.lock().unwrap().execute(
+            "UPDATE sessions
+             SET state = 'stopped',
+                 ended_at = COALESCE(
+                     (
+                         SELECT MAX(timing.utc_end_at)
+                         FROM chunks
+                         JOIN capture_chunk_timing AS timing ON timing.chunk_id = chunks.id
+                         WHERE chunks.session_id = sessions.id
+                     ),
+                     sessions.started_at
+                 )
+             WHERE state IN ('recording', 'paused')",
+            [],
+        )
     }
 
     pub fn list_sessions(&self) -> rusqlite::Result<Vec<CaptureSession>> {

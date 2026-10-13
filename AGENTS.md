@@ -5,6 +5,10 @@
 > 本项目严格遵循"下一代 Agentic 项目标准目录规范"。
 > 你的任务是根据此地图**精准寻址（Progressive Disclosure）**，只获取你当前任务最需要的上下文。
 >
+> **Codex RTK 指令加载：** 新会话执行任何 Shell 命令前，必须读取并遵循
+> `/Users/goldenwave/.codex/RTK.md`。这是用户级 Codex 指令文件，不在本仓库内；
+> 禁止把 `RTK.md` 相对于当前工作目录或仓库根目录解析。
+>
 > **🧠 会话恢复指令（每次会话必读）：**
 > 在执行任何任务前，你**必须**首先在 `docs/prd/` 目录下搜索所有 `.artifacts/process.md` 文件，并兼容读取遗留的 `process.txt`，以恢复上次会话的上下文状态。
 > （Claude Code 用户：此操作已由 SessionStart Hook 自动完成。Codex 用户：请手动执行。）
@@ -33,6 +37,13 @@
   - 业务提需：`docs/context/business/{unit}/{req_id}/` — 含原始设想、需求确认单、MRD
   - 产品自发：`docs/context/product-initiated/{req_id}/` — 含洞察、产品简报
   - 技术实现：`docs/context/technical/{feature_id}/` — 技术笔记、决策记录
+- **🔎 本地参考项目源码** → `.sources/reference-projects/VibeVoice-main`
+  - 后续涉及长音频 ASR、流式识别、说话人/时间戳联合输出、热词、语音模型推理或微调时，可优先查阅该项目代码与文档。
+  - 该目录是无 `.git` 元数据的本地快照，只作为只读参考，不是 LifeSub 的依赖或发布源；采用其代码前必须核对当前文件、模型与资产各自许可，并保留必要的来源与 notice。
+  - 参考入口与适用边界见 `docs/context/wiki/syntheses/asr-audio-reference-project-source-analysis.md`。
+- **🔎 高优先级音频产品参考** → `.sources/reference-projects/VoiceStudio`
+  - 固定审阅基线为 `debpalash/VoiceStudio@36862c1157a25db7f7b885efba50a072ddf70e45`。优先参考 ASR 故障隔离、长时诊断的有界扫描、只读音频质量检查、模型资产许可证据；进入具体任务前先读 `docs/context/wiki/syntheses/voicestudio-source-review-2026-10-13.md`。
+  - 该目录是 `.gitignore` 排除的本地参考克隆，不是 LifeSub 的依赖或发布源。VoiceStudio 应用代码为 AGPL-3.0-only，模型/声音资产另有许可；只借鉴行为和验证思路，不直接复制源码、测试或文案。
 - **🎨 设计与样式 (UI 视窗)** → `docs/design/`
   - 严禁在代码中硬编码颜色、间距等样式值，必须引用 `docs/design/tokens/base.json` 中的 Token。
   - 项目设计规范存储在 `docs/design/tokens/impeccable.md`，与 `base.json` 同目录，由 ui-agent 通过 `teach-impeccable` Skill 建立，不要移动该文件。

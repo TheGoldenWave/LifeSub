@@ -21,9 +21,8 @@ describe('LifeSub navigation', () => {
 
   it('defaults to live capture page', () => {
     render(<App />)
-    expect(screen.getAllByText('浏览器演示').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByRole('button', { name: '开始演示' })).toBeInTheDocument()
-    expect(screen.getByText('浏览器演示数据，不会录音或保存。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '播放示例转写' })).toBeInTheDocument()
+    expect(screen.getAllByText('浏览器演示数据，不会录音或保存。')).toHaveLength(1)
   })
 
   it('switches pages via sidebar', async () => {
@@ -46,7 +45,7 @@ describe('LifeSub navigation', () => {
     await user.click(screen.getByRole('button', { name: '设置' }))
     expect(screen.getByRole('dialog')).toBeInTheDocument()
     expect(screen.getAllByText('录音设置').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText('ASR 设置')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'ASR 与模型' })).toBeInTheDocument()
   })
 
   it('closes settings modal on Esc', async () => {

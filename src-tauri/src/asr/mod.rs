@@ -3,6 +3,8 @@ pub mod job;
 pub mod manifest;
 pub mod model_lookup;
 pub mod model_manager;
+pub(crate) mod native_engine;
+pub mod packaged_gate;
 pub mod provider;
 pub mod qwen3_asr;
 pub mod receipt;

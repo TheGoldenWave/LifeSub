@@ -65,15 +65,19 @@ if PATH="$TMP/bin:$PATH" FIXTURE_ARCH=x86_64 LIFESUB_CODESIGN_IDENTITY=- \
   exit 1
 fi
 
-node - "$ROOT/src-tauri/tauri.conf.json" "$ROOT/src-tauri/Info.plist" <<'NODE'
+node - "$ROOT/src-tauri/tauri.conf.json" "$ROOT/src-tauri/Info.plist" "$ROOT/src-tauri/Entitlements.plist" <<'NODE'
 const fs = require('fs');
-const [configPath, plistPath] = process.argv.slice(2);
+const [configPath, plistPath, entitlementsPath] = process.argv.slice(2);
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 if (!config.bundle?.externalBin?.includes('binaries/lifesub-capture-helper')) process.exit(1);
+if (config.bundle?.macOS?.entitlements !== 'Entitlements.plist') process.exit(1);
 const plist = fs.readFileSync(plistPath, 'utf8');
 for (const key of ['NSMicrophoneUsageDescription', 'NSScreenCaptureUsageDescription', 'LSRequiresCarbon', 'NSQuitAlwaysKeepsWindows']) {
   if (!plist.includes(`<key>${key}</key>`)) process.exit(1);
 }
+const entitlements = fs.readFileSync(entitlementsPath, 'utf8');
+if (!entitlements.includes('<key>com.apple.security.device.audio-input</key>')) process.exit(1);
+if (!entitlements.includes('<true/>')) process.exit(1);
 NODE
 
 printf 'PASS: capture helper packaging contract\n'

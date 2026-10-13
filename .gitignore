@@ -17,6 +17,9 @@ recordings/
 work/
 outputs/
 
+# Local reference source snapshots
+.sources/reference-projects/
+
 # Swift / Xcode
 .build/
 .swiftpm/
@@ -28,6 +31,8 @@ xcuserdata/
 node_modules/
 dist/
 coverage/
+__pycache__/
+*.pyc
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts

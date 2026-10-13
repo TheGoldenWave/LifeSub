@@ -187,6 +187,9 @@ struct Args {
     model_dir: Option<PathBuf>,
     qwen17_model_dir: Option<PathBuf>,
     output_path: Option<PathBuf>,
+    tested_commit: Option<String>,
+    source_digest: Option<String>,
+    install_missing: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -195,6 +198,9 @@ fn parse_args() -> Result<Args, String> {
     let mut model_dir = None;
     let mut qwen17_model_dir = None;
     let mut output_path = None;
+    let mut tested_commit = None;
+    let mut source_digest = None;
+    let mut install_missing = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -221,6 +227,23 @@ fn parse_args() -> Result<Args, String> {
                     args.get(i).ok_or("missing value for --output")?,
                 ));
             }
+            "--tested-commit" => {
+                i += 1;
+                tested_commit = Some(
+                    args.get(i)
+                        .ok_or("missing value for --tested-commit")?
+                        .clone(),
+                );
+            }
+            "--source-digest" => {
+                i += 1;
+                source_digest = Some(
+                    args.get(i)
+                        .ok_or("missing value for --source-digest")?
+                        .clone(),
+                );
+            }
+            "--install-missing" => install_missing = true,
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;
@@ -231,6 +254,9 @@ fn parse_args() -> Result<Args, String> {
         model_dir,
         qwen17_model_dir,
         output_path,
+        tested_commit,
+        source_digest,
+        install_missing,
     })
 }
 
@@ -296,79 +322,98 @@ fn main() {
         fixture_hashes.insert(entry.file.clone(), actual_hash);
     }
 
-    // Run scenarios for each provider
-    let providers: &[(&str, bool)] = &[
-        ("sense_voice", false),
-        ("whisper", false),
-        ("qwen3-0.6b", false),
-        ("qwen3-1.7b", true),
+    let providers: &[(&str, &str)] = &[
+        ("sense_voice", "sense-voice-small-int8-2024-07-17"),
+        ("whisper", "whisper-base"),
+    ];
+    let data_dir = args.model_dir.as_deref().unwrap_or_else(|| {
+        eprintln!("--model-dir must point to the LifeSub data directory");
+        process::exit(1);
+    });
+
+    if args.install_missing {
+        for (_, model_id) in providers {
+            lifesub_lib::asr::packaged_gate::ensure_installed_model(data_dir, model_id)
+                .unwrap_or_else(|error| {
+                    eprintln!("Failed to install {model_id}: {error}");
+                    process::exit(1);
+                });
+        }
+    }
+
+    let gate_cases = [
+        (
+            "sense_voice",
+            "sense-voice-small-int8-2024-07-17",
+            "models/asr/sense_voice/sense-voice-small-int8-2024-07-17/1-7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e/test_wavs/zh.wav",
+            "b77f1794fe374a0ba1ee1dc458bfaf9349496cbbfc32780c50ba3c5a7ad8e373",
+            "开放时间早上9点至下午5点。",
+        ),
+        (
+            "whisper",
+            "whisper-base",
+            "models/asr/whisper/whisper-base/1-911b2083efd7c0dca2ac3b358b75222660dc09fb716d64fbfc417ba6c99ff3de/test_wavs/0.wav",
+            "6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f",
+            "after early nightfall the yellow lamps would light up here and there the squalid quarter of the brothels",
+        ),
     ];
 
-    for (provider_id, requires_qwen17) in providers {
-        if *requires_qwen17 && args.qwen17_model_dir.is_none() {
-            // Skip Qwen 1.7B if no model dir provided
-            for entry in &manifest.fixtures {
-                scenarios.push(ScenarioResult {
-                    scenario_id: format!("{}-{}", provider_id, entry.file.trim_end_matches(".wav")),
-                    provider: provider_id.to_string(),
-                    language: "unknown".to_string(),
-                    fixture: entry.file.clone(),
-                    cer: None,
-                    wer: None,
-                    key_phrase_recall: None,
-                    rtf: None,
-                    median_boundary_error_ms: None,
-                    max_boundary_error_ms: None,
-                    peak_rss_mib: None,
-                    passed: false,
-                    error: None,
-                    skipped: Some(true),
-                });
+    for (provider_id, model_id, relative_fixture, expected_hash, expected_text) in gate_cases {
+        let fixture_path = data_dir.join(relative_fixture);
+        if let Ok(bytes) = fs::read(&fixture_path) {
+            let actual_hash = hex::encode(Sha256::digest(bytes));
+            if actual_hash != expected_hash {
+                eprintln!("Installed fixture hash mismatch for {relative_fixture}");
+                process::exit(1);
             }
-            continue;
+            fixture_hashes.insert(relative_fixture.to_string(), actual_hash);
         }
-
-        for entry in &manifest.fixtures {
-            if entry.expected_text.is_none() && entry.expected_phrases.is_none() {
-                continue; // Not a speech fixture
-            }
-
-            let scenario_id = format!("{}-{}", provider_id, entry.file.trim_end_matches(".wav"));
-
-            let result = run_scenario(
-                provider_id,
-                &fixtures_dir,
-                entry,
-                args.model_dir.as_deref(),
-                args.qwen17_model_dir.as_deref(),
-            );
-
-            scenarios.push(result.unwrap_or_else(|e| ScenarioResult {
-                scenario_id,
-                provider: provider_id.to_string(),
-                language: "unknown".to_string(),
-                fixture: entry.file.clone(),
-                cer: None,
-                wer: None,
-                key_phrase_recall: None,
-                rtf: None,
-                median_boundary_error_ms: None,
-                max_boundary_error_ms: None,
-                peak_rss_mib: None,
-                passed: false,
-                error: Some(e),
-                skipped: None,
-            }));
-        }
+        let entry = FixtureEntry {
+            file: relative_fixture.to_string(),
+            format: "wav".to_string(),
+            sha256: expected_hash.to_string(),
+            bytes: 0,
+            sample_rate_hz: 16_000,
+            channels: 1,
+            nominal_frames: 0,
+            expected_text: Some(expected_text.to_string()),
+            expected_phrases: None,
+            minimum_phrase_matches: None,
+            normalization: Some("unicode-nfkc".to_string()),
+            require_nonempty: Some(true),
+        };
+        let scenario_id = format!("{provider_id}-known-fixture");
+        let result = run_scenario(provider_id, model_id, data_dir, &entry, Some(data_dir));
+        scenarios.push(result.unwrap_or_else(|error| ScenarioResult {
+            scenario_id,
+            provider: provider_id.to_string(),
+            language: "unknown".to_string(),
+            fixture: relative_fixture.to_string(),
+            cer: None,
+            wer: None,
+            key_phrase_recall: None,
+            rtf: None,
+            median_boundary_error_ms: None,
+            max_boundary_error_ms: None,
+            peak_rss_mib: None,
+            passed: false,
+            error: Some(error),
+            skipped: None,
+        }));
     }
 
     // Build output
     let output = GateOutput {
-        tested_commit: option_env!("LIFESUB_GATE_COMMIT")
-            .unwrap_or("unknown")
-            .to_string(),
-        scoped_source_digest: "not-yet-implemented".to_string(),
-        executable_hash: "not-yet-implemented".to_string(),
+        tested_commit: args
+            .tested_commit
+            .clone()
+            .or_else(|| option_env!("LIFESUB_GATE_COMMIT").map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string()),
+        scoped_source_digest: args
+            .source_digest
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        executable_hash: current_executable_hash().unwrap_or_else(|_| "unknown".to_string()),
         runtime: Some(RuntimeIdentity {
             sherpa_version: "1.13.5".to_string(),
             sherpa_git_sha1: "3dc7c569".to_string(),
@@ -416,31 +461,79 @@ fn main() {
 
 fn run_scenario(
     provider_id: &str,
+    model_id: &str,
     fixtures_dir: &Path,
     entry: &FixtureEntry,
-    _model_dir: Option<&Path>,
-    _qwen17_model_dir: Option<&Path>,
+    data_dir: Option<&Path>,
 ) -> Result<ScenarioResult, String> {
-    // PENDING PRODUCTION VERIFICATION: Integrate with LifeSub ASR provider infrastructure
-    // (ProviderFactory, ModelManager, device-qualified installations) on the M4/24GB device.
-    // See the Gate docblock above and scripts/verify-asr-gate.sh.
-
-    let _audio_path = fixtures_dir.join(&entry.file);
+    let data_dir = data_dir.ok_or_else(|| "LifeSub data directory is required".to_string())?;
+    let audio_path = fixtures_dir.join(&entry.file);
+    let inference = lifesub_lib::asr::packaged_gate::transcribe_installed_fixture(
+        data_dir,
+        model_id,
+        &audio_path,
+    )?;
+    let cer = entry.expected_text.as_deref().map(|reference| {
+        calculate_cer(
+            &normalize_for_cer(reference),
+            &normalize_for_cer(&inference.text),
+        )
+    });
+    let wer = entry.expected_text.as_deref().map(|reference| {
+        calculate_wer(
+            &normalize_for_wer(reference),
+            &normalize_for_wer(&inference.text),
+        )
+    });
+    let key_phrase_recall = entry
+        .expected_phrases
+        .as_deref()
+        .map(|phrases| calculate_key_phrase_recall(phrases, &inference.text));
+    let rtf = if inference.audio_duration_ms == 0 {
+        None
+    } else {
+        Some(inference.elapsed_ms as f64 / inference.audio_duration_ms as f64)
+    };
+    let quality_passed = match provider_id {
+        "sense_voice" => cer.is_some_and(|actual| actual <= 0.20),
+        "whisper" => wer.is_some_and(|actual| actual <= 0.20),
+        _ => false,
+    };
+    let passed = !inference.text.trim().is_empty()
+        && rtf.is_some_and(|value| value <= 1.0)
+        && quality_passed;
 
     Ok(ScenarioResult {
         scenario_id: format!("{}-{}", provider_id, entry.file.trim_end_matches(".wav")),
         provider: provider_id.to_string(),
-        language: "unknown".to_string(),
+        language: "auto".to_string(),
         fixture: entry.file.clone(),
-        cer: None,
-        wer: None,
-        key_phrase_recall: None,
-        rtf: None,
+        cer,
+        wer,
+        key_phrase_recall,
+        rtf,
         median_boundary_error_ms: None,
         max_boundary_error_ms: None,
-        peak_rss_mib: None,
-        passed: false,
-        error: Some("Gate runner not yet integrated with ASR providers".to_string()),
+        peak_rss_mib: peak_rss_mib(),
+        passed,
+        error: (!passed).then(|| format!("quality gate failed; transcript={}", inference.text)),
         skipped: None,
     })
+}
+
+fn current_executable_hash() -> Result<String, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let bytes = fs::read(executable).map_err(|error| error.to_string())?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn peak_rss_mib() -> Option<f64> {
+    let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    return Some(usage.ru_maxrss as f64 / (1024.0 * 1024.0));
+    #[cfg(not(target_os = "macos"))]
+    Some(usage.ru_maxrss as f64 / 1024.0)
 }

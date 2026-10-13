@@ -11,7 +11,7 @@ LifeSub 是本地优先的声音 Evidence 管理工具。界面不是消费级 A
 1. **Evidence first**：稳定 ID、时间范围、来源和 revision 始终比装饰更重要。
 2. **Dark by default**：统一使用带蓝灰底色的近黑背景，降低长时间运行时的视觉干扰。
 3. **Sharp and flat**：不使用阴影、渐变和大圆角；层级只通过边框、明度与留白表达。
-4. **Mono for operations**：按钮、状态、标签、时间和 Evidence URI 使用等宽字体；正文使用易读的中文无衬线字体。
+4. **Mono for evidence**：时间、Evidence URI、hash、revision、Provider identity 和错误码使用等宽字体；按钮、中文状态与正文使用易读的中文无衬线字体。
 5. **Color is state**：颜色只传达录音、暂停、成功、警告、错误和键盘焦点，不承担装饰。
 6. **Local-first clarity**：任何云端、导出、修订和失败状态都必须明确说明数据发生了什么。
 
@@ -38,10 +38,10 @@ LifeSub 是本地优先的声音 Evidence 管理工具。界面不是消费级 A
 
 ### 3.2 字体
 
-- Display / controls / metadata：`SFMono-Regular`, `Menlo`, `Monaco`, `Consolas`, monospace。
+- Evidence / technical metadata：`SFMono-Regular`, `Menlo`, `Monaco`, `Consolas`, monospace。
 - Body / transcript：`Avenir Next`, `PingFang SC`, `Helvetica Neue`, sans-serif。
 - 标题使用 300–500 字重；禁止厚重的 700 字重展示标题。
-- 按钮使用 12–13px 等宽大写或短中文标签，字间距 `0.08em`。
+- 按钮使用 12–14px 比例字体短标签，不增加字间距；技术命令或身份值才使用等宽字体。
 - 转写正文为 16–18px，行高 1.7，单行宽度控制在约 45–75 个中文字符。
 
 ### 3.3 间距与形状
@@ -113,7 +113,7 @@ LifeSub 是本地优先的声音 Evidence 管理工具。界面不是消费级 A
 
 - ≥1024px：侧栏 + 记录列表 + Transcript 三栏结构。
 - 768–1023px：侧栏收窄为图标导航，记录列表缩窄。
-- <768px：导航改为顶部横排，记录列表与正文垂直堆叠。
+- <768px：导航改为顶部横排；Timeline 使用列表/详情两级视图，词典使用分类/词条/详情三级视图，避免长页面堆叠。
 - 移动端不隐藏录音、搜索、导出、revision 或设置等关键功能。
 - 小屏幕元数据允许换行，但 Evidence URI 必须可横向滚动或自动换行，不能截断不可恢复信息。
 

@@ -9,9 +9,11 @@ interface ModalProps {
   children: ReactNode
   bodyClassName?: string
   panelClassName?: string
+  role?: 'dialog' | 'alertdialog'
+  closeLabel?: string
 }
 
-export function Modal({ open, onClose, title, children, bodyClassName, panelClassName }: ModalProps) {
+export function Modal({ open, onClose, title, children, bodyClassName, panelClassName, role = 'dialog', closeLabel = '关闭设置' }: ModalProps) {
   const overlayRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
@@ -95,7 +97,7 @@ export function Modal({ open, onClose, title, children, bodyClassName, panelClas
       <div
         ref={panelRef}
         className={panelClassName ? `modal-container ${panelClassName}` : 'modal-container'}
-        role="dialog"
+        role={role}
         aria-modal="true"
         aria-labelledby={titleId}
       >
@@ -104,10 +106,11 @@ export function Modal({ open, onClose, title, children, bodyClassName, panelClas
           <button
             ref={closeButtonRef}
             className="icon-button"
-            aria-label="关闭设置"
+            aria-label={closeLabel}
+            title={closeLabel}
             onClick={() => onCloseRef.current()}
           >
-            <X size={18} />
+            <X size={18} aria-hidden="true" />
           </button>
         </header>
         <div className={bodyClassName ? `modal-body ${bodyClassName}` : 'modal-body'}>
@@ -172,7 +175,10 @@ function firstFocusable(root: HTMLElement | null) {
 
 function listFocusable(root: HTMLElement | null) {
   if (!root) return [] as HTMLElement[]
-  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((element) => !element.hasAttribute('disabled'))
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((element) => {
+    if (element.hasAttribute('disabled')) return false
+    return element.closest('[hidden], [inert], [aria-hidden="true"]') === null
+  })
 }
 
 function trapFocus(event: KeyboardEvent, root: HTMLElement | null) {

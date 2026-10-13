@@ -31,6 +31,9 @@ if [[ "$1" == "attach" ]]; then
       mkdir -p "$mount_point/LifeSub.app/Contents/MacOS"
       cat > "$mount_point/LifeSub.app/Contents/MacOS/lifesub" <<'APP'
 #!/usr/bin/env bash
+if [[ ! -d "$(dirname "${LIFESUB_ACCEPTANCE_DATA_DIR:?}")" ]]; then
+  exit 74
+fi
 if [[ "${SMOKE_EXIT:?}" -eq 0 ]]; then
   mkdir -p "${LIFESUB_ACCEPTANCE_DIR:?}"
   printf '{"scenario":"packaged-smoke","passed":true}\n' \

@@ -37,6 +37,30 @@ export interface CoreTranscriptRevision {
   segments: CoreTranscriptSegment[]
 }
 
+export interface CommittedSegment {
+  segment_id: string
+  chunk_id: string
+  capture_source_id: string | null
+  start_ms: number
+  end_ms: number
+  source: 'microphone' | 'system_audio' | 'imported'
+  text: string
+}
+
+export interface CommittedPublication {
+  revision_id: string
+  session_id: string
+  revision_number: number
+  provider: string
+  created_at: string
+  segments: CommittedSegment[]
+}
+
+export interface AsrSessionState {
+  latest_revision: CommittedPublication | null
+  latest_job: CoreTimelineJobSummary | null
+}
+
 export interface CoreNote {
   id: string
   session_id: string
@@ -98,6 +122,7 @@ export interface CoreAsrConfig {
   vad_min_speech_ms: number
   vad_silence_ms: number
   itn_enabled: boolean
+  whisper_task: 'transcribe' | 'translate' | null
 }
 
 export interface CoreRecordingConfig {
@@ -108,6 +133,88 @@ export interface CoreRecordingConfig {
   recovery_delay_secs: number
   sample_rate: number
   storage_path: string
+  microphone_device_uid: string | null
+  microphone_device_name: string | null
+}
+
+export interface CoreSettingsCapabilities {
+  production_capture_output_sample_rate_hz: number
+  data_directory_path: string
+  im_detection_available: boolean
+  supported_capture_modes: string[]
+}
+
+export interface CoreDiagnosticsSnapshot {
+  schema: string
+  generated_at: string
+  permissions: { microphone: string; screen_recording: string }
+  selected_microphone: {
+    uid: string | null
+    name: string | null
+    connected: boolean
+    transport: string | null
+    probe_result: string | null
+    probe: {
+      uid: string
+      name: string
+      transport: string
+      input_sample_rate_hz: number | null
+      input_channel_count: number | null
+      read_back_uid: string | null
+      first_frame_sample_count: number
+      elapsed_ms: number
+      result: string
+    } | null
+  }
+  identities: {
+    app_version: string
+    app_executable_sha256: string
+    helper_code_sha256: string
+    capture_protocol_version: number
+    runtime_version: string
+    runtime_git_commit: string
+    runtime_archive_sha256: string
+    runtime_build_id: string
+  }
+  models: Array<{
+    model_id: string
+    state: string
+    bundle_identity: string
+    runtime_identity_sha256: string | null
+    last_error_code: string | null
+  }>
+  storage: { data_directory: string; catalog_bytes: number; audio_bytes: number; model_bytes: number }
+  recent_error: { code: string; summary: string } | null
+}
+
+export interface CoreMicrophoneDevice {
+  uid: string
+  name: string
+  isDefault: boolean
+  isConnected: boolean
+  transport: 'built_in' | 'usb' | 'bluetooth' | 'aggregate' | 'virtual' | 'unknown'
+}
+
+export type CoreMicrophoneProbeResult =
+  | 'compatible'
+  | 'permission_denied'
+  | 'unavailable'
+  | 'identity_mismatch'
+  | 'invalid_format'
+  | 'no_audio_frames'
+  | 'route_conflict'
+  | 'timeout'
+
+export interface CoreMicrophoneProbe {
+  uid: string
+  name: string
+  transport: CoreMicrophoneDevice['transport']
+  input_sample_rate_hz: number | null
+  input_channel_count: number | null
+  read_back_uid: string | null
+  first_frame_sample_count: number
+  elapsed_ms: number
+  result: CoreMicrophoneProbeResult
 }
 
 export interface CoreTimelineRecord {
@@ -154,7 +261,19 @@ export interface AppRuntimeInfo {
 }
 
 export interface CoreModelDownload {
-  state: string
+  id: string
+  state: 'queued' | 'downloading' | 'verifying' | 'installing' | 'qualifying' | 'succeeded' | 'failed' | 'cancelled'
+  downloaded_bytes: number
+  expected_bytes: number
+  artifact_index: number
+  artifact_count: number
+  error_code: string | null
+  error_summary: string | null
+}
+
+export interface CoreModelOperationAck {
+  download_id: string
+  cancel_requested: boolean
 }
 
 export interface CoreAsrModel {
@@ -291,8 +410,16 @@ export function listTimelineRecords() {
   return invoke<CoreTimelineRecord[]>('list_timeline_records')
 }
 
+export function getAsrSessionState(sessionId: string) {
+  return invoke<AsrSessionState>('get_asr_session_state', { sessionId })
+}
+
 export function getAsrConfig() {
   return invoke<CoreAsrConfig>('get_asr_config')
+}
+
+export function getSettingsCapabilities() {
+  return invoke<CoreSettingsCapabilities>('get_settings_capabilities')
 }
 
 export function setAsrConfig(config: CoreAsrConfig) {
@@ -307,6 +434,34 @@ export function setRecordingConfig(config: CoreRecordingConfig) {
   return invoke('set_recording_config', { config })
 }
 
+export function listMicrophoneDevices() {
+  return invoke<CoreMicrophoneDevice[]>('list_microphone_devices')
+}
+
+export function probeMicrophone(microphoneDeviceUid: string) {
+  return invoke<CoreMicrophoneProbe>('probe_microphone', { microphoneDeviceUid })
+}
+
+export function getDiagnostics() {
+  return invoke<CoreDiagnosticsSnapshot>('get_diagnostics')
+}
+
+export function writeDiagnosticsExport(path: string, snapshot: CoreDiagnosticsSnapshot) {
+  return invoke('write_diagnostics_export', { path, snapshot })
+}
+
+export function writeRecordMarkdownExport(
+  path: string,
+  sessionId: string,
+  revisionNumber: number,
+) {
+  return invoke('write_record_markdown_export', { path, sessionId, revisionNumber })
+}
+
+export function openMacosPrivacySettings(target: 'microphone' | 'screen_recording') {
+  return invoke('open_macos_privacy_settings', { target })
+}
+
 export function getAppRuntimeInfo() {
   return invoke<AppRuntimeInfo>('get_app_runtime_info')
 }
@@ -315,10 +470,26 @@ export function listAsrModels() {
   return invoke<CoreAsrModel[]>('list_asr_models')
 }
 
+export function installAsrModel(modelId: string) {
+  return invoke<CoreAsrModel>('install_asr_model', { modelId })
+}
+
+export function cancelModelDownload(downloadId: string) {
+  return invoke<CoreModelOperationAck>('cancel_model_download', { downloadId })
+}
+
+export function retryModelDownload(modelId: string, downloadId: string) {
+  return invoke<CoreAsrModel>('retry_model_download', { modelId, downloadId })
+}
+
 // ── Phase 2.1: Streaming capture ─────────────────────────────────────────
 
-export function startStreamingCapture() {
-  return invoke('start_streaming_capture')
+export function startStreamingCapture(
+  sessionId: string,
+  captureMode: 'smart' | 'mic-only' | 'system-only' = 'smart',
+  microphoneDeviceUid: string | null = null,
+) {
+  return invoke('start_streaming_capture', { sessionId, captureMode, microphoneDeviceUid })
 }
 
 export function stopStreamingCapture() {

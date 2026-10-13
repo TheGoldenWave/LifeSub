@@ -164,6 +164,15 @@ unsafe extern "C" fn anchored_open(
     };
     let result =
         unsafe { native_open(native, descriptor_path.as_ptr(), file, flags, output_flags) };
+    if result == ffi::SQLITE_OK
+        && flags & ffi::SQLITE_OPEN_READWRITE != 0
+        && !output_flags.is_null()
+    {
+        unsafe {
+            *output_flags =
+                (*output_flags & !ffi::SQLITE_OPEN_READONLY) | ffi::SQLITE_OPEN_READWRITE;
+        }
+    }
     if result != ffi::SQLITE_OK {
         return result;
     }

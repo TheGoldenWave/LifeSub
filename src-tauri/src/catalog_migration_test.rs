@@ -27,9 +27,14 @@ const V4_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../tests/fixtures/catalog/lifesub-v0.4.sqlite3"
 );
+const V5_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tests/fixtures/catalog/lifesub-v0.5.sqlite3"
+);
 const V2_FIXTURE_SHA256: &str = "e2956f8a5c0531e8b444519c8e11e2de5952f6b4b4ec391c3321e9f60e6e4639";
 const V3_FIXTURE_SHA256: &str = "79f8ec380b1555691e9bc4fd79bd743213b275270d35a61e791c0f278d970de2";
 const V4_FIXTURE_SHA256: &str = "75c5782564ebf499ac3b3439267bbf3012100efa2e86b1bb91f3e256ac587445";
+const V5_FIXTURE_SHA256: &str = "2eacf2c038a3afd9bc5ca92d6ae019dc65d693fec87a4977f83cf9c058460f2b";
 
 type ColumnContract<'a> = (&'a str, &'a str, bool, Option<&'a str>, i64);
 type ForeignKeyContract = (String, String, String, String, String, String);
@@ -83,38 +88,26 @@ fn user_version(connection: &Connection) -> i64 {
 }
 
 #[test]
-#[ignore = "Task 7 pending: remove ignore to resume the recorded v5-to-v6 RED cycle"]
 fn migrates_v5_to_v6_capture_timing_without_rewriting_existing_chunks() {
-    let mut connection = Connection::open_in_memory().unwrap();
-    migrations::migrate(&mut connection).unwrap();
-    connection
-        .execute(
-            "INSERT INTO sessions(id,title,state,started_at) VALUES('s','existing','stopped','2026-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO chunks(id,session_id,source,path,sha256,byte_length) VALUES('c','s','imported','audio/x.wav',?1,4)",
-            ["aa".repeat(32)],
-        )
-        .unwrap();
-    connection.pragma_update(None, "user_version", 5).unwrap();
-    connection
-        .execute_batch("DROP TABLE capture_chunk_timing; DROP TABLE capture_sources;")
-        .ok();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(V5_FIXTURE, &path).unwrap();
+    let mut connection = Connection::open(path).unwrap();
 
     migrations::migrate(&mut connection).unwrap();
 
     assert_eq!(user_version(&connection), 6);
     let existing: (String, String, i64) = connection
         .query_row(
-            "SELECT path, sha256, byte_length FROM chunks WHERE id='c'",
+            "SELECT path, sha256, byte_length FROM chunks WHERE id='chunk_v5_fixture'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(existing, ("audio/x.wav".into(), "aa".repeat(32), 4));
+    assert_eq!(
+        existing,
+        ("audio/v5-fixture.wav".into(), "5".repeat(64), 512)
+    );
     for table in ["capture_sources", "capture_chunk_timing"] {
         let exists: i64 = connection
             .query_row(
@@ -128,12 +121,66 @@ fn migrates_v5_to_v6_capture_timing_without_rewriting_existing_chunks() {
 }
 
 #[test]
+fn migrates_v5_with_duplicate_legacy_paths_without_rewriting_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(V5_FIXTURE, &path).unwrap();
+    let mut connection = Connection::open(path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO sessions(id,title,state,started_at)
+             VALUES('session_v5_duplicate','Duplicate path','stopped','2026-08-01T00:00:02Z')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO chunks(
+                id,session_id,source,path,sha256,byte_length,session_offset_ms,duration_ms
+             ) VALUES(
+                'chunk_v5_duplicate','session_v5_duplicate','imported','audio/v5-fixture.wav',?1,256,0,500
+             )",
+            ["6".repeat(64)],
+        )
+        .unwrap();
+
+    migrations::migrate(&mut connection).unwrap();
+
+    assert_eq!(user_version(&connection), 6);
+    let rows = connection
+        .prepare(
+            "SELECT id, sha256, byte_length
+             FROM chunks
+             WHERE path = 'audio/v5-fixture.wav'
+             ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("chunk_v5_duplicate".into(), "6".repeat(64), 256),
+            ("chunk_v5_fixture".into(), "5".repeat(64), 512),
+        ]
+    );
+}
+
+#[test]
 fn fresh_catalog_uses_v3_model_install_contract() {
     let mut connection = Connection::open_in_memory().unwrap();
 
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 5);
+    assert_eq!(user_version(&connection), 6);
     assert_columns(
         &connection,
         "model_download_artifacts",
@@ -183,7 +230,7 @@ fn migrates_immutable_v2_without_blind_runtime_qualification() {
 
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 5);
+    assert_eq!(user_version(&connection), 6);
     let state: String = connection
         .query_row(
             "SELECT state FROM model_installations WHERE model_id = 'legacy-ready-model'",
@@ -194,33 +241,62 @@ fn migrates_immutable_v2_without_blind_runtime_qualification() {
     assert_eq!(state, "installed_unqualified");
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV5
+        SchemaKind::CurrentV6
     );
 }
 
 #[test]
-fn immutable_v4_fixture_upgrades_to_v5_and_reopens_idempotently() {
+fn immutable_v4_fixture_upgrades_to_v6_and_reopens_idempotently() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("catalog.sqlite3");
     fs::copy(V4_FIXTURE, &path).unwrap();
 
     let mut connection = Connection::open(&path).unwrap();
     migrations::migrate(&mut connection).unwrap();
-    assert_eq!(user_version(&connection), 5);
+    assert_eq!(user_version(&connection), 6);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV5
+        SchemaKind::CurrentV6
     );
     drop(connection);
 
-    // V4→V5 migration changes the file, so reopen and verify it stays V5
+    // V4->V6 migration changes the file, so reopen and verify it stays V6.
     let mut reopened = Connection::open(&path).unwrap();
     migrations::migrate(&mut reopened).unwrap();
-    assert_eq!(user_version(&reopened), 5);
+    assert_eq!(user_version(&reopened), 6);
     assert_eq!(
         migrations::classify(&mut reopened).unwrap(),
-        SchemaKind::CurrentV5
+        SchemaKind::CurrentV6
     );
+}
+
+#[test]
+fn immutable_v5_fixture_upgrades_to_v6_and_reopens_idempotently() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(V5_FIXTURE, &path).unwrap();
+
+    let mut connection = Connection::open(&path).unwrap();
+    assert_eq!(user_version(&connection), 5);
+    migrations::migrate(&mut connection).unwrap();
+    assert_eq!(user_version(&connection), 6);
+    assert_eq!(
+        migrations::classify(&mut connection).unwrap(),
+        SchemaKind::CurrentV6
+    );
+    let preserved: (String, String, i64) = connection
+        .query_row(
+            "SELECT path, sha256, byte_length FROM chunks WHERE id = 'chunk_v5_fixture'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        preserved,
+        ("audio/v5-fixture.wav".into(), "5".repeat(64), 512)
+    );
+    migrations::migrate(&mut connection).unwrap();
+    assert_eq!(user_version(&connection), 6);
 }
 
 #[test]
@@ -238,6 +314,10 @@ fn catalog_fixtures_have_frozen_bytes() {
     assert_eq!(
         hex::encode(Sha256::digest(fs::read(V4_FIXTURE).unwrap())),
         V4_FIXTURE_SHA256
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(fs::read(V5_FIXTURE).unwrap())),
+        V5_FIXTURE_SHA256
     );
 }
 
@@ -271,11 +351,11 @@ fn task9_reuses_v2_job_schema_without_migration_or_version_drift() {
 
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 5);
+    assert_eq!(user_version(&connection), 6);
     assert_eq!(schema_sql(&connection, "asr_jobs"), job_sql_before);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV5
+        SchemaKind::CurrentV6
     );
 }
 

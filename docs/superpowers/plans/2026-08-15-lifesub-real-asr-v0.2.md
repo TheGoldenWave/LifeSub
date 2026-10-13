@@ -1013,6 +1013,17 @@ git commit -m "feat: expose versioned local tool API"
 
 ### Task 12: Add The Typed ASR Client And Functional Settings UI
 
+> **Current gap (2026-08-25):** The canonical ModelManager can download, checkpoint,
+> resume, verify, install, and qualify models, and the current model page can launch
+> installation and show only a coarse `安装中…` state. The real-time download UI in
+> this task is not complete. Before release, the frontend contract must expose the
+> current-bundle download ID/state, `downloaded_bytes`, `expected_bytes`, stable error
+> information, and terminal state. The UI must refresh from persisted Catalog state
+> (polling or events used only as refresh hints), render aggregate byte/percentage
+> progress through downloading/verifying/installing, and provide retry/cancel recovery
+> where the Core operation supports it. A completed `install_asr_model` Promise alone
+> is not acceptable progress UI evidence.
+
 **Files:**
 
 - Modify: `src/domain.ts`
@@ -1034,6 +1045,13 @@ Assert exact adapter mappings for Application V1 settings/model/import/job/revis
 - [ ] **Step 2: Write failing settings interaction tests**
 
 Test SenseVoice/Whisper/Qwen3-ASR segmented control, compatible model cards, download/pause-resume-or-retry/cancel/delete buttons, operation progress and every terminal operation state, language menu, thread stepper, VAD and auto-transcribe toggles, SenseVoice ITN, Whisper task, and both Qwen sizes. On the supported M4/24GB macOS 14+ arm64 Metal device, 1.7B must show its approximately 4.71 GB bundle size, Candle/Metal runtime, download action, aggregate multi-file progress, `installed_unqualified` runtime-validation state and final `runtime_qualified` ready state. On 16GB or another incompatible device it stays selectable/visible with exact unmet conditions and no download action. Test save errors, structural failure, runtime qualification retry, fixed loading layout, and the exact four-row ModelLookup capability presentation.
+
+The progress tests must prove that an unresolved install operation visibly advances
+from persisted byte counts without waiting for the install command to return; zero or
+unknown totals use an indeterminate state rather than a fabricated percentage. They
+must also cover remount/restart recovery, monotonic progress, `downloaded_bytes <=
+expected_bytes`, verifying/installing labels after byte completion, and a failed
+download retaining a visible retry action and stable error code.
 
 - [ ] **Step 3: Implement typed DTOs and client**
 

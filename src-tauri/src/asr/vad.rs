@@ -330,9 +330,6 @@ fn validate_detector_cores(
     samples: &[f32],
     cores: &[SampleRange],
 ) -> Result<(), AudioPreparationError> {
-    if cores.is_empty() {
-        return Err(AudioPreparationError::InvalidDetectorCores);
-    }
     let total_samples =
         u64::try_from(samples.len()).map_err(|_| AudioPreparationError::IndexOutOfRange)?;
     let mut previous: Option<SampleRange> = None;

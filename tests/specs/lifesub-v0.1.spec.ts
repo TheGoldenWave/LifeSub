@@ -4,7 +4,7 @@ test('用户完成记录、检索、修订和设置浏览', async ({ page }) => 
   await page.goto('/')
 
   // Start demo recording
-  await page.getByRole('button', { name: '开始演示' }).click()
+  await page.getByRole('button', { name: '播放示例转写' }).click()
   await page.getByRole('button', { name: '停止' }).click()
 
   // Navigate to timeline and search

@@ -1,4 +1,5 @@
 import type { DictionaryCategory, DictionaryEntry, StatsSnapshot, CaptureNote, EvidenceRecord, TranscriptRevision, TranscriptSegment } from '../domain'
+import { save } from '@tauri-apps/plugin-dialog'
 import {
   createManualRevision,
   importAudioRecord as importAudioRecordCommand,
@@ -15,11 +16,19 @@ import {
   getStatsSnapshot,
   listVoiceprints,
   getAsrConfig,
+  getSettingsCapabilities,
   setAsrConfig,
   getRecordingConfig,
   setRecordingConfig,
   getAppRuntimeInfo,
   listAsrModels,
+  installAsrModel,
+  cancelModelDownload,
+  retryModelDownload,
+  getDiagnostics,
+  writeDiagnosticsExport,
+  openMacosPrivacySettings as openPrivacySettingsCommand,
+  probeMicrophone as probeMicrophoneCommand,
   renameVoiceprint,
   deleteVoiceprint,
   listNotes,
@@ -32,11 +41,13 @@ import {
   type CoreVoiceprint,
   type CoreAsrConfig,
   type CoreRecordingConfig,
+  type CoreSettingsCapabilities,
   type CoreNote,
   type CoreTimelineRecord,
   type CoreTranscriptSegment,
   type AppRuntimeInfo,
   type CoreAsrModel,
+  type CoreDiagnosticsSnapshot,
 } from '../services/lifesub'
 import {
   demoCategories,
@@ -343,7 +354,7 @@ export async function deleteNoteAdapter(noteId: string): Promise<void> {
 export async function loadAsrConfig(): Promise<CoreAsrConfig> {
   if (!isTauriRuntime()) return {
     provider: 'sense_voice', model_id: 'sense-voice-small-int8-2024-07-17', language: 'zh', auto_transcribe: true, threads: 4,
-    vad_enabled: true, vad_min_speech_ms: 300, vad_silence_ms: 800, itn_enabled: true,
+    vad_enabled: true, vad_min_speech_ms: 300, vad_silence_ms: 800, itn_enabled: true, whisper_task: null,
   }
   return getAsrConfig()
 }
@@ -353,12 +364,73 @@ export async function saveAsrConfig(config: CoreAsrConfig): Promise<void> {
   await setAsrConfig(config)
 }
 
+export async function loadSettingsCapabilities(): Promise<CoreSettingsCapabilities> {
+  if (!isTauriRuntime()) {
+    return {
+      production_capture_output_sample_rate_hz: 16000,
+      data_directory_path: '浏览器预览不提供真实 LifeSub 数据目录',
+      im_detection_available: false,
+      supported_capture_modes: ['smart', 'mic_only', 'system_only'],
+    }
+  }
+  return getSettingsCapabilities()
+}
+
+export async function loadDiagnostics(): Promise<CoreDiagnosticsSnapshot> {
+  if (!isTauriRuntime()) return {
+    schema: 'lifesub.diagnostics.v1',
+    generated_at: new Date().toISOString(),
+    permissions: { microphone: 'not_granted', screen_recording: 'not_granted' },
+    selected_microphone: { uid: null, name: null, connected: false, transport: null, probe_result: null, probe: null },
+    identities: {
+      app_version: 'web-preview',
+      app_executable_sha256: '0'.repeat(64),
+      helper_code_sha256: '0'.repeat(64),
+      capture_protocol_version: 2,
+      runtime_version: 'unavailable',
+      runtime_git_commit: '0'.repeat(40),
+      runtime_archive_sha256: '0'.repeat(64),
+      runtime_build_id: 'desktop runtime unavailable',
+    },
+    models: [],
+    storage: { data_directory: '浏览器预览不提供真实 LifeSub 数据目录', catalog_bytes: 0, audio_bytes: 0, model_bytes: 0 },
+    recent_error: null,
+  }
+  return getDiagnostics()
+}
+
+export async function exportDiagnostics(snapshot: CoreDiagnosticsSnapshot): Promise<string | null> {
+  if (!isTauriRuntime()) throw new Error('浏览器预览无法导出桌面诊断')
+  const path = await save({
+    title: '导出 LifeSub 诊断',
+    defaultPath: `LifeSub-diagnostics-${new Date().toISOString().slice(0, 10)}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  })
+  if (!path) return null
+  await writeDiagnosticsExport(path, snapshot)
+  return path
+}
+
+export async function openMacosPrivacySettings(
+  target: 'microphone' | 'screen_recording',
+): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('浏览器预览无法打开 macOS 设置')
+  await openPrivacySettingsCommand(target)
+}
+
+export async function probeSelectedMicrophone(uid: string): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('浏览器预览无法测试麦克风')
+  await probeMicrophoneCommand(uid)
+}
+
 export async function loadRecordingConfig(): Promise<CoreRecordingConfig> {
   if (!isTauriRuntime()) return {
     capture_mode: 'smart', im_detection_enabled: true,
     im_apps: ['wechat', 'dingtalk', 'feishu', 'teams', 'zoom', 'qq'],
     detection_delay_secs: 3, recovery_delay_secs: 5, sample_rate: 16000,
     storage_path: '~/.lifesub/recordings/',
+    microphone_device_uid: null,
+    microphone_device_name: null,
   }
   return getRecordingConfig()
 }
@@ -407,4 +479,21 @@ export async function loadModelCatalog(): Promise<CoreAsrModel[]> {
     ]
   }
   return listAsrModels()
+}
+
+export async function installAsrModelAdapter(modelId: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error('模型安装仅支持 LifeSub 桌面应用')
+  }
+  await installAsrModel(modelId)
+}
+
+export async function cancelModelDownloadAdapter(downloadId: string) {
+  if (!isTauriRuntime()) throw new Error('模型下载取消仅支持 LifeSub 桌面应用')
+  return cancelModelDownload(downloadId)
+}
+
+export async function retryModelDownloadAdapter(modelId: string, downloadId: string): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('模型下载重试仅支持 LifeSub 桌面应用')
+  await retryModelDownload(modelId, downloadId)
 }

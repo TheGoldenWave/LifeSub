@@ -6,6 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
@@ -15,7 +16,6 @@ use crate::asr::job::{
     SystemClock,
 };
 use crate::asr::model_lookup::ModelLookup;
-#[cfg(test)]
 use crate::asr::model_manager::ExecutableInstallationLease;
 #[cfg(feature = "asr-runtime")]
 use crate::asr::model_manager::FullSherpaRuntimeIdentity;
@@ -36,6 +36,15 @@ const CATALOG_FILE: &str = "lifesub.sqlite3";
 const RUNTIME_LOCK_FILE: &str = "asr-worker.lock";
 const CORE_LOCK_PREFIX: &str = ".lifesub-core-";
 const CORE_LOCK_SUFFIX: &str = ".lock";
+const MODEL_INSTALL_MAX_ATTEMPTS: usize = 3;
+
+pub(crate) fn current_install_identity(model_id: &str) -> Option<(&'static str, &'static str)> {
+    if let Some(model) = crate::asr::manifest::model_registry().model(model_id) {
+        return Some((model.manifest_version, model.bundle.identity_sha256));
+    }
+    let vad = crate::asr::manifest::vad_manifest();
+    (vad.id == model_id).then_some((vad.manifest_version, vad.bundle.identity_sha256))
+}
 
 #[derive(Debug)]
 pub enum RuntimeOwnershipError {
@@ -544,6 +553,27 @@ impl CoreRuntime {
         self.model_manager.catalog_ref()
     }
 
+    pub(crate) fn executable_installation(
+        &self,
+        model_id: &str,
+    ) -> Result<ExecutableInstallationLease, ManagerError> {
+        self.ensure_model_current()?;
+        self.model_manager.executable_installation(model_id)
+    }
+
+    pub(crate) fn open_verified_audio_chunk(
+        &self,
+        chunk: &crate::domain::AudioChunk,
+    ) -> Result<std::fs::File, ServiceError> {
+        self.ensure_model_current()
+            .map_err(|error| ServiceError::Io(std::io::Error::other(format!("{error:?}"))))?;
+        let capability = self
+            .ownership
+            .try_clone_data_directory()
+            .map_err(|error| ServiceError::Io(std::io::Error::other(format!("{error:?}"))))?;
+        crate::service::open_verified_audio_chunk(capability, chunk)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn delete_model(&self, model_id: &str) -> Result<(), ManagerError> {
         self.ensure_model_current()?;
@@ -577,6 +607,61 @@ impl CoreRuntime {
         self.ensure_model_current()?;
         self.model_manager
             .download_and_install_model(model_id, device, cancelled)
+    }
+
+    pub(crate) fn ensure_model_installed<F: Fn() -> bool>(
+        &self,
+        model_id: &str,
+        device: &DeviceProfile,
+        cancelled: F,
+    ) -> Result<(), ManagerError> {
+        if self.executable_installation(model_id).is_ok() {
+            return Ok(());
+        }
+        let (manifest_version, bundle_identity) = current_install_identity(model_id)
+            .ok_or_else(|| ManagerError::new("model_structural_incompatible", "unknown model"))?;
+        for attempt in 0..MODEL_INSTALL_MAX_ATTEMPTS {
+            let resumable = self
+                .catalog_ref()
+                .model_download_records()?
+                .into_iter()
+                .find(|record| {
+                    record.model_id == model_id
+                        && record.manifest_version == manifest_version
+                        && record.bundle_identity == bundle_identity
+                        && matches!(record.state.as_str(), "failed" | "cancelled")
+                });
+            let result = if let Some(record) = resumable {
+                self.ensure_model_current()?;
+                self.model_manager
+                    .retry_model_download(model_id, &record.id, device, &cancelled)
+                    .and_then(|_| self.model_manager.retry_model_install(model_id, &record.id))
+                    .map(|_| ())
+            } else {
+                self.download_and_install_model(model_id, device, &cancelled)
+                    .map(|_| ())
+            };
+            match result {
+                Ok(()) => return self.executable_installation(model_id).map(|_| ()),
+                Err(error)
+                    if error.code() == "model_download_failed"
+                        && attempt + 1 < MODEL_INSTALL_MAX_ATTEMPTS =>
+                {
+                    if cancelled() {
+                        return Err(ManagerError::new(
+                            "model_download_cancelled",
+                            "download cancelled",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(ManagerError::new(
+            "model_download_failed",
+            "model download retry budget exhausted",
+        ))
     }
 
     #[allow(dead_code)]

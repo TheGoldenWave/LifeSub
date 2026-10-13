@@ -16,11 +16,11 @@ test.describe('W-R01 recording readiness state is truthful', () => {
     // "准备就绪" must not appear anywhere on the idle page
     await expect(page.getByText('准备就绪')).toHaveCount(0)
     // The idle status title should reflect the actual state
-    // Browser demo: status title shows "浏览器演示", desktop: "待检测"
+    // Browser preview names the task directly; desktop reports its hardware readiness.
     const statusTitle = page.locator('.live-capture__status strong')
     await expect(statusTitle).toBeVisible()
     const titleText = await statusTitle.textContent()
-    expect(titleText === '浏览器演示' || titleText === '待检测').toBe(true)
+    expect(titleText === '示例转写待播放' || titleText === '待检测').toBe(true)
     // In browser demo mode, the empty state shows the demo notice
     await expect(page.getByText('浏览器演示数据，不会录音或保存。')).toBeVisible()
   })
@@ -47,6 +47,63 @@ test.describe('W-T01 timeline empty search is not mislabeled as no-match', () =>
     await search.fill('绝不存在的关键词xyz')
     // With a real query and no matches, the no-match empty state is correct
     await expect(page.getByText('没有匹配的原话')).toBeVisible({ timeout: 5000 })
+  })
+
+  test('long timeline stays inside the window with independent pane scrolling', async ({ page }) => {
+    const viewport = { width: 1516, height: 760 }
+    await page.setViewportSize(viewport)
+    await page.goto('/')
+    await page.getByRole('button', { name: '时间线' }).click()
+    await expect(page.locator('.timeline-view')).toBeVisible()
+
+    await page.evaluate(() => {
+      const sessionTree = document.querySelector('.session-tree__contents')
+      const session = document.querySelector('.session-tree__group')
+      const segments = document.querySelector('.segments')
+      const segment = document.querySelector('.segment')
+      if (!sessionTree || !session || !segments || !segment) throw new Error('Missing timeline fixture nodes')
+      for (let index = 0; index < 8; index += 1) sessionTree.append(session.cloneNode(true))
+      for (let index = 0; index < 12; index += 1) segments.append(segment.cloneNode(true))
+    })
+
+    const geometry = await page.evaluate(() => {
+      const app = document.querySelector('.app-shell')
+      const settings = document.querySelector('.nav-item--settings')
+      const tree = document.querySelector('.session-tree')
+      const transcript = document.querySelector('.transcript')
+      if (!app || !settings || !tree || !transcript) throw new Error('Missing timeline layout nodes')
+      const settingsBox = settings.getBoundingClientRect()
+      return {
+        appHeight: app.getBoundingClientRect().height,
+        viewportHeight: window.innerHeight,
+        documentHeight: document.documentElement.scrollHeight,
+        settingsBottom: settingsBox.bottom,
+        treeClientHeight: tree.clientHeight,
+        treeScrollHeight: tree.scrollHeight,
+        transcriptClientHeight: transcript.clientHeight,
+        transcriptScrollHeight: transcript.scrollHeight,
+      }
+    })
+
+    expect(geometry.appHeight).toBeLessThanOrEqual(geometry.viewportHeight)
+    expect(geometry.documentHeight).toBeLessThanOrEqual(geometry.viewportHeight)
+    expect(geometry.settingsBottom).toBeLessThanOrEqual(geometry.viewportHeight)
+    expect(geometry.treeScrollHeight).toBeGreaterThan(geometry.treeClientHeight)
+    expect(geometry.transcriptScrollHeight).toBeGreaterThan(geometry.transcriptClientHeight)
+
+    const scrollPositions = await page.evaluate(() => {
+      const tree = document.querySelector('.session-tree')
+      const transcript = document.querySelector('.transcript')
+      if (!tree || !transcript) throw new Error('Missing scroll containers')
+      tree.scrollTop = 120
+      transcript.scrollTop = 120
+      return { tree: tree.scrollTop, transcript: transcript.scrollTop }
+    })
+    expect(scrollPositions.tree).toBeGreaterThan(0)
+    expect(scrollPositions.transcript).toBeGreaterThan(0)
+
+    await page.getByRole('button', { name: '设置' }).click()
+    await expect(page.getByRole('dialog', { name: '设置' })).toBeVisible()
   })
 })
 
@@ -79,5 +136,7 @@ test.describe('W-S01/W-S03 model card layout and grouping', () => {
     // (the non-installed state is now a single "暂不可安装" pill)
     const installPlannedButtons = page.locator('button:has-text("安装计划中")')
     await expect(installPlannedButtons).toHaveCount(0)
+    await expect(page.getByText('暂不可安装')).toHaveCount(1)
+    await expect(page.getByText('未安装')).toHaveCount(0)
   })
 })

@@ -22,6 +22,8 @@ mod runtime_lock;
 pub use error::{ImportFault, ServiceError};
 pub use evidence_uri::{EvidenceTarget, parse_evidence_uri};
 pub(crate) use runtime_lock::JobOwnershipCapability;
+#[cfg(test)]
+pub(crate) use runtime_lock::current_install_identity;
 pub use runtime_lock::{
     CoreRuntime, CoreRuntimeError, RuntimeOwnershipError, RuntimeOwnershipGuard,
 };
@@ -45,6 +47,18 @@ pub struct EvidenceService {
     first_audio_create_barrier: Option<Arc<Barrier>>,
 }
 
+pub(crate) fn open_verified_audio_chunk(
+    data_dir: DataDirectoryCapability,
+    chunk: &AudioChunk,
+) -> Result<std::fs::File, ServiceError> {
+    AudioStore::anchored(data_dir)
+        .open_verified(chunk)
+        .map_err(|error| match error {
+            ValidationError::Missing => ServiceError::InputUnavailable,
+            ValidationError::Corrupted => ServiceError::InputIntegrityFailed,
+        })
+}
+
 impl EvidenceService {
     pub fn new(catalog: Catalog, data_dir: impl AsRef<Path>) -> Self {
         Self {
@@ -62,6 +76,7 @@ impl EvidenceService {
 
     pub fn initialize(catalog: Catalog, data_dir: impl AsRef<Path>) -> Result<Self, ServiceError> {
         let service = Self::new(catalog, data_dir);
+        service.reconcile_interrupted_capture()?;
         service.reconcile_audio()?;
         Ok(service)
     }
@@ -81,8 +96,15 @@ impl EvidenceService {
             #[cfg(test)]
             first_audio_create_barrier: None,
         };
+        service.reconcile_interrupted_capture()?;
         service.reconcile_audio()?;
         Ok(service)
+    }
+
+    fn reconcile_interrupted_capture(&self) -> Result<(), ServiceError> {
+        self.audio_store().reconcile_capture_staging()?;
+        self.catalog.reconcile_interrupted_capture_sessions()?;
+        Ok(())
     }
 
     pub fn into_catalog(self) -> Catalog {
@@ -332,6 +354,7 @@ impl EvidenceService {
     }
 
     pub fn reconcile_audio_before(&self, stale_before: SystemTime) -> Result<(), ServiceError> {
+        self.audio_store().reconcile_native_intent_temps()?;
         let chunks = self.catalog.list_chunks()?;
         for chunk in &chunks {
             self.catalog.chunk_integrity(&chunk.id)?;
@@ -447,26 +470,30 @@ impl EvidenceService {
         session: &CaptureSession,
         revision: &TranscriptRevision,
     ) -> String {
-        let mut output = format!(
-            "---\nrecord_id: {}\nevidence_uri: {}\nstarted_at: {}\ntranscript_revision: {}\nasr_provider: {}\n---\n\n# {}\n",
-            session.id,
-            session.evidence_uri(),
-            session.started_at.to_rfc3339(),
-            revision.number,
-            revision.provider,
-            session.title,
-        );
-        for segment in &revision.segments {
-            let minutes = segment.start_ms / 60_000;
-            let seconds = (segment.start_ms / 1_000) % 60;
-            output.push_str(&format!(
-                "\n## {minutes:02}:{seconds:02}\n\n[{}] {}\n",
-                source_label(segment.source),
-                segment.text
-            ));
-        }
-        output
+        render_record_markdown(session, revision)
     }
+}
+
+pub fn render_record_markdown(session: &CaptureSession, revision: &TranscriptRevision) -> String {
+    let mut output = format!(
+        "---\nrecord_id: {}\nevidence_uri: {}\nstarted_at: {}\ntranscript_revision: {}\nasr_provider: {}\n---\n\n# {}\n",
+        session.id,
+        session.evidence_uri(),
+        session.started_at.to_rfc3339(),
+        revision.number,
+        revision.provider,
+        session.title,
+    );
+    for segment in &revision.segments {
+        let minutes = segment.start_ms / 60_000;
+        let seconds = (segment.start_ms / 1_000) % 60;
+        output.push_str(&format!(
+            "\n## {minutes:02}:{seconds:02}\n\n[{}] {}\n",
+            source_label(segment.source),
+            segment.text
+        ));
+    }
+    output
 }
 
 struct ImportHooks<FailAt, EnsureCurrent, BeforeStoredCheck, BeforeCommit, BeforeCleanup> {

@@ -1,13 +1,15 @@
 use super::*;
 
 #[test]
-fn creates_complete_v3_schema_for_fresh_catalog() {
+fn creates_complete_v6_schema_for_fresh_catalog() {
     let mut connection = Connection::open_in_memory().unwrap();
     migrations::migrate(&mut connection).unwrap();
 
-    assert_eq!(user_version(&connection), 5);
+    assert_eq!(user_version(&connection), 6);
     for table in [
         "asr_settings",
+        "capture_chunk_timing",
+        "capture_sources",
         "model_installations",
         "model_downloads",
         "model_download_artifacts",
@@ -29,6 +31,7 @@ fn creates_complete_v3_schema_for_fresh_catalog() {
         "model_download_artifacts_state",
         "asr_jobs_one_active_fingerprint",
         "asr_jobs_claimable",
+        "capture_sources_session",
     ] {
         let count: i64 = connection
             .query_row(
@@ -229,6 +232,40 @@ fn creates_complete_v3_schema_for_fresh_catalog() {
     );
     assert_columns(
         &connection,
+        "capture_sources",
+        &[
+            ("id", "TEXT", false, None, 1),
+            ("session_id", "TEXT", true, None, 0),
+            ("source", "TEXT", true, None, 0),
+            ("device_uid", "TEXT", true, None, 0),
+            ("device_name", "TEXT", true, None, 0),
+            ("channel_count", "INTEGER", true, None, 0),
+            ("sample_rate_hz", "INTEGER", true, None, 0),
+            ("created_at", "TEXT", true, None, 0),
+        ],
+    );
+    assert_columns(
+        &connection,
+        "capture_chunk_timing",
+        &[
+            ("chunk_id", "TEXT", false, None, 1),
+            ("capture_source_id", "TEXT", true, None, 0),
+            ("source_sequence", "INTEGER", true, None, 0),
+            ("source_sample_start", "INTEGER", true, None, 0),
+            ("source_sample_end", "INTEGER", true, None, 0),
+            ("session_start_ms", "INTEGER", true, None, 0),
+            ("session_end_ms", "INTEGER", true, None, 0),
+            ("monotonic_start_ns", "INTEGER", true, None, 0),
+            ("monotonic_end_ns", "INTEGER", true, None, 0),
+            ("utc_start_at", "TEXT", true, None, 0),
+            ("utc_end_at", "TEXT", true, None, 0),
+            ("discontinuity_count", "INTEGER", true, Some("0"), 0),
+            ("dropped_frame_count", "INTEGER", true, Some("0"), 0),
+            ("created_at", "TEXT", true, None, 0),
+        ],
+    );
+    assert_columns(
+        &connection,
         "segment_search",
         &[
             ("segment_id", "", false, None, 0),
@@ -289,6 +326,7 @@ fn creates_complete_v3_schema_for_fresh_catalog() {
         "segment_search_data",
         "segment_search_docsize",
         "segment_search_idx",
+        "capture_sources_session",
     ] {
         assert_eq!(
             foreign_keys(&connection, table),
@@ -349,6 +387,19 @@ fn creates_complete_v3_schema_for_fresh_catalog() {
         [
             fk("receipt_id", "provider_receipts", "id"),
             fk("revision_id", "revisions", "id"),
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        foreign_keys(&connection, "capture_sources"),
+        [fk("session_id", "sessions", "id")].into_iter().collect()
+    );
+    assert_eq!(
+        foreign_keys(&connection, "capture_chunk_timing"),
+        [
+            fk("capture_source_id", "capture_sources", "id"),
+            fk("chunk_id", "chunks", "id"),
         ]
         .into_iter()
         .collect()
@@ -449,6 +500,19 @@ fn creates_complete_v3_schema_for_fresh_catalog() {
         .into_iter()
         .collect()
     );
+    assert_eq!(
+        unique_contracts(&connection, "capture_sources"),
+        [contract("pk", false, &["id"])].into_iter().collect()
+    );
+    assert_eq!(
+        unique_contracts(&connection, "capture_chunk_timing"),
+        [
+            contract("pk", false, &["chunk_id"]),
+            contract("u", false, &["capture_source_id", "source_sequence"]),
+        ]
+        .into_iter()
+        .collect()
+    );
 
     for (name, expected) in [
         (
@@ -466,6 +530,10 @@ fn creates_complete_v3_schema_for_fresh_catalog() {
         (
             "model_download_artifacts_state",
             "CREATE INDEX model_download_artifacts_state ON model_download_artifacts(download_id, state)",
+        ),
+        (
+            "capture_sources_session",
+            "CREATE INDEX capture_sources_session ON capture_sources(session_id, source)",
         ),
     ] {
         assert_eq!(
@@ -530,6 +598,28 @@ fn creates_complete_v3_schema_for_fresh_catalog() {
             &[
                 "CHECK(data_destination = 'local_device')",
                 "CHECK(outcome = 'succeeded')",
+            ][..],
+        ),
+        (
+            "capture_sources",
+            &[
+                "CHECK(source IN ('microphone', 'system_audio'))",
+                "CHECK(channel_count >= 1)",
+                "CHECK(sample_rate_hz >= 1)",
+            ][..],
+        ),
+        (
+            "capture_chunk_timing",
+            &[
+                "CHECK(source_sequence >= 0)",
+                "CHECK(source_sample_start >= 0)",
+                "CHECK(source_sample_end >= source_sample_start)",
+                "CHECK(session_start_ms >= 0)",
+                "CHECK(session_end_ms >= session_start_ms)",
+                "CHECK(monotonic_start_ns >= 0)",
+                "CHECK(monotonic_end_ns >= monotonic_start_ns)",
+                "CHECK(discontinuity_count >= 0)",
+                "CHECK(dropped_frame_count >= 0)",
             ][..],
         ),
     ] {

@@ -89,7 +89,7 @@ export default function App() {
       <section className="workspace">
         {demoMode && (
           <div className="notice" role="status">
-            浏览器演示模式
+            浏览器演示数据，不会录音或保存。
           </div>
         )}
         {notice && (

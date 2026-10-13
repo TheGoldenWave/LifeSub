@@ -1,4 +1,4 @@
-export type CaptureState = 'idle' | 'recording' | 'paused' | 'stopped'
+export type CaptureState = 'idle' | 'recording' | 'paused' | 'stopped' | 'error'
 
 export interface TranscriptSegment {
   id: string

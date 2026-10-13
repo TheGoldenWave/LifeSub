@@ -26,8 +26,8 @@ const MAX_REDIRECTS: usize = 10;
 const STRUCTURAL_MARKER: &str = ".lifesub-structural.json";
 const DELETE_MARKER: &str = ".lifesub-delete.json";
 const DISK_SAFETY_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
-const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 mod anchored_reconcile;
 mod archive;
@@ -159,6 +159,14 @@ impl Drop for ExecutionLeaseGuard {
 impl ExecutableInstallationLease {
     pub fn model_id(&self) -> &str {
         &self.plan.model_id
+    }
+
+    pub(crate) fn manifest_version(&self) -> &str {
+        self.plan.manifest_version.as_str()
+    }
+
+    pub(crate) fn bundle_identity(&self) -> &str {
+        self.plan.bundle_identity.as_str()
     }
 
     pub(crate) fn plan(&self) -> &ModelInstallPlan {

@@ -5,6 +5,8 @@
 
 ## 结论
 
+后续产品与计划校对见 [Qwen Audio 综合分析](qwen-audio-product-direction-review.md)；本文版本拆分为 2026-08-16 历史建议，不替代最新发布状态。
+
 LifeSub 与 OpenWhispr、TypeWhisper 的根本区别，是它不把 ASR 结果只视为文本，而是视为可定位、可追溯、可重新验证的音频 Evidence。当前设计在证据链、模型身份、失败恢复和 Agent 引用方面明显更强，但 V0.2 同时承担 ASR 产品、模型供应链、双运行时、daemon/IPC、安全协议、数据库演进、打包和 native capture，整体范围过重。
 
 建议保留不可变音频、Revision/Receipt、无静默 fallback、模型 hash、任务状态机和真实模型 Gate；把 Qwen 1.7B 高级供应链、完整 lifesubd/IPC 安全体系和 production peer-auth 拆成后续里程碑。

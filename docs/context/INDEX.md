@@ -10,7 +10,10 @@
 
 | 日期 | 来源 | 摘要 | 详情 |
 |------|------|------|------|
+| 2026-09-11 | qwen-audio-product-review | 会议质量优先，保留 Evidence 边界；稳定化后按找回失败择项 | [产品与方案校对](wiki/syntheses/qwen-audio-product-direction-review.md) |
+| 2026-10-13 | voicestudio-source-review | VoiceStudio 重点参考诊断有界性、ASR 隔离、信号检查与模型许可证据 | [源码对照](wiki/syntheses/voicestudio-source-review-2026-10-13.md) |
 | 2026-08-16 | lifesub-real-asr-v0.2 | ASR 证据链优势明显，但 V0.2 范围过重，建议拆期 | [综合分析](wiki/syntheses/asr-open-source-comparison-and-scope-review.md) |
+| 2026-08-26 | lifesub-asr-audio-reference-analysis | OpenWhispr/TypeWhisper 源码表明应优先补音频恢复、设备探测、下载进度与 AEC | [源码分析](wiki/syntheses/asr-audio-reference-project-source-analysis.md) |
 | 2026-08-25 | personal-ai-open-questions | 音频覆盖率、全天候采集、跨设备、Review、视觉硬件与隐私待验证 | [开放问题](../product-open-questions.zh-CN.md) |
 | <!-- 示例: 2025-04-10 --> | <!-- 1.0.0-用户登录-202504 --> | <!-- 选用 PostgreSQL 而非 MongoDB，因为需要事务一致性 --> | <!-- docs/context/project/experience/db-choice.md --> |
 

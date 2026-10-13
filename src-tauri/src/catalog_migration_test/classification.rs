@@ -17,7 +17,7 @@ fn classifies_fresh_legacy_and_current_catalogs() {
     migrations::migrate(&mut current).unwrap();
     assert_eq!(
         migrations::classify(&mut current).unwrap(),
-        SchemaKind::CurrentV5
+        SchemaKind::CurrentV6
     );
 }
 
@@ -68,6 +68,23 @@ fn rejects_version_zero_database_with_unknown_view() {
 }
 
 #[test]
+fn rejects_current_v6_database_with_unknown_view_or_trigger() {
+    for sql in [
+        "CREATE VIEW unknown_v6_view AS SELECT 1 AS id",
+        "CREATE TRIGGER unknown_v6_trigger AFTER INSERT ON sessions BEGIN SELECT 1; END",
+    ] {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::migrate(&mut connection).unwrap();
+        connection.execute(sql, []).unwrap();
+
+        let error = migrations::classify(&mut connection).unwrap_err();
+        assert!(error.to_string().contains("corrupt v6 catalog schema"));
+        let error = migrations::migrate(&mut connection).unwrap_err();
+        assert!(error.to_string().contains("corrupt v6 catalog schema"));
+    }
+}
+
+#[test]
 fn rejects_v1_lookalike_with_wrong_fts_tokenizer() {
     let mut connection = Connection::open_in_memory().unwrap();
     connection.execute_batch(
@@ -87,7 +104,7 @@ fn rejects_v1_lookalike_with_wrong_fts_tokenizer() {
 #[test]
 fn rejects_future_and_corrupt_current_catalogs() {
     let mut future = Connection::open_in_memory().unwrap();
-    future.pragma_update(None, "user_version", 6).unwrap();
+    future.pragma_update(None, "user_version", 7).unwrap();
     let error = migrations::migrate(&mut future).unwrap_err();
     assert!(
         error
@@ -101,19 +118,19 @@ fn rejects_future_and_corrupt_current_catalogs() {
         .execute("DROP INDEX asr_jobs_claimable", [])
         .unwrap();
     let error = migrations::migrate(&mut current).unwrap_err();
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }
 
 #[test]
 fn compatible_newer_database_is_accepted_without_downgrade() {
     let mut connection = Connection::open_in_memory().unwrap();
     migrations::migrate(&mut connection).unwrap();
-    // Simulate a future version that adds a new table while preserving v5.
+    // Simulate a future version that adds a new table while preserving v6.
     connection
         .execute_batch(
             "CREATE TABLE future_feature_data (id TEXT PRIMARY KEY, value TEXT NOT NULL);
              INSERT INTO future_feature_data(id, value) VALUES('future_1', 'preserve me');
-             PRAGMA user_version = 6;",
+             PRAGMA user_version = 7;",
         )
         .unwrap();
 
@@ -127,7 +144,7 @@ fn compatible_newer_database_is_accepted_without_downgrade() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
 
     let value: String = connection
         .query_row(
@@ -145,7 +162,7 @@ fn newer_database_missing_required_v5_schema_is_rejected() {
     connection
         .execute_batch(
             "CREATE TABLE future_feature_data (id TEXT PRIMARY KEY);
-             PRAGMA user_version = 6;",
+             PRAGMA user_version = 7;",
         )
         .unwrap();
 
@@ -198,7 +215,7 @@ fn rejects_current_catalog_with_unapproved_index() {
 
     let error = migrations::migrate(&mut connection).unwrap_err();
 
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }
 
 #[test]
@@ -211,7 +228,7 @@ fn rejects_current_catalog_with_missing_fts_shadow_table() {
 
     let error = migrations::migrate(&mut connection).unwrap_err();
 
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }
 
 #[test]
@@ -255,7 +272,7 @@ fn rejects_v2_base_table_with_unapproved_unique_title() {
 
     let mut reopened = Connection::open(path).unwrap();
     let error = migrations::migrate(&mut reopened).unwrap_err();
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }
 
 #[test]
@@ -279,7 +296,7 @@ fn rejects_v2_base_table_with_changed_foreign_key_target_and_action() {
 
     let mut reopened = Connection::open(path).unwrap();
     let error = migrations::migrate(&mut reopened).unwrap_err();
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }
 
 #[test]
@@ -301,7 +318,7 @@ fn rejects_v2_base_table_with_extra_check() {
 
     let mut reopened = Connection::open(path).unwrap();
     let error = migrations::migrate(&mut reopened).unwrap_err();
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }
 
 #[test]
@@ -323,7 +340,7 @@ fn rejects_v2_base_table_with_extra_autoindex_constraint() {
 
     let mut reopened = Connection::open(path).unwrap();
     let error = migrations::migrate(&mut reopened).unwrap_err();
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }
 
 #[test]
@@ -339,7 +356,7 @@ fn rejects_changed_case_in_outcome_literal() {
 
     let mut reopened = Connection::open(path).unwrap();
     let error = migrations::migrate(&mut reopened).unwrap_err();
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }
 
 #[test]
@@ -355,7 +372,7 @@ fn rejects_changed_case_in_provenance_default_literal() {
 
     let mut reopened = Connection::open(path).unwrap();
     let error = migrations::migrate(&mut reopened).unwrap_err();
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }
 
 #[test]
@@ -371,7 +388,7 @@ fn rejects_changed_whitespace_inside_string_literal() {
 
     let mut reopened = Connection::open(path).unwrap();
     let error = migrations::migrate(&mut reopened).unwrap_err();
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }
 
 #[test]
@@ -395,5 +412,5 @@ fn rejects_schema_with_missing_token_boundary() {
 
     let mut reopened = Connection::open(path).unwrap();
     let error = migrations::migrate(&mut reopened).unwrap_err();
-    assert!(error.to_string().contains("corrupt v5 catalog schema"));
+    assert!(error.to_string().contains("corrupt v6 catalog schema"));
 }

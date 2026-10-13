@@ -7,6 +7,17 @@ pub use crate::asr::receipt::{
     DataDestination, ProviderOutcome, ProviderReceipt, ProviderReceiptDraft, ProviderReceiptError,
 };
 
+const DEFAULT_ASR_LANGUAGE: &str = "auto";
+const DEFAULT_ASR_THREADS: i64 = 4;
+const DEFAULT_VAD_MIN_SPEECH_MS: i64 = 300;
+const DEFAULT_VAD_SILENCE_MS: i64 = 800;
+const DEFAULT_RECORDING_CAPTURE_MODE: &str = "smart";
+const DEFAULT_RECORDING_DETECTION_DELAY_SECS: i64 = 3;
+const DEFAULT_RECORDING_RECOVERY_DELAY_SECS: i64 = 5;
+const DEFAULT_WHISPER_TASK: &str = "transcribe";
+const PRODUCTION_CAPTURE_OUTPUT_SAMPLE_RATE_HZ: i64 = 16_000;
+const SUPPORTED_RECORDING_CAPTURE_MODES: [&str; 3] = ["smart", "mic_only", "system_only"];
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureState {
@@ -160,6 +171,36 @@ pub struct AudioChunk {
     pub byte_length: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CaptureSourceRecord {
+    pub id: String,
+    pub session_id: String,
+    pub source: AudioSource,
+    pub device_uid: String,
+    pub device_name: String,
+    pub channel_count: u16,
+    pub sample_rate_hz: u32,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CaptureChunkTiming {
+    pub chunk_id: String,
+    pub capture_source_id: String,
+    pub source_sequence: i64,
+    pub source_sample_start: i64,
+    pub source_sample_end: i64,
+    pub session_start_ms: i64,
+    pub session_end_ms: i64,
+    pub monotonic_start_ns: i64,
+    pub monotonic_end_ns: i64,
+    pub utc_start_at: DateTime<Utc>,
+    pub utc_end_at: DateTime<Utc>,
+    pub discontinuity_count: i64,
+    pub dropped_frame_count: i64,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DomainError {
     InvalidCaptureTransition {
@@ -308,14 +349,15 @@ impl<'de> Deserialize<'de> for AsrConfig {
         D: serde::Deserializer<'de>,
     {
         let wire = AsrConfigWire::deserialize(deserializer)?;
+        let provider = wire.provider.clone();
         let model_id = match wire.model_id {
             Some(model_id) if !model_id.trim().is_empty() => model_id,
-            _ => default_model_id_for_provider(&wire.provider)
+            _ => default_model_id_for_provider(&provider)
                 .ok_or_else(|| D::Error::custom("unknown ASR provider"))?
                 .to_owned(),
         };
         Ok(Self {
-            provider: wire.provider,
+            provider,
             model_id,
             language: wire.language,
             auto_transcribe: wire.auto_transcribe,
@@ -324,6 +366,9 @@ impl<'de> Deserialize<'de> for AsrConfig {
             vad_min_speech_ms: wire.vad_min_speech_ms,
             vad_silence_ms: wire.vad_silence_ms,
             itn_enabled: wire.itn_enabled,
+            whisper_task: normalize_whisper_task(&wire.provider, wire.whisper_task.as_deref())
+                .map(|task| task.map(str::to_owned))
+                .map_err(D::Error::custom)?,
         })
     }
 }
@@ -400,6 +445,8 @@ pub struct AsrConfig {
     pub vad_min_speech_ms: i64,
     pub vad_silence_ms: i64,
     pub itn_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whisper_task: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -413,9 +460,19 @@ struct AsrConfigWire {
     vad_min_speech_ms: i64,
     vad_silence_ms: i64,
     itn_enabled: bool,
+    #[serde(default)]
+    whisper_task: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SettingsCapabilities {
+    pub production_capture_output_sample_rate_hz: i64,
+    pub data_directory_path: String,
+    pub im_detection_available: bool,
+    pub supported_capture_modes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RecordingConfig {
     pub capture_mode: String,
     pub im_detection_enabled: bool,
@@ -424,6 +481,23 @@ pub struct RecordingConfig {
     pub recovery_delay_secs: i64,
     pub sample_rate: i64,
     pub storage_path: String,
+    pub microphone_device_uid: Option<String>,
+    pub microphone_device_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RecordingConfigWire {
+    capture_mode: String,
+    im_detection_enabled: bool,
+    im_apps: Vec<String>,
+    detection_delay_secs: i64,
+    recovery_delay_secs: i64,
+    sample_rate: i64,
+    storage_path: String,
+    #[serde(default)]
+    microphone_device_uid: Option<String>,
+    #[serde(default)]
+    microphone_device_name: Option<String>,
 }
 
 impl AsrConfig {
@@ -431,13 +505,17 @@ impl AsrConfig {
         Some(Self {
             provider: provider.to_owned(),
             model_id: default_model_id_for_provider(provider)?.to_owned(),
-            language: "zh".to_owned(),
+            language: DEFAULT_ASR_LANGUAGE.to_owned(),
             auto_transcribe: true,
-            threads: 4,
+            threads: DEFAULT_ASR_THREADS,
             vad_enabled: true,
-            vad_min_speech_ms: 300,
-            vad_silence_ms: 800,
+            vad_min_speech_ms: DEFAULT_VAD_MIN_SPEECH_MS,
+            vad_silence_ms: DEFAULT_VAD_SILENCE_MS,
             itn_enabled: provider == "sense_voice",
+            whisper_task: normalize_whisper_task(provider, None)
+                .map(|task| task.map(str::to_owned))
+                .ok()
+                .flatten(),
         })
     }
 
@@ -457,7 +535,146 @@ impl AsrConfig {
                 self.model_id, self.provider
             ));
         }
+        if !model.supported_languages.contains(&self.language.as_str()) {
+            return Err(format!(
+                "language {} is not supported by model {}",
+                self.language, self.model_id
+            ));
+        }
+        normalize_whisper_task(&self.provider, self.whisper_task.as_deref())?;
         Ok(())
+    }
+
+    pub fn normalized_for_projection(&self) -> Self {
+        let mut normalized = self.clone();
+        normalized.itn_enabled = normalized.provider == "sense_voice" && normalized.itn_enabled;
+        normalized.whisper_task =
+            normalize_whisper_task(&normalized.provider, normalized.whisper_task.as_deref())
+                .map(|task| task.map(str::to_owned))
+                .ok()
+                .flatten();
+
+        if let Some(model) = crate::asr::manifest::model_registry()
+            .model(&normalized.model_id)
+            .filter(|model| provider_name(model.provider) == normalized.provider)
+        {
+            normalized.language =
+                normalize_supported_language(&normalized.language, model.supported_languages)
+                    .to_owned();
+        }
+
+        normalized
+    }
+
+    pub fn normalized_for_persistence(&self) -> Result<Self, String> {
+        let mut normalized = self.clone();
+        normalized.itn_enabled = normalized.provider == "sense_voice" && normalized.itn_enabled;
+        normalized.whisper_task =
+            normalize_whisper_task(&normalized.provider, normalized.whisper_task.as_deref())?
+                .map(str::to_owned);
+        Ok(normalized)
+    }
+}
+
+impl<'de> Deserialize<'de> for RecordingConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RecordingConfigWire::deserialize(deserializer)?;
+        let value = Self {
+            capture_mode: raw.capture_mode,
+            im_detection_enabled: raw.im_detection_enabled,
+            im_apps: raw.im_apps,
+            detection_delay_secs: raw.detection_delay_secs,
+            recovery_delay_secs: raw.recovery_delay_secs,
+            sample_rate: raw.sample_rate,
+            storage_path: raw.storage_path,
+            microphone_device_uid: raw.microphone_device_uid,
+            microphone_device_name: raw.microphone_device_name,
+        };
+        value
+            .validate_for_persistence()
+            .map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl RecordingConfig {
+    pub fn validate_for_persistence(&self) -> Result<(), String> {
+        if !SUPPORTED_RECORDING_CAPTURE_MODES.contains(&self.capture_mode.as_str()) {
+            return Err(format!(
+                "unsupported recording capture mode {}",
+                self.capture_mode
+            ));
+        }
+        match (
+            self.microphone_device_uid.as_deref(),
+            self.microphone_device_name.as_deref(),
+        ) {
+            (None, None) => Ok(()),
+            (Some(uid), Some(name)) if !uid.trim().is_empty() && !name.trim().is_empty() => Ok(()),
+            _ => Err(
+                "recording config microphone selection must be either both null or both non-empty"
+                    .to_owned(),
+            ),
+        }
+    }
+
+    pub fn default_for_capabilities(capabilities: &SettingsCapabilities) -> Self {
+        Self {
+            capture_mode: DEFAULT_RECORDING_CAPTURE_MODE.to_owned(),
+            im_detection_enabled: capabilities.im_detection_available,
+            im_apps: Vec::new(),
+            detection_delay_secs: DEFAULT_RECORDING_DETECTION_DELAY_SECS,
+            recovery_delay_secs: DEFAULT_RECORDING_RECOVERY_DELAY_SECS,
+            sample_rate: capabilities.production_capture_output_sample_rate_hz,
+            storage_path: capabilities.data_directory_path.clone(),
+            microphone_device_uid: None,
+            microphone_device_name: None,
+        }
+    }
+
+    pub fn normalized_for_capabilities(&self, capabilities: &SettingsCapabilities) -> Self {
+        let capture_mode = if capabilities
+            .supported_capture_modes
+            .iter()
+            .any(|mode| mode == &self.capture_mode)
+        {
+            self.capture_mode.clone()
+        } else {
+            DEFAULT_RECORDING_CAPTURE_MODE.to_owned()
+        };
+
+        Self {
+            capture_mode,
+            im_detection_enabled: capabilities.im_detection_available && self.im_detection_enabled,
+            im_apps: if capabilities.im_detection_available {
+                self.im_apps.clone()
+            } else {
+                Vec::new()
+            },
+            detection_delay_secs: self.detection_delay_secs,
+            recovery_delay_secs: self.recovery_delay_secs,
+            sample_rate: capabilities.production_capture_output_sample_rate_hz,
+            storage_path: capabilities.data_directory_path.clone(),
+            microphone_device_uid: self.microphone_device_uid.clone(),
+            microphone_device_name: self.microphone_device_name.clone(),
+        }
+    }
+}
+
+impl SettingsCapabilities {
+    pub fn for_data_directory(path: impl Into<String>) -> Self {
+        Self {
+            production_capture_output_sample_rate_hz: PRODUCTION_CAPTURE_OUTPUT_SAMPLE_RATE_HZ,
+            data_directory_path: path.into(),
+            im_detection_available: false,
+            supported_capture_modes: SUPPORTED_RECORDING_CAPTURE_MODES
+                .iter()
+                .map(|mode| (*mode).to_owned())
+                .collect(),
+        }
     }
 }
 
@@ -493,6 +710,41 @@ fn default_model_id_for_provider(provider: &str) -> Option<&'static str> {
         "whisper" => Some("whisper-base"),
         "qwen3_asr" => Some("qwen3-asr-0.6b-int8-2026-03-25"),
         _ => None,
+    }
+}
+
+fn normalize_supported_language<'a>(
+    current: &'a str,
+    supported_languages: &'a [&'a str],
+) -> &'a str {
+    if supported_languages.contains(&current) {
+        return current;
+    }
+    if supported_languages.contains(&DEFAULT_ASR_LANGUAGE) {
+        return DEFAULT_ASR_LANGUAGE;
+    }
+    supported_languages.first().copied().unwrap_or(current)
+}
+
+fn normalize_whisper_task<'a>(
+    provider: &str,
+    whisper_task: Option<&'a str>,
+) -> Result<Option<&'a str>, String> {
+    if provider != "whisper" {
+        return Ok(None);
+    }
+    match whisper_task.unwrap_or(DEFAULT_WHISPER_TASK) {
+        "transcribe" => Ok(Some("transcribe")),
+        "translate" => Ok(Some("translate")),
+        other => Err(format!("unsupported whisper task {other}")),
+    }
+}
+
+fn provider_name(provider: AsrProviderKind) -> &'static str {
+    match provider {
+        AsrProviderKind::SenseVoice => "sense_voice",
+        AsrProviderKind::Whisper => "whisper",
+        AsrProviderKind::Qwen3Asr => "qwen3_asr",
     }
 }
 

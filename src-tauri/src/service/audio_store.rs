@@ -13,12 +13,17 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
+use crate::capture::seal::{is_intent_final_name, is_intent_temp_name, is_native_final_name};
 use crate::domain::AudioChunk;
 
 use super::ImportFault;
 use super::runtime_lock::DataDirectoryCapability;
 
 const AUDIO_DIRECTORY: &str = "audio";
+const NATIVE_INTENT_DIRECTORY: &str = ".lifesub-native-intents";
+const CAPTURE_STAGING_DIRECTORY: &str = "capture-staging";
+const CAPTURE_STAGING_TOMBSTONE_PREFIX: &str = ".lifesub-capture-staging-";
+const CAPTURE_STAGING_TOMBSTONE_SUFFIX: &str = ".tmp";
 const IMPORT_TEMP_PREFIX: &str = ".lifesub-import-";
 const IMPORT_TEMP_SUFFIX: &str = ".tmp";
 const DEFAULT_AUDIO_EXTENSION: &str = "audio";
@@ -87,6 +92,76 @@ pub(super) enum ValidationError {
 }
 
 impl AudioStore {
+    pub(super) fn reconcile_capture_staging(&self) -> io::Result<()> {
+        let data_dir = self.open_data_dir()?;
+        let staging = match data_dir.open_directory(OsStr::new(CAPTURE_STAGING_DIRECTORY)) {
+            Ok(staging) => staging,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        staging.validate_owned_directory()?;
+        for session_name in staging.entries()? {
+            let Some(session_name_str) = session_name.to_str() else {
+                return Err(unsafe_storage_error());
+            };
+            if !is_capture_session_staging_name(session_name_str) {
+                return Err(unsafe_storage_error());
+            }
+            let session = staging.open_directory(&session_name)?;
+            session.validate_owned_directory()?;
+            let session_identity = session.identity()?;
+            for entry in session.entries()? {
+                let Some(entry_str) = entry.to_str() else {
+                    return Err(unsafe_storage_error());
+                };
+                if !is_capture_staging_file_name(entry_str) {
+                    return Err(unsafe_storage_error());
+                }
+                let metadata = session.metadata(&entry)?;
+                if !metadata.is_regular
+                    || metadata.owner_uid != unsafe { libc::geteuid() }
+                    || metadata.mode & 0o022 != 0
+                {
+                    return Err(unsafe_storage_error());
+                }
+                session.cleanup_capture_staging_file(&entry, metadata.identity)?;
+            }
+            session.0.sync_all()?;
+            if staging.entry_identity(&session_name)? != session_identity {
+                return Err(unsafe_storage_error());
+            }
+            staging.remove_directory(&session_name)?;
+        }
+        staging.0.sync_all()
+    }
+
+    pub(super) fn reconcile_native_intent_temps(&self) -> io::Result<()> {
+        let data_dir = self.open_data_dir()?;
+        let intents = match data_dir.open_directory(OsStr::new(NATIVE_INTENT_DIRECTORY)) {
+            Ok(intents) => intents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for name in intents.entries()? {
+            let Some(name_str) = name.to_str() else {
+                return Err(unsafe_storage_error());
+            };
+            let metadata = intents.metadata(&name)?;
+            if !metadata.is_regular
+                || metadata.owner_uid != unsafe { libc::geteuid() }
+                || metadata.mode & 0o777 != 0o600
+            {
+                return Err(unsafe_storage_error());
+            }
+            if is_intent_temp_name(name_str) {
+                intents.cleanup_native_intent_temp(&name, metadata.identity)?;
+            } else if !is_intent_final_name(name_str) {
+                return Err(unsafe_storage_error());
+            }
+        }
+        intents.0.sync_all()
+    }
+
     #[cfg_attr(test, allow(dead_code))]
     pub(super) fn new(data_dir: &Path) -> Self {
         Self {
@@ -260,7 +335,13 @@ impl AudioStore {
                 continue;
             }
             let metadata = audio_dir.directory.metadata(&name)?;
-            if !metadata.is_regular || !is_recognized_importer_name(name_str) {
+            if !metadata.is_regular {
+                return Err(unsafe_storage_error());
+            }
+            if is_native_final_name(name_str) {
+                continue;
+            }
+            if !is_recognized_importer_name(name_str) {
                 return Err(unsafe_storage_error());
             }
             if metadata.modified <= stale_before {
@@ -295,6 +376,32 @@ impl AudioStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Err(ValidationError::Missing),
             Err(_) => Err(ValidationError::Corrupted),
         }
+    }
+
+    pub(super) fn open_verified(&self, chunk: &AudioChunk) -> Result<File, ValidationError> {
+        let directory = match self.existing_audio_dir() {
+            Ok(Some(directory)) => directory,
+            Ok(None) => return Err(ValidationError::Missing),
+            Err(_) => return Err(ValidationError::Corrupted),
+        };
+        let name = self.safe_chunk_name(&chunk.path)?;
+        let file = directory.directory.open_file(&name).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                ValidationError::Missing
+            } else {
+                ValidationError::Corrupted
+            }
+        })?;
+        let (digest, byte_length) =
+            hash_file(file.try_clone().map_err(|_| ValidationError::Corrupted)?)
+                .map_err(|_| ValidationError::Corrupted)?;
+        if digest != chunk.sha256
+            || byte_length != chunk.byte_length
+            || directory.ensure_current().is_err()
+        {
+            return Err(ValidationError::Corrupted);
+        }
+        Ok(file)
     }
 
     #[cfg(test)]
@@ -546,6 +653,25 @@ impl DirectoryHandle {
         syscall_result(unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) })
     }
 
+    fn remove_directory(&self, name: &OsStr) -> io::Result<()> {
+        let name = c_string(name)?;
+        syscall_result(unsafe {
+            libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
+        })
+    }
+
+    fn validate_owned_directory(&self) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = self.0.metadata()?;
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(unsafe_storage_error());
+        }
+        Ok(())
+    }
+
     fn metadata(&self, name: &OsStr) -> io::Result<EntryMetadata> {
         let name = c_string(name)?;
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -562,6 +688,8 @@ impl DirectoryHandle {
         Ok(EntryMetadata {
             is_regular: stat.st_mode & libc::S_IFMT == libc::S_IFREG,
             modified,
+            owner_uid: stat.st_uid,
+            mode: stat.st_mode,
             identity: FileIdentity {
                 device: stat.st_dev as u64,
                 inode: stat.st_ino,
@@ -628,6 +756,38 @@ impl DirectoryHandle {
                 Err(error)
             }
         }
+    }
+
+    fn cleanup_native_intent_temp(&self, name: &OsStr, identity: FileIdentity) -> io::Result<()> {
+        if self.regular_file_identity(name)? != Some(identity) {
+            return Err(unsafe_storage_error());
+        }
+        let tombstone = OsString::from(format!(
+            ".lifesub-native-intent-{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        self.rename_noreplace(name, &tombstone)?;
+        if self.regular_file_identity(&tombstone)? != Some(identity) {
+            return Err(unsafe_storage_error());
+        }
+        self.unlink(&tombstone)?;
+        self.0.sync_all()
+    }
+
+    fn cleanup_capture_staging_file(&self, name: &OsStr, identity: FileIdentity) -> io::Result<()> {
+        if self.regular_file_identity(name)? != Some(identity) {
+            return Err(unsafe_storage_error());
+        }
+        let tombstone = OsString::from(format!(
+            "{CAPTURE_STAGING_TOMBSTONE_PREFIX}{}{CAPTURE_STAGING_TOMBSTONE_SUFFIX}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        self.rename_noreplace(name, &tombstone)?;
+        if self.regular_file_identity(&tombstone)? != Some(identity) {
+            return Err(unsafe_storage_error());
+        }
+        self.unlink(&tombstone)?;
+        self.0.sync_all()
     }
 
     fn restore_cleanup_tombstone(&self, tombstone: &OsStr, name: &OsStr) -> io::Result<()> {
@@ -742,7 +902,45 @@ impl AnchoredDirectory {
 struct EntryMetadata {
     is_regular: bool,
     modified: SystemTime,
+    owner_uid: libc::uid_t,
+    mode: libc::mode_t,
     identity: FileIdentity,
+}
+
+fn is_capture_session_staging_name(name: &str) -> bool {
+    name.strip_prefix("rec_").is_some_and(is_lower_hex_uuid)
+}
+
+fn is_capture_staging_file_name(name: &str) -> bool {
+    if name
+        .strip_prefix(CAPTURE_STAGING_TOMBSTONE_PREFIX)
+        .and_then(|value| value.strip_suffix(CAPTURE_STAGING_TOMBSTONE_SUFFIX))
+        .is_some_and(is_lower_hex_uuid)
+    {
+        return true;
+    }
+    let Some(name) = name.strip_prefix("chk_") else {
+        return false;
+    };
+    [
+        ".wav",
+        ".wav.partial",
+        ".caf",
+        ".caf.partial",
+        ".microphone.caf",
+        ".microphone.caf.partial",
+        ".system_audio.caf",
+        ".system_audio.caf.partial",
+    ]
+    .into_iter()
+    .any(|suffix| name.strip_suffix(suffix).is_some_and(is_lower_hex_uuid))
+}
+
+fn is_lower_hex_uuid(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn stat_modified_time(stat: &libc::stat) -> SystemTime {

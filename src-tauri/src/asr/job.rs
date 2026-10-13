@@ -40,6 +40,13 @@ pub struct ClaimToken {
     pub claim_generation: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobIdentity {
+    pub job_id: String,
+    pub session_id: String,
+    pub chunk_id: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStage {
@@ -373,6 +380,10 @@ impl<'a, C: Clock> JobRepository<'a, C> {
             .load_execution_snapshot(token, stage, &canonical_time(self.clock.now()))
     }
 
+    pub(crate) fn job_identity(&self, job_id: &str) -> Result<JobIdentity, JobError> {
+        self.jobs.job_identity(job_id).map_err(map_catalog_error)
+    }
+
     pub(crate) fn renew(&self, token: &ClaimToken) -> Result<(), JobError> {
         let now = self.clock.now();
         let result = self
@@ -466,7 +477,7 @@ impl<'a, C: Clock> JobRepository<'a, C> {
         token: &ClaimToken,
         receipt: &ProviderReceipt,
         segments: &[TranscriptSegmentPublication],
-    ) -> Result<TranscriptRevision, PublicationError> {
+    ) -> Result<Option<TranscriptRevision>, PublicationError> {
         self.jobs
             .publish(token, receipt, segments, self.clock.now())
     }
@@ -523,12 +534,16 @@ impl<C: Clock> JobCoordinator<'_, C> {
         self.repository.load_execution_snapshot(token, stage)
     }
 
+    pub(crate) fn job_identity(&self, job_id: &str) -> Result<JobIdentity, JobError> {
+        self.repository.job_identity(job_id)
+    }
+
     pub fn publish(
         &self,
         token: &ClaimToken,
         receipt: &ProviderReceipt,
         segments: &[TranscriptSegmentPublication],
-    ) -> Result<TranscriptRevision, PublicationError> {
+    ) -> Result<Option<TranscriptRevision>, PublicationError> {
         self.repository.publish(token, receipt, segments)
     }
 }

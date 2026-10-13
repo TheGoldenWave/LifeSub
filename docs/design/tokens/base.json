@@ -5,17 +5,22 @@
       "canvas": "#1f2228",
       "surface": "#242830",
       "surfaceSubtle": "#292e37",
+      "surfaceElevated": "#2d333d",
       "surfaceHover": "#303640",
+      "surfaceInset": "#1a1e24",
       "textPrimary": "#f4f6f8",
       "textSecondary": "#b8bec8",
       "textMuted": "#7d8591",
+      "textInverse": "#171a1f",
       "border": "#383e48",
+      "borderMuted": "#2c3139",
       "borderStrong": "#59616e",
       "focus": "#6ea8fe",
       "recording": "#ff6b63",
       "paused": "#e5b454",
       "available": "#71c48d",
       "errorSurface": "#3a2729",
+      "infoSurface": "#243142",
       "warningSurface": "#383126",
       "successSurface": "#25342c"
     },
@@ -43,15 +48,19 @@
     "info":    "#3b82f6"
   },
   "spacing": {
+    "0":  "0px",
     "1":  "4px",
     "2":  "8px",
     "3":  "12px",
     "4":  "16px",
     "5":  "20px",
     "6":  "24px",
+    "7":  "28px",
     "8":  "32px",
+    "9":  "36px",
     "10": "40px",
     "12": "48px",
+    "14": "56px",
     "16": "64px"
   },
   "typography": {
@@ -60,6 +69,7 @@
       "mono":  "SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace"
     },
     "fontSize": {
+      "2xs": "11px",
       "xs":   "12px",
       "sm":   "14px",
       "base": "16px",
@@ -94,11 +104,62 @@
     "lg":  "none",
     "xl":  "none"
   },
+  "borderWidth": {
+    "hairline": "1px",
+    "strong": "2px",
+    "focus": "2px"
+  },
+  "control": {
+    "height": {
+      "xs": "32px",
+      "sm": "36px",
+      "md": "40px",
+      "lg": "44px"
+    },
+    "icon": {
+      "sm": "32px",
+      "md": "40px"
+    }
+  },
+  "layout": {
+    "sidebar": {
+      "default": "184px",
+      "compact": "68px"
+    },
+    "panel": {
+      "recordList": "304px",
+      "timelineTree": "272px",
+      "dictionaryCategory": "208px",
+      "dictionaryDetail": "272px",
+      "note": "320px"
+    },
+    "content": {
+      "measure": "920px",
+      "measureWide": "1080px",
+      "settingsNavMin": "192px",
+      "settingsNavMax": "256px",
+      "modal": "960px",
+      "mobileListMax": "304px",
+      "statusValue": "96px"
+    }
+  },
+  "motion": {
+    "fast": "120ms",
+    "base": "160ms",
+    "slow": "180ms",
+    "spin": "800ms",
+    "blink": "1000ms"
+  },
+  "opacity": {
+    "disabled": "0.56",
+    "muted": "0.72"
+  },
   "zIndex": {
     "base":    "0",
     "raised":  "10",
     "overlay": "100",
     "modal":   "200",
-    "toast":   "300"
+    "toast":   "300",
+    "tooltip": "400"
   }
 }

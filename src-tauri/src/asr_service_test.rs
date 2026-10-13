@@ -98,7 +98,7 @@ impl Fixture {
 
     fn publish(
         &self,
-    ) -> Result<crate::domain::TranscriptRevision, crate::catalog::PublicationError> {
+    ) -> Result<Option<crate::domain::TranscriptRevision>, crate::catalog::PublicationError> {
         self.runtime
             .job_repository_with_clock(self.clock.clone())
             .publish(
@@ -139,7 +139,7 @@ impl Fixture {
 fn publishes_receipt_revision_segments_search_and_success_in_one_transaction() {
     let fixture = Fixture::new();
 
-    let revision = fixture.publish().unwrap();
+    let revision = fixture.publish().unwrap().unwrap();
 
     assert_eq!(revision.session_id, "session-1");
     assert_eq!(revision.number, 1);
@@ -206,6 +206,20 @@ fn publishes_receipt_revision_segments_search_and_success_in_one_transaction() {
 }
 
 #[test]
+fn publishes_silent_success_without_an_empty_revision() {
+    let fixture = Fixture::new();
+
+    let result = fixture
+        .runtime
+        .job_repository_with_clock(fixture.clock.clone())
+        .publish(&fixture.token, &receipt(), &[]);
+
+    assert!(result.is_ok());
+    assert_eq!(fixture.counts(), (1, 0, 0, 0, 0));
+    assert_eq!(fixture.job_state(), "succeeded");
+}
+
+#[test]
 fn every_publication_write_failure_rolls_back_all_evidence_and_job_state() {
     for point in PublicationFailurePoint::ALL {
         let fixture = Fixture::new();
@@ -253,7 +267,7 @@ fn cancellation_before_publication_produces_no_revision() {
 #[test]
 fn cancellation_after_commit_keeps_succeeded_revision() {
     let fixture = Fixture::new();
-    let revision = fixture.publish().unwrap();
+    let revision = fixture.publish().unwrap().unwrap();
 
     fixture
         .runtime

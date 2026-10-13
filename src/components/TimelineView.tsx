@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Search, Upload } from 'lucide-react'
+import { ArrowLeft, Search, Upload, X } from 'lucide-react'
 import { SessionTree } from './SessionTree'
 import { TranscriptView } from './TranscriptView'
 import { StatsBar } from './StatsBar'
 import { appendManualRevision, loadTimelineRecords } from '../data/adapter'
 import type { EvidenceRecord } from '../domain'
+import { exportRecordMarkdown } from '../services/markdown'
+import { getTimelineSearchSummary, type SegmentSelectionRequest } from './timelineSearch'
 
 interface TimelineViewProps {
   records: EvidenceRecord[]
@@ -19,10 +21,14 @@ interface TimelineViewProps {
 export function TimelineView({ records, onRecordsChange, onNotice, onImportAudio, loading = false, error = '', onRetry }: TimelineViewProps) {
   const [selectedId, setSelectedId] = useState(records[0]?.id ?? '')
   const [query, setQuery] = useState('')
+  const [viewMode, setViewMode] = useState<'list' | 'detail'>('list')
+  const [segmentRequest, setSegmentRequest] = useState<SegmentSelectionRequest | null>(null)
 
   useEffect(() => {
     if (!records.length) {
       setSelectedId('')
+      setViewMode('list')
+      setSegmentRequest(null)
       return
     }
     if (!records.some((record) => record.id === selectedId)) {
@@ -34,6 +40,13 @@ export function TimelineView({ records, onRecordsChange, onNotice, onImportAudio
     () => records.find((r) => r.id === selectedId) ?? records[0],
     [records, selectedId]
   )
+  const searchSummary = useMemo(() => getTimelineSearchSummary(records, query), [records, query])
+
+  const selectRecord = (id: string) => {
+    setSelectedId(id)
+    setViewMode('detail')
+    setSegmentRequest(null)
+  }
 
   const handleRevisionChange = async (draft: string) => {
     const record = records.find((candidate) => candidate.id === selectedId)
@@ -69,7 +82,7 @@ export function TimelineView({ records, onRecordsChange, onNotice, onImportAudio
   }
 
   return (
-    <main className="timeline-view">
+    <main className={`timeline-view timeline-view--${viewMode}`}>
       <header className="timeline-view__toolbar">
         <div className="search-field">
           <Search size={16} aria-hidden="true" />
@@ -80,35 +93,61 @@ export function TimelineView({ records, onRecordsChange, onNotice, onImportAudio
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
+          {query && (
+            <button className="search-field__clear" aria-label="清除搜索" title="清除搜索" onClick={() => setQuery('')}>
+              <X size={15} aria-hidden="true" />
+            </button>
+          )}
         </div>
-        <button className="button" onClick={() => void onImportAudio()}>
+        {query && (
+          <span className="timeline-view__search-summary" role="status" aria-live="polite">
+            {searchSummary.sessionCount} 个会话 · {searchSummary.matchCount} 处命中
+          </span>
+        )}
+        <button className="button" title="导入新的音频记录" onClick={() => void onImportAudio()}>
           <Upload size={16} />导入音频
         </button>
       </header>
 
-      {loading && <div role="status">正在从 Catalog 加载记录…</div>}
+      {loading && (
+        <div className="timeline-view__banner timeline-view__banner--loading" role="status" aria-live="polite">
+          正在从 Catalog 加载记录…
+        </div>
+      )}
       {!loading && error && (
-        <div role="alert">
-          时间线加载失败：{error}
+        <div className="timeline-view__banner timeline-view__banner--error" role="alert">
+          <span>时间线加载失败：{error}</span>
           {onRetry && <button className="text-button" onClick={() => void onRetry()}>重试时间线加载</button>}
         </div>
       )}
 
       {!loading && !error && <div className="timeline-view__content">
-        <SessionTree
-          records={records}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-          query={query}
-        />
-        {selectedRecord && (
-          <TranscriptView
-            record={selectedRecord}
+        <div className="timeline-view__list-pane">
+          <SessionTree
+            records={records}
+            selectedId={selectedId}
+            onSelect={selectRecord}
+            onSelectSegment={setSegmentRequest}
             query={query}
-            onRevisionChange={handleRevisionChange}
-            onNotice={onNotice}
           />
-        )}
+        </div>
+        <div className="timeline-view__detail-pane">
+          {selectedRecord && (
+            <>
+              <button className="timeline-view__back" onClick={() => setViewMode('list')}>
+                <ArrowLeft size={16} aria-hidden="true" />返回会话列表
+              </button>
+              <TranscriptView
+                record={selectedRecord}
+                query={query}
+                segmentRequest={segmentRequest}
+                onRevisionChange={handleRevisionChange}
+                onExportMarkdown={exportRecordMarkdown}
+                onNotice={onNotice}
+              />
+            </>
+          )}
+        </div>
       </div>}
 
       <StatsBar />

@@ -1,4 +1,4 @@
-pub(super) const CURRENT_VERSION: i64 = 5;
+pub(super) const CURRENT_VERSION: i64 = 6;
 pub(super) const FTS_TABLE: &str = "segment_search";
 pub(super) const FTS_SHADOWS: [&str; 5] = [
     "segment_search_config",
@@ -62,6 +62,31 @@ pub(super) const V4_TABLES: [&str; 15] = [
 pub(super) const V5_TABLES: [&str; 20] = [
     "asr_jobs",
     "asr_settings",
+    "chunks",
+    "dictionary_categories",
+    "dictionary_entries",
+    "model_download_artifacts",
+    "model_downloads",
+    "model_installations",
+    "notes",
+    "open_intent_ledger",
+    "operations",
+    "provider_receipts",
+    "revision_receipts",
+    "revisions",
+    "segment_search",
+    "segments",
+    "sessions",
+    "settings",
+    "tool_requests",
+    "voiceprints",
+];
+
+pub(super) const V6_TABLES: [&str; 22] = [
+    "asr_jobs",
+    "asr_settings",
+    "capture_chunk_timing",
+    "capture_sources",
     "chunks",
     "dictionary_categories",
     "dictionary_entries",
@@ -276,4 +301,35 @@ CREATE TABLE settings (
   key TEXT PRIMARY KEY,
   value_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);";
+
+pub(super) const V6_SCHEMA: &str = "
+CREATE TABLE capture_sources (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  source TEXT NOT NULL CHECK(source IN ('microphone', 'system_audio')),
+  device_uid TEXT NOT NULL,
+  device_name TEXT NOT NULL,
+  channel_count INTEGER NOT NULL CHECK(channel_count >= 1),
+  sample_rate_hz INTEGER NOT NULL CHECK(sample_rate_hz >= 1),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX capture_sources_session ON capture_sources(session_id, source);
+
+CREATE TABLE capture_chunk_timing (
+  chunk_id TEXT PRIMARY KEY REFERENCES chunks(id),
+  capture_source_id TEXT NOT NULL REFERENCES capture_sources(id),
+  source_sequence INTEGER NOT NULL CHECK(source_sequence >= 0),
+  source_sample_start INTEGER NOT NULL CHECK(source_sample_start >= 0),
+  source_sample_end INTEGER NOT NULL CHECK(source_sample_end >= source_sample_start),
+  session_start_ms INTEGER NOT NULL CHECK(session_start_ms >= 0),
+  session_end_ms INTEGER NOT NULL CHECK(session_end_ms >= session_start_ms),
+  monotonic_start_ns INTEGER NOT NULL CHECK(monotonic_start_ns >= 0),
+  monotonic_end_ns INTEGER NOT NULL CHECK(monotonic_end_ns >= monotonic_start_ns),
+  utc_start_at TEXT NOT NULL,
+  utc_end_at TEXT NOT NULL,
+  discontinuity_count INTEGER NOT NULL DEFAULT 0 CHECK(discontinuity_count >= 0),
+  dropped_frame_count INTEGER NOT NULL DEFAULT 0 CHECK(dropped_frame_count >= 0),
+  created_at TEXT NOT NULL,
+  UNIQUE(capture_source_id, source_sequence)
 );";

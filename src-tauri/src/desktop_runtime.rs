@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::thread::JoinHandle;
 
-use crate::capture::StreamingCapture;
+use crate::asr::worker::WorkerCallbacks;
 use crate::service::CoreRuntime;
 
 mod sealed {
@@ -12,8 +12,10 @@ mod sealed {
 }
 
 pub trait DesktopRuntimeFactory: sealed::DesktopRuntimeFactory {
-    fn create_capture() -> StreamingCapture;
-    fn spawn_worker(runtime: Arc<CoreRuntime>) -> (Arc<AtomicBool>, Option<JoinHandle<()>>);
+    fn spawn_worker(
+        runtime: Arc<CoreRuntime>,
+        callbacks: WorkerCallbacks,
+    ) -> (Arc<AtomicBool>, Option<JoinHandle<()>>);
 }
 
 pub trait NativeCaptureDesktopRuntimeFactory:
@@ -30,27 +32,29 @@ pub trait NativeAsrDesktopRuntimeFactory: DesktopRuntimeFactory + sealed::Native
 
 impl<T> NativeAsrDesktopRuntimeFactory for T where T: DesktopRuntimeFactory + sealed::NativeAsr {}
 
-pub struct FailClosedDesktopRuntimeFactory;
+pub struct NativeCaptureRuntimeFactory;
 
-impl sealed::DesktopRuntimeFactory for FailClosedDesktopRuntimeFactory {}
+impl sealed::DesktopRuntimeFactory for NativeCaptureRuntimeFactory {}
+impl sealed::NativeCapture for NativeCaptureRuntimeFactory {}
+impl sealed::NativeAsr for NativeCaptureRuntimeFactory {}
 
-impl DesktopRuntimeFactory for FailClosedDesktopRuntimeFactory {
-    fn create_capture() -> StreamingCapture {
-        StreamingCapture::default()
-    }
-
-    fn spawn_worker(runtime: Arc<CoreRuntime>) -> (Arc<AtomicBool>, Option<JoinHandle<()>>) {
+impl DesktopRuntimeFactory for NativeCaptureRuntimeFactory {
+    fn spawn_worker(
+        runtime: Arc<CoreRuntime>,
+        callbacks: WorkerCallbacks,
+    ) -> (Arc<AtomicBool>, Option<JoinHandle<()>>) {
         #[cfg(not(test))]
         {
-            let (shutdown, handle) = crate::asr::worker::spawn_fail_closed_worker(runtime);
+            let (shutdown, handle) =
+                crate::asr::worker::spawn_native_worker_with_callbacks(runtime, callbacks);
             (shutdown, Some(handle))
         }
         #[cfg(test)]
         {
-            let _ = runtime;
+            let _ = (runtime, callbacks);
             (Arc::new(AtomicBool::new(false)), None)
         }
     }
 }
 
-pub type ProductionDesktopRuntimeFactory = FailClosedDesktopRuntimeFactory;
+pub type ProductionDesktopRuntimeFactory = NativeCaptureRuntimeFactory;

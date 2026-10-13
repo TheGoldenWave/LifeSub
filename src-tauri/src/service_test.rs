@@ -9,7 +9,8 @@ use crate::asr::manifest::model_registry;
 use crate::asr::model_manager::{ModelCatalog, ModelInstallPlan, StoredInstallation};
 use crate::catalog::Catalog;
 use crate::domain::{
-    AsrErrorCode, AudioChunk, AudioSource, CaptureSession, ChunkIntegrityState, TranscriptSegment,
+    AsrErrorCode, AudioChunk, AudioSource, CaptureSession, CaptureState, ChunkIntegrityState,
+    TranscriptSegment,
 };
 use crate::service::{
     CoreRuntime, CoreRuntimeError, EvidenceService, EvidenceTarget, ImportFault,
@@ -212,6 +213,41 @@ fn invalidated_core_rejects_model_delete_and_reconcile_without_side_effects() {
     assert_eq!(
         runtime.catalog_ref().model_installation_records().unwrap(),
         before_installations
+    );
+}
+
+#[test]
+#[ignore = "set LIFESUB_RUN_REAL_MODEL_INSTALL=1 and LIFESUB_REAL_MODEL_DATA_DIR to install canonical LifeSub models"]
+fn installs_real_sense_voice_and_vad_into_lifesub_catalog() {
+    assert_eq!(
+        std::env::var("LIFESUB_RUN_REAL_MODEL_INSTALL").as_deref(),
+        Ok("1"),
+        "set LIFESUB_RUN_REAL_MODEL_INSTALL=1 to run the real model install gate"
+    );
+    let data_dir = std::env::var_os("LIFESUB_REAL_MODEL_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("set LIFESUB_REAL_MODEL_DATA_DIR to the canonical LifeSub app data directory");
+    let runtime = CoreRuntime::initialize(&data_dir).unwrap();
+    let device = crate::asr::model_manager::DeviceProfile::current();
+
+    for model_id in [
+        crate::asr::service::DEFAULT_VAD_MODEL_ID,
+        "sense-voice-small-int8-2024-07-17",
+    ] {
+        runtime
+            .ensure_model_installed(model_id, &device, || false)
+            .unwrap();
+        let lease = runtime.executable_installation(model_id).unwrap();
+        assert_eq!(lease.model_id(), model_id);
+    }
+}
+
+#[test]
+fn canonical_install_identity_includes_the_separate_vad_manifest() {
+    let vad = crate::asr::manifest::vad_manifest();
+    assert_eq!(
+        crate::service::current_install_identity(vad.id),
+        Some((vad.manifest_version, vad.bundle.identity_sha256))
     );
 }
 
@@ -862,6 +898,39 @@ fn production_initializer_automatically_reconciles_chunk_state() {
 }
 
 #[test]
+fn production_initializer_recovers_interrupted_capture_session_and_staging() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let data_dir = tempdir().unwrap();
+    let catalog = Catalog::in_memory().unwrap();
+    let session = CaptureSession::new("interrupted native capture")
+        .transition(CaptureState::Recording)
+        .unwrap();
+    catalog.insert_session(&session).unwrap();
+    let staging = data_dir.path().join("capture-staging").join(&session.id);
+    fs::create_dir_all(&staging).unwrap();
+    let current = staging.join("chk_11111111111111111111111111111111.wav.partial");
+    let legacy = staging.join("chk_22222222222222222222222222222222.microphone.caf.partial");
+    fs::write(&current, b"current partial").unwrap();
+    fs::set_permissions(&current, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&legacy, b"legacy partial").unwrap();
+
+    let catalog = EvidenceService::initialize(catalog, data_dir.path())
+        .unwrap()
+        .into_catalog();
+    let recovered = catalog
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.id == session.id)
+        .unwrap();
+
+    assert_eq!(recovered.state, CaptureState::Stopped);
+    assert_eq!(recovered.ended_at, Some(recovered.started_at));
+    assert!(!staging.exists());
+}
+
+#[test]
 fn production_reconciliation_keeps_recent_recognized_orphans() {
     let data_dir = tempdir().unwrap();
     let audio_dir = data_dir.path().join("audio");
@@ -876,6 +945,85 @@ fn production_reconciliation_keeps_recent_recognized_orphans() {
 
     assert!(temp.exists());
     assert!(final_file.exists());
+}
+
+#[test]
+fn production_startup_preserves_stale_native_final_for_catalog_retry() {
+    let data_dir = tempdir().unwrap();
+    let audio_dir = data_dir.path().join("audio");
+    fs::create_dir_all(&audio_dir).unwrap();
+    let native = audio_dir.join("chk_11111111111111111111111111111111.caf");
+    fs::write(&native, b"native orphan awaiting catalog retry").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&native)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+        )
+        .unwrap();
+
+    let service =
+        EvidenceService::initialize(Catalog::in_memory().unwrap(), data_dir.path()).unwrap();
+
+    assert_eq!(
+        fs::read(native).unwrap(),
+        b"native orphan awaiting catalog retry"
+    );
+    drop(service);
+}
+
+#[test]
+fn production_startup_cleans_strict_native_intent_temp() {
+    let data_dir = tempdir().unwrap();
+    let intents = data_dir.path().join(".lifesub-native-intents");
+    fs::create_dir(&intents).unwrap();
+    let stale = intents.join(format!(".lifesub-native-intent-{}.tmp", "b".repeat(32)));
+    fs::write(&stale, b"partial intent").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stale, fs::Permissions::from_mode(0o600)).unwrap();
+
+    EvidenceService::initialize(Catalog::in_memory().unwrap(), data_dir.path()).unwrap();
+
+    assert!(!stale.exists());
+}
+
+#[test]
+fn production_startup_rejects_unknown_or_symlinked_native_intent_temp() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    for case in ["unknown", "symlink", "wrong_mode"] {
+        let data_dir = tempdir().unwrap();
+        let intents = data_dir.path().join(".lifesub-native-intents");
+        fs::create_dir(&intents).unwrap();
+        let entry = match case {
+            "symlink" => {
+                let target = data_dir.path().join("outside-intent");
+                fs::write(&target, b"outside").unwrap();
+                let entry = intents.join(format!(".lifesub-native-intent-{}.tmp", "c".repeat(32)));
+                symlink(&target, &entry).unwrap();
+                entry
+            }
+            "wrong_mode" => {
+                let entry = intents.join(format!(".lifesub-native-intent-{}.tmp", "d".repeat(32)));
+                fs::write(&entry, b"wrong mode").unwrap();
+                fs::set_permissions(&entry, fs::Permissions::from_mode(0o644)).unwrap();
+                entry
+            }
+            _ => {
+                let entry = intents.join(".lifesub-native-intent-not-a-uuid.tmp");
+                fs::write(&entry, b"unknown").unwrap();
+                fs::set_permissions(&entry, fs::Permissions::from_mode(0o600)).unwrap();
+                entry
+            }
+        };
+
+        assert!(matches!(
+            EvidenceService::initialize(Catalog::in_memory().unwrap(), data_dir.path()),
+            Err(ServiceError::Io(_))
+        ));
+        assert!(entry.exists());
+    }
 }
 
 #[cfg(target_os = "macos")]

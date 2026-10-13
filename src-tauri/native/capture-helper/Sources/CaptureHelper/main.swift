@@ -2,7 +2,7 @@ import CaptureProtocol
 import Darwin
 import Foundation
 
-private func run() throws {
+private func run() async throws {
     guard let socketPath = ProcessInfo.processInfo.environment["LIFESUB_CAPTURE_SOCKET"] else {
         throw BootstrapChannelError.invalidSocketPath
     }
@@ -13,23 +13,20 @@ private func run() throws {
         nonceHex.removeAll(keepingCapacity: true)
         nonceHex.append(String(repeating: "0", count: 64))
     }
-    let hello = CaptureHeader.hello(
-        Hello(
-            protocolVersion: ProtocolLimits.version,
-            helperPid: UInt32(getpid()),
-            launchNonce: nonceHex,
-            supportedSources: [.microphone, .systemAudio]
-        )
-    )
-    var frame = try FrameCodec.encode(header: hello, payload: Data())
-    defer { frame.resetBytes(in: 0 ..< frame.count) }
     let connection = try BootstrapChannel.connect(to: socketPath)
-    try connection.write(contentsOf: frame)
-    while let data = try connection.read(upToCount: 1), !data.isEmpty {}
+    let sink = SocketCaptureEventSink(connection: connection)
+    let loop = HelperCommandLoop(
+        connection: connection,
+        nonceHex: nonceHex,
+        controllerFactory: LiveCaptureSessionFactory(events: sink)
+    )
+    // The authenticated hello is written above; the loop consumes framed control
+    // messages until an explicit shutdown or peer close.
+    try await loop.run()
 }
 
 do {
-    try run()
+    try await run()
     exit(EXIT_SUCCESS)
 } catch {
     exit(EXIT_FAILURE)

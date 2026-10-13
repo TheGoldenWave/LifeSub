@@ -15,10 +15,10 @@ fn migrates_real_v1_fixture_and_preserves_legacy_evidence() {
     drop(catalog);
 
     let mut connection = Connection::open(path).unwrap();
-    assert_eq!(user_version(&connection), 5);
+    assert_eq!(user_version(&connection), 6);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV5
+        SchemaKind::CurrentV6
     );
     let session: (String, String, String, String, Option<String>) = connection
         .query_row(
@@ -191,6 +191,52 @@ fn migration_failure_rolls_back_every_schema_change() {
 }
 
 #[test]
+fn v6_ddl_failure_rolls_back_real_v5_fixture_and_reopens_idempotently() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.sqlite3");
+    fs::copy(V5_FIXTURE, &path).unwrap();
+    let before_bytes = fs::read(&path).unwrap();
+    let mut connection = Connection::open(&path).unwrap();
+    let before_objects = user_objects(&connection);
+    let before_chunk: (String, String, i64) = connection
+        .query_row(
+            "SELECT path, sha256, byte_length FROM chunks WHERE id = 'chunk_v5_fixture'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+
+    let error = migrations::migrate_with_v6_hook(&mut connection, || {
+        Err(Error::SqliteFailure(
+            ffi::Error::new(ffi::SQLITE_ABORT),
+            Some("forced v6 post-ddl failure".to_owned()),
+        ))
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("forced v6 post-ddl failure"));
+    assert_eq!(user_version(&connection), 5);
+    assert_eq!(user_objects(&connection), before_objects);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT path, sha256, byte_length FROM chunks WHERE id = 'chunk_v5_fixture'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap(),
+        before_chunk
+    );
+    drop(connection);
+    assert_eq!(fs::read(&path).unwrap(), before_bytes);
+
+    let mut reopened = Connection::open(&path).unwrap();
+    migrations::migrate(&mut reopened).unwrap();
+    migrations::migrate(&mut reopened).unwrap();
+    assert_eq!(user_version(&reopened), 6);
+}
+
+#[test]
 fn migration_holds_immediate_lock_from_classification_through_commit() {
     let (_directory, path) = fixture_copy();
     let mut migration_connection = Connection::open(&path).unwrap();
@@ -291,9 +337,9 @@ fn two_connections_concurrently_migrate_the_same_v2_fixture() {
         worker.join().unwrap().unwrap();
     }
     let mut connection = Connection::open(path).unwrap();
-    assert_eq!(user_version(&connection), 5);
+    assert_eq!(user_version(&connection), 6);
     assert_eq!(
         migrations::classify(&mut connection).unwrap(),
-        SchemaKind::CurrentV5
+        SchemaKind::CurrentV6
     );
 }

@@ -8,7 +8,7 @@ LifeSub 由 goldenwave 与 Malow 产品协同打造，可作为 Malow 生态插�
 
 ## 当前版本
 
-`0.2.1` 已完成真实双源采集、本地 ASR、Catalog Job/Receipt/Revision 发布，以及签名 DMG 和安装版验收。安装版仍是 `0.2.1`。`0.2.2` 正在进行轻量稳定化，源码版本已经更新；完成验证和重新打包前，不把它称为已发布版本。开发与发布源以 [工作区状态](docs/workspace-status.md) 为准。
+`0.2.1` 已完成真实双源采集、本地 ASR、Catalog Job/Receipt/Revision 发布，以及签名 DMG 和安装版验收。`0.2.2` 正在进行轻量稳定化；当前 `/Applications/LifeSub.app` 已出现与 0.2.2 候选字节一致的安装副本，但新候选的实机验收未收口，不把它称为已发布版本。开发与发布源以 [工作区状态](docs/workspace-status.md) 为准。
 
 | 已交付能力 | 当前边界 |
 |---|---|
